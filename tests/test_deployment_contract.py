@@ -77,6 +77,10 @@ def test_release_workflow_cannot_build_without_verified_release_manifest():
     assert "release-preflight:" in workflow
     assert "benchmarks.evidence.release_manifest" in workflow
     assert "--verify" in workflow
+    assert '"$RUNNER_TEMP/release-evidence-manifest.json"' in workflow
+    assert "manifest_generate.outcome" in workflow
+    assert "manifest_verify.outcome" in workflow
+    assert "release-evidence-${{ github.sha }}" in workflow
     assert "needs: release-preflight" in workflow
 
 

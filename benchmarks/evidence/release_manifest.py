@@ -11,7 +11,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import subprocess
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -33,37 +35,40 @@ DATASETS = {
     "retrieval_cmrc2018": "benchmarks/.cache/cmrc2018-source/data/cmrc2018_dev.json",
     "skills_selection": "benchmarks/skills/github_issue_skill_selection.json",
 }
-# These files define the contract/evidence machinery.  The digest is not a
-# security signature; it is a stale-report detector and must be checked by a
-# separately protected CI job before release.
-SOURCE_PATHS = (
-    "agent/knowledge",
-    "agent/memory/governance",
-    "agent/retrieval",
-    "agent/skills",
-    "benchmarks/customer",
-    "benchmarks/evidence",
-    "benchmarks/knowledge",
-    "benchmarks/memory",
-    "benchmarks/retrieval",
-    "benchmarks/security",
-    "benchmarks/skills",
-    "channel/web",
-    "desktop/src",
-    ".github/workflows",
-    "docker/Dockerfile.latest",
-    ".dockerignore",
-    "requirements.txt",
-    "desktop/build/requirements-desktop.txt",
-)
+# The digest covers the full deliverable source tree, rather than a hand-picked
+# subset of "interesting" modules.  The digest is not a security signature;
+# it is a stale-report detector and must be checked by a separately protected
+# CI job before release.
+SOURCE_PATHS = (".",)
 EXCLUDED_PARTS = {
     ".git",
+    ".pytest_cache",
+    ".venv",
+    ".wrangler",
     "__pycache__",
     ".cache",
     "node_modules",
     "dist",
-    "build",
+    "tmp",
+    "workspace",
+    "logs",
+    "local",
     "results",
+}
+EXCLUDED_ROOT_PARTS = {"build", "ref"}
+EXCLUDED_PATH_PREFIXES = {
+    "desktop/build/build-work",
+    "desktop/build/dist",
+}
+EXCLUDED_FILENAMES = {
+    ".DS_Store",
+    ".preview_secret",
+    "config.json",
+    "config.yaml",
+    "client_config.json",
+    "nohup.out",
+    "plugins.json",
+    "user_datas.pkl",
 }
 
 
@@ -84,20 +89,57 @@ def sha256_file(path: Path) -> str:
 
 
 def _iter_source_files(root: Path) -> Iterable[Path]:
+    def is_excluded(relative: Path, *, directory: bool = False) -> bool:
+        parts = relative.parts
+        relative_text = relative.as_posix()
+        if any(part in EXCLUDED_PARTS for part in parts):
+            return True
+        if parts and parts[0] in EXCLUDED_ROOT_PARTS:
+            return True
+        if any(
+            relative_text == prefix or relative_text.startswith(prefix + "/")
+            for prefix in EXCLUDED_PATH_PREFIXES
+        ):
+            return True
+        if directory:
+            return False
+        return (
+            relative.name in EXCLUDED_FILENAMES
+            or relative.name.startswith("audit_")
+            or relative.suffix in {".log", ".pyc"}
+            or ".egg-info" in parts
+        )
+
     seen: set[Path] = set()
     for raw in SOURCE_PATHS:
         path = root / raw
-        candidates = path.rglob("*") if path.is_dir() else (path,)
-        for candidate in candidates:
-            if not candidate.is_file():
-                continue
-            relative = candidate.relative_to(root)
-            if any(part in EXCLUDED_PARTS for part in relative.parts):
-                continue
-            if candidate in seen:
-                continue
-            seen.add(candidate)
-            yield candidate
+        if path.is_file():
+            relative = path.relative_to(root)
+            if not is_excluded(relative) and path not in seen:
+                seen.add(path)
+                yield path
+            continue
+        if not path.is_dir():
+            continue
+        for directory_text, directory_names, file_names in os.walk(
+            path,
+            topdown=True,
+            followlinks=False,
+        ):
+            directory = Path(directory_text)
+            relative_directory = directory.relative_to(root)
+            directory_names[:] = [
+                name
+                for name in directory_names
+                if not is_excluded(relative_directory / name, directory=True)
+            ]
+            for name in file_names:
+                candidate = directory / name
+                relative = candidate.relative_to(root)
+                if is_excluded(relative) or candidate in seen:
+                    continue
+                seen.add(candidate)
+                yield candidate
 
 
 def source_fingerprint(root: Path) -> str:
@@ -158,6 +200,56 @@ def _load_json(path: Path) -> dict[str, Any] | None:
     except (OSError, UnicodeError, json.JSONDecodeError):
         return None
     return value if isinstance(value, dict) else None
+
+
+def _is_git_tracked_path(root: Path, path: Path) -> bool:
+    """Return whether ``path`` is currently tracked by the enclosing Git tree.
+
+    The release manifest is a generated, timestamped attestation artifact.  It
+    cannot be committed to the same tree whose cleanliness it records: writing
+    it would necessarily dirty that tree.  Source and formal input reports are
+    still checked independently by :func:`_git_state` and by report hashes.
+    """
+
+    try:
+        relative = path.resolve().relative_to(root)
+    except ValueError:
+        return False
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", "--", relative.as_posix()],
+            cwd=root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return False
+    return result.returncode == 0
+
+
+def _write_json_atomically(path: Path, payload: dict[str, Any]) -> None:
+    """Write a generated evidence artifact without exposing a partial JSON file."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    encoded = (
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
 
 
 def _report_record(root: Path, relative: str) -> dict[str, Any]:
@@ -258,7 +350,12 @@ def _apply_report_freshness(
             record["status"] = "STALE_SOURCE_REPORT"
 
 
-def generate_manifest(root: Path | None = None) -> dict[str, Any]:
+def generate_manifest(
+    root: Path | None = None,
+    *,
+    precomputed_source_fingerprint: str | None = None,
+    precomputed_git_state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     root = (root or _root()).resolve()
     reports = {name: _report_record(root, path) for name, path in REPORTS.items()}
     _apply_report_freshness(root, reports)
@@ -268,7 +365,7 @@ def generate_manifest(root: Path | None = None) -> dict[str, Any]:
         reports["web_boundary_security"]["passed"]
         and reports["web_boundary_verification"]["passed"]
     )
-    git = _git_state(root)
+    git = precomputed_git_state or _git_state(root)
 
     hard_denials = {
         "FDE_CASE_EVIDENCE": "ABSENT",
@@ -324,7 +421,11 @@ def generate_manifest(root: Path | None = None) -> dict[str, Any]:
         "schema_version": SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "repository_root": str(root),
-        "source_fingerprint_sha256": source_fingerprint(root),
+        "source_fingerprint_sha256": (
+            precomputed_source_fingerprint
+            if precomputed_source_fingerprint is not None
+            else source_fingerprint(root)
+        ),
         "git": git,
         "reports": reports,
         "datasets": datasets,
@@ -342,12 +443,23 @@ def verify_manifest(manifest: dict[str, Any], root: Path | None = None) -> dict[
         checks.append({"name": name, "actual": actual, "expected": expected, "passed": bool(passed)})
 
     check("schema_version", manifest.get("schema_version"), SCHEMA_VERSION, manifest.get("schema_version") == SCHEMA_VERSION)
-    check("source_fingerprint", manifest.get("source_fingerprint_sha256"), source_fingerprint(root), manifest.get("source_fingerprint_sha256") == source_fingerprint(root))
+    current_source_fingerprint = source_fingerprint(root)
+    check(
+        "source_fingerprint",
+        manifest.get("source_fingerprint_sha256"),
+        current_source_fingerprint,
+        manifest.get("source_fingerprint_sha256") == current_source_fingerprint,
+    )
     current_git = _git_state(root)
-    check("git.commit", manifest.get("git", {}).get("commit"), current_git["commit"], manifest.get("git", {}).get("commit") == current_git["commit"])
-    check("git.clean", manifest.get("git", {}).get("clean"), current_git["clean"], manifest.get("git", {}).get("clean") == current_git["clean"])
-    check("git.commit_bound", manifest.get("git", {}).get("commit_bound"), current_git["commit_bound"], manifest.get("git", {}).get("commit_bound") == current_git["commit_bound"])
-    check("git.tracked_source_count", manifest.get("git", {}).get("tracked_source_count"), current_git["tracked_source_count"], manifest.get("git", {}).get("tracked_source_count") == current_git["tracked_source_count"])
+    declared_git = manifest.get("git")
+    declared_git = declared_git if isinstance(declared_git, dict) else {}
+    for field, expected in current_git.items():
+        check(
+            f"git.{field}",
+            declared_git.get(field),
+            expected,
+            declared_git.get(field) == expected,
+        )
 
     current_reports = {
         name: _report_record(root, relative) for name, relative in REPORTS.items()
@@ -379,7 +491,11 @@ def verify_manifest(manifest: dict[str, Any], root: Path | None = None) -> dict[
         current = _dataset_record(root, relative)
         check(f"dataset.{name}.sha256", expected.get("sha256"), current.get("sha256"), expected.get("sha256") == current.get("sha256"))
 
-    recomputed = generate_manifest(root)
+    recomputed = generate_manifest(
+        root,
+        precomputed_source_fingerprint=current_source_fingerprint,
+        precomputed_git_state=current_git,
+    )
     required = manifest.get("required_conditions")
     recomputed_required = recomputed["required_conditions"]
     check("required_conditions", required, recomputed_required, required == recomputed_required)
@@ -406,20 +522,38 @@ def verify_manifest(manifest: dict[str, Any], root: Path | None = None) -> dict[
 
 def main(arguments: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Generate or verify release evidence")
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help=(
+            "generated manifest artifact path; generation refuses a Git-tracked "
+            "path so the attested checkout remains clean"
+        ),
+    )
     parser.add_argument("--verify", action="store_true")
     args = parser.parse_args(arguments)
     root = _root()
+    output = args.output.resolve()
     if args.verify:
-        manifest = _load_json(args.output)
+        manifest = _load_json(output)
         if manifest is None:
             print(json.dumps({"passed": False, "error": "invalid manifest"}, ensure_ascii=False, indent=2))
             return 1
         result = verify_manifest(manifest, root)
     else:
+        if _is_git_tracked_path(root, output):
+            result = {
+                "passed": False,
+                "error": (
+                    "refusing to write a release manifest to a Git-tracked path; "
+                    "generate it as an external release artifact instead"
+                ),
+            }
+            print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+            return 1
         manifest = generate_manifest(root)
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        _write_json_atomically(output, manifest)
         result = {"schema_version": 1, "passed": manifest["passed"], "manifest": manifest}
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
     return 0 if result["passed"] else 1

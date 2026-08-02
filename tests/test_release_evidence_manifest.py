@@ -2,15 +2,65 @@
 
 import copy
 import json
+import subprocess
 from pathlib import Path
 
 from benchmarks.evidence.release_manifest import (
+    _is_git_tracked_path,
+    _iter_source_files,
     generate_manifest,
+    main,
     verify_manifest,
 )
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_release_source_fingerprint_covers_full_delivery_control_plane():
+    source_paths = {
+        path.relative_to(ROOT).as_posix() for path in _iter_source_files(ROOT)
+    }
+    assert {
+        ".gitignore",
+        ".github/workflows/release.yml",
+        "agent/tools/scheduler/scheduler_tool.py",
+        "bridge/agent_bridge.py",
+        "channel/web/web_channel.py",
+        "desktop/build/requirements-desktop.txt",
+        "desktop/src/renderer/src/api/client.ts",
+        "tests/test_release_evidence_manifest.py",
+    } <= source_paths
+    assert "benchmarks/results/release-evidence-manifest.json" not in source_paths
+    assert ".preview_secret" not in source_paths
+    assert not any(path.startswith("tmp/") for path in source_paths)
+
+
+def test_release_manifest_is_an_ignored_generated_artifact_not_tracked_source(
+    tmp_path: Path,
+):
+    output = ROOT / "benchmarks/results/release-evidence-manifest.json"
+    assert _is_git_tracked_path(ROOT, output) is False
+    ignored = subprocess.run(
+        ["git", "check-ignore", "--quiet", "--", output.relative_to(ROOT).as_posix()],
+        cwd=ROOT,
+        check=False,
+    )
+    assert ignored.returncode == 0
+
+    tracked_output = ROOT / ".gitignore"
+    original = tracked_output.read_bytes()
+    assert _is_git_tracked_path(ROOT, tracked_output) is True
+    assert main(["--output", str(tracked_output)]) == 1
+    assert tracked_output.read_bytes() == original
+
+    generated_output = tmp_path / "release-evidence-manifest.json"
+    assert main(["--output", str(generated_output)]) == 1
+    generated = json.loads(generated_output.read_text(encoding="utf-8"))
+    result = verify_manifest(generated, ROOT)
+    assert result["integrity_passed"] is True
+    assert result["passed"] is False
+    assert not list(tmp_path.glob(".*.tmp"))
 
 
 def test_release_manifest_is_explicitly_fail_closed_on_missing_external_gates():
@@ -94,6 +144,33 @@ def test_release_manifest_verifier_rejects_every_hard_denial_mutation():
             check["name"] == "hard_denials" and not check["passed"]
             for check in result["checks"]
         ), name
+
+
+def test_release_manifest_verifier_rejects_every_git_binding_mutation():
+    manifest = generate_manifest(ROOT)
+    for name, value in manifest["git"].items():
+        tampered = copy.deepcopy(manifest)
+        if isinstance(value, bool):
+            tampered["git"][name] = not value
+        elif isinstance(value, int):
+            tampered["git"][name] = value + 1
+        else:
+            tampered["git"][name] = "FORGED"
+        result = verify_manifest(tampered, ROOT)
+        assert result["integrity_passed"] is False, name
+        assert any(
+            check["name"] == f"git.{name}" and not check["passed"]
+            for check in result["checks"]
+        ), name
+
+    malformed = copy.deepcopy(manifest)
+    malformed["git"] = "FORGED"
+    result = verify_manifest(malformed, ROOT)
+    assert result["integrity_passed"] is False
+    assert any(
+        check["name"] == "git.commit" and not check["passed"]
+        for check in result["checks"]
+    )
 
 
 def test_release_manifest_verifier_rejects_missing_or_unknown_hard_denial_fields():

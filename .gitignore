@@ -62,7 +62,11 @@ benchmarks/results/*.json
 !benchmarks/results/customer-skill-acceptance.json
 !benchmarks/results/web-boundary-security.json
 !benchmarks/results/web-boundary-security-verification.json
-!benchmarks/results/release-evidence-manifest.json
+# The release manifest contains a generation timestamp and is an artifact that
+# binds a checked-out commit.  It is generated outside the tracked source tree
+# (CI uploads it together with independent verification); tracking it would
+# make every generation dirty the checkout it is meant to attest.
+benchmarks/results/release-evidence-manifest.json
 
 # cow cli
 dist/

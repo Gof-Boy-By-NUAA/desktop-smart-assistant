@@ -59,11 +59,40 @@ jobs:
           tests/test_web_session_security.py
           tests/test_release_evidence_manifest.py
 
-      - name: Refuse release unless the manifest verifies
+      # The manifest is deliberately generated outside the checked-out source
+      # tree.  It carries a timestamp and attests this exact clean checkout, so
+      # committing the output would make every generation self-dirty.
+      - name: Generate release manifest for exact checkout
+        id: manifest_generate
+        continue-on-error: true
         run: >-
           python -m benchmarks.evidence.release_manifest
-          --output benchmarks/results/release-evidence-manifest.json
-          --verify
+          --output "$RUNNER_TEMP/release-evidence-manifest.json"
+
+      - name: Independently verify generated release manifest
+        id: manifest_verify
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m benchmarks.evidence.release_manifest \
+            --output "$RUNNER_TEMP/release-evidence-manifest.json" \
+            --verify | tee "$RUNNER_TEMP/release-evidence-verification.json"
+
+      - name: Upload release evidence, including failed gates
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-evidence-${{ github.sha }}
+          path: ${{ runner.temp }}/release-evidence-*.json
+          if-no-files-found: error
+
+      - name: Refuse release unless generated evidence independently verifies
+        if: always()
+        shell: bash
+        run: |
+          test "${{ steps.manifest_generate.outcome }}" = "success"
+          test "${{ steps.manifest_verify.outcome }}" = "success"
 
   build:
     name: Build ${{ matrix.name }}
