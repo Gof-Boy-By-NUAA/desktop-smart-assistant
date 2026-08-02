@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 
 from benchmarks.evidence.release_manifest import (
+    _git_state,
     _is_git_tracked_path,
     _iter_source_files,
     generate_manifest,
@@ -34,6 +35,12 @@ def test_release_source_fingerprint_covers_full_delivery_control_plane():
     assert "benchmarks/results/release-evidence-manifest.json" not in source_paths
     assert ".preview_secret" not in source_paths
     assert not any(path.startswith("tmp/") for path in source_paths)
+
+
+def test_git_binding_uses_unquoted_non_ascii_paths():
+    state = _git_state(ROOT)
+    assert state["all_source_paths_tracked"] is True
+    assert state["source_file_count"] == state["tracked_source_count"]
 
 
 def test_release_manifest_is_an_ignored_generated_artifact_not_tracked_source(
@@ -80,12 +87,8 @@ def test_release_manifest_is_explicitly_fail_closed_on_missing_external_gates():
     assert manifest["required_conditions"]["skills_formal_gate"] is False
 
 
-def test_release_manifest_verifier_accepts_current_manifest():
-    manifest = json.loads(
-        (ROOT / "benchmarks/results/release-evidence-manifest.json").read_text(
-            encoding="utf-8"
-        )
-    )
+def test_release_manifest_verifier_accepts_currently_generated_manifest():
+    manifest = generate_manifest(ROOT)
     result = verify_manifest(manifest, ROOT)
     assert result["passed"] is False
     assert all(

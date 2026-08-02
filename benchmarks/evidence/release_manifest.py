@@ -165,11 +165,28 @@ def _git_state(root: Path) -> dict[str, Any]:
             return None
         return result.stdout.strip()
 
+    def run_nul(*args: str) -> set[str] | None:
+        """Read Git path output without C-style quoting non-ASCII filenames."""
+
+        try:
+            result = subprocess.run(
+                ["git", *args],
+                cwd=root,
+                check=True,
+                capture_output=True,
+            )
+        except (OSError, subprocess.CalledProcessError):
+            return None
+        return {
+            os.fsdecode(value)
+            for value in result.stdout.split(b"\0")
+            if value
+        }
+
     commit = run("rev-parse", "HEAD")
     prefix = run("rev-parse", "--show-prefix")
     status = run("status", "--porcelain", "--", ".")
-    tracked_raw = run("ls-files", "--full-name", "--", ".")
-    tracked = set((tracked_raw or "").splitlines())
+    tracked = run_nul("ls-files", "-z", "--full-name", "--", ".") or set()
     source_files = list(_iter_source_files(root))
     if prefix is not None:
         normalized_prefix = prefix.replace("\\", "/")
