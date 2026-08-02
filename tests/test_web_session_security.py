@@ -138,7 +138,7 @@ def test_legacy_web_rows_migrate_to_non_claimable_legacy_owner(tmp_path):
         store.claim_session("legacy-web-session", "web:" + "c" * 32)
 
 
-def test_v3_auth_tokens_use_fixed_expiry_policy_epoch_and_logout_revocation(monkeypatch):
+def test_v3_auth_tokens_use_fixed_expiry_policy_epoch_and_logout_revocation(monkeypatch, tmp_path):
     from channel.web import web_channel
 
     config = {"web_password": "correct horse battery staple", "web_session_expire_days": 30}
@@ -161,10 +161,24 @@ def test_v3_auth_tokens_use_fixed_expiry_policy_epoch_and_logout_revocation(monk
     assert web_channel._parse_auth_token(first) is None
     assert web_channel._parse_auth_token(second)["subject_id"] == subject_id
 
+    owner_id = f"web:{subject_id}"
+    target = tmp_path / "logout-revoked.txt"
+    target.write_text("sensitive", encoding="utf-8")
+    file_capability = web_channel._encode_file_capability(str(target), owner_id)
+    preview_capability = web_channel._encode_dir_token(str(tmp_path), owner_id)
+    stream_ticket = web_channel._issue_stream_ticket(owner_id, "logout-revocation")
+    log_ticket = web_channel._issue_log_stream_ticket(owner_id)
+
     with patch.object(web_channel, "_request_auth_tokens", return_value=[second]):
         assert web_channel._get_auth_principal() == f"web:{subject_id}"
         web_channel._revoke_request_auth_token()
     assert not web_channel._verify_auth_token(second)
+    with pytest.raises(ValueError, match="Revoked"):
+        web_channel._decode_file_capability(file_capability.removeprefix("/file/"))
+    with pytest.raises(ValueError, match="Revoked"):
+        web_channel._decode_dir_token(preview_capability)
+    assert web_channel._consume_stream_ticket(stream_ticket, "logout-revocation") is None
+    assert web_channel._consume_log_stream_ticket(log_ticket) is None
 
     third = web_channel._create_auth_token(subject_id)
     tampered = third[:-1] + ("0" if third[-1] != "0" else "1")
@@ -178,15 +192,32 @@ def test_v3_auth_tokens_use_fixed_expiry_policy_epoch_and_logout_revocation(monk
 
 
 
-def test_auth_policy_ttl_change_cannot_resurrect_old_bearer(monkeypatch):
+def test_auth_policy_ttl_change_cannot_resurrect_old_bearer_or_url_capability(
+    monkeypatch, tmp_path
+):
     from channel.web import web_channel
 
     config = {"web_password": "policy-password", "web_session_expire_days": 30}
     monkeypatch.setattr(web_channel, "conf", lambda: config)
-    token = web_channel._create_auth_token("9" * 32)
+    monkeypatch.setattr(web_channel, "_PREVIEW_SECRET", b"policy-secret" * 3)
+    subject_id = "9" * 32
+    owner_id = f"web:{subject_id}"
+    token = web_channel._create_auth_token(subject_id)
     assert web_channel._verify_auth_token(token)
+    target = tmp_path / "policy-revoked.txt"
+    target.write_text("sensitive", encoding="utf-8")
+    file_capability = web_channel._encode_file_capability(str(target), owner_id)
+    preview_capability = web_channel._encode_dir_token(str(tmp_path), owner_id)
+    stream_ticket = web_channel._issue_stream_ticket(owner_id, "policy-revocation")
+    log_ticket = web_channel._issue_log_stream_ticket(owner_id)
     config["web_session_expire_days"] = 1
     assert not web_channel._verify_auth_token(token)
+    with pytest.raises(ValueError, match="Revoked"):
+        web_channel._decode_file_capability(file_capability.removeprefix("/file/"))
+    with pytest.raises(ValueError, match="Revoked"):
+        web_channel._decode_dir_token(preview_capability)
+    assert web_channel._consume_stream_ticket(stream_ticket, "policy-revocation") is None
+    assert web_channel._consume_log_stream_ticket(log_ticket) is None
     config["web_session_expire_days"] = 30
     assert not web_channel._verify_auth_token(token)
 
@@ -547,6 +578,40 @@ def test_uploads_are_scoped_to_authenticated_owner(monkeypatch, tmp_path):
         assert web_channel.UploadsHandler().GET("secret.txt") == b"owner-secret"
 
 
+def test_preview_mount_rejects_foreign_owner_upload_even_with_signed_token(
+    monkeypatch, tmp_path
+):
+    """A confused internal caller must not turn an owner A directory into B's preview."""
+
+    from channel.web import web_channel
+
+    owner = "web:" + "7" * 32
+    attacker = "web:" + "8" * 32
+    monkeypatch.setattr(
+        web_channel,
+        "conf",
+        lambda: {"agent_workspace": str(tmp_path), "web_password": "password"},
+    )
+    monkeypatch.setattr(web_channel, "_PREVIEW_SECRET", b"preview-owner-scope" * 2)
+    owner_dir = Path(web_channel._owner_upload_dir(owner))
+    secret = owner_dir / "secret.txt"
+    secret.write_bytes(b"owner-secret")
+
+    # The token is syntactically authentic but was deliberately issued under a
+    # different owner. PreviewHandler must still reject it at the upload-root
+    # ownership boundary instead of trusting a directory capability alone.
+    attacker_token = web_channel._encode_dir_token(str(owner_dir), attacker)
+    with patch.object(web_channel.web, "header"):
+        with pytest.raises(Exception):
+            web_channel.PreviewHandler().GET(f"{attacker_token}/{secret.name}")
+
+    owner_token = web_channel._encode_dir_token(str(owner_dir), owner)
+    with patch.object(web_channel.web, "header"):
+        assert web_channel.PreviewHandler().GET(
+            f"{owner_token}/{secret.name}"
+        ) == b"owner-secret"
+
+
 def test_generic_file_and_workspace_resolve_cannot_bypass_upload_owner_scope(monkeypatch, tmp_path):
     from channel.web import web_channel
 
@@ -591,12 +656,14 @@ def test_preview_capability_uses_full_hmac_and_expires(monkeypatch, tmp_path):
     monkeypatch.setattr(web_channel, "_PREVIEW_SECRET", b"p" * 32)
     monkeypatch.setattr(web_channel, "conf", lambda: {"web_preview_token_ttl_seconds": 60})
     monkeypatch.setattr(web_channel.time, "time", lambda: 1_000.0)
-    token = web_channel._encode_dir_token(str(directory))
+    owner_id = "web:" + "1" * 32
+    token = web_channel._encode_dir_token(str(directory), owner_id)
     parts = token.split(".")
-    assert parts[0] == "v2"
-    assert len(parts) == 4
+    assert parts[0] == "p3"
+    assert len(parts) == 3
     assert len(parts[-1]) == 64
     assert web_channel._decode_dir_token(token) == str(directory)
+    assert web_channel._decode_dir_capability(token) == (str(directory), owner_id)
 
     tampered = token[:-1] + ("0" if token[-1] != "0" else "1")
     with pytest.raises(ValueError):

@@ -76,9 +76,11 @@
     },
     {
       "details": {
-        "revoked": true
+        "auth_nonce_revoked": true,
+        "file_and_preview_revoked": true,
+        "unconsumed_tickets_revoked": true
       },
-      "name": "auth_logout_revokes_presented_nonce",
+      "name": "auth_logout_revokes_auth_and_url_capabilities",
       "passed": true
     },
     {
@@ -108,7 +110,8 @@
     {
       "details": {
         "expiry_rejected": true,
-        "hmac_hex_chars": 64
+        "hmac_hex_chars": 64,
+        "owner_bound": true
       },
       "name": "preview_capability_full_hmac_and_expiry",
       "passed": true
@@ -240,7 +243,7 @@
     "session_citation_resolves_without_client_session_claim",
     "session_citation_tamper_rejected",
     "session_citation_cross_principal_rejected",
-    "auth_logout_revokes_presented_nonce",
+    "auth_logout_revokes_auth_and_url_capabilities",
     "auth_restart_invalidates_bearer",
     "password_rotation_preserves_non_auth_subject",
     "public_bind_without_password_fails_closed",
@@ -260,6 +263,6 @@
     "legacy_bearer_file_and_log_url_bypasses_rejected"
   ],
   "schema_version": 1,
-  "source_fingerprint_sha256": "ff67c8530d9e90778b2d99b6858a4697b6edccb1e7151c0172ac1ba134f0dc6e",
+  "source_fingerprint_sha256": "959df8df2efbe895be7c72a3e5e245854175b9ebea9fb409e11543e4623c72f7",
   "status": "completed"
 }

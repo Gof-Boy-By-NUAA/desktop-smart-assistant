@@ -132,7 +132,7 @@ def test_file_capability_is_short_lived_and_bound_to_exact_owner_and_path(monkey
     target.write_text("private artifact", encoding="utf-8")
     owner = "web:" + "b" * 32
     token_url = web_channel._encode_file_capability(str(target), owner)
-    assert token_url.startswith("/file/f1.")
+    assert token_url.startswith("/file/f2.")
     capability = token_url.removeprefix("/file/")
 
     resolved_path, resolved_owner = web_channel._decode_file_capability(capability)
@@ -191,8 +191,8 @@ def test_history_file_capabilities_are_fresh_owner_bound_and_non_mutating(
 
     attachment_url = decorated["messages"][0]["attachment_urls"][str(target)]
     payload = json.loads(decorated["messages"][1]["steps"][0]["result"])
-    assert attachment_url.startswith("/file/f1.")
-    assert payload["url"].startswith("/file/f1.")
+    assert attachment_url.startswith("/file/f2.")
+    assert payload["url"].startswith("/file/f2.")
     assert "token=" not in payload["url"]
     resolved_path, resolved_owner = web_channel._decode_file_capability(
         attachment_url.removeprefix("/file/")

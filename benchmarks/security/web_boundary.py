@@ -40,7 +40,7 @@ REQUIRED_CHECKS = (
     "session_citation_resolves_without_client_session_claim",
     "session_citation_tamper_rejected",
     "session_citation_cross_principal_rejected",
-    "auth_logout_revokes_presented_nonce",
+    "auth_logout_revokes_auth_and_url_capabilities",
     "auth_restart_invalidates_bearer",
     "password_rotation_preserves_non_auth_subject",
     "public_bind_without_password_fails_closed",
@@ -440,8 +440,17 @@ def run_checks(root: Path | None = None) -> List[Dict[str, Any]]:
             with web_channel._stream_ticket_lock:
                 web_channel._stream_tickets.clear()
             subject = "e" * 32
+            owner = f"web:{subject}"
             subject_token = web_channel._create_auth_subject_token(subject)
             token = web_channel._create_auth_token(subject)
+            revocable_file = tmp / "logout-revocable.txt"
+            revocable_file.write_text("private", encoding="utf-8")
+            file_capability = web_channel._encode_file_capability(
+                str(revocable_file), owner
+            )
+            preview_capability = web_channel._encode_dir_token(str(tmp.resolve()), owner)
+            stream_ticket = web_channel._issue_stream_ticket(owner, "logout-revocation")
+            log_ticket = web_channel._issue_log_stream_ticket(owner)
 
             def logout_revoke():
                 original_tokens = web_channel._request_auth_tokens
@@ -452,7 +461,24 @@ def run_checks(root: Path | None = None) -> List[Dict[str, Any]]:
                     web_channel._request_auth_tokens = original_tokens
                 if web_channel._verify_auth_token(token):
                     raise AssertionError("revoked token remained valid")
-                return {"revoked": True}
+                for capability in (file_capability.removeprefix("/file/"), preview_capability):
+                    try:
+                        if capability == preview_capability:
+                            web_channel._decode_dir_token(capability)
+                        else:
+                            web_channel._decode_file_capability(capability)
+                    except ValueError:
+                        continue
+                    raise AssertionError("logout-revoked URL capability remained valid")
+                if web_channel._consume_stream_ticket(stream_ticket, "logout-revocation") is not None:
+                    raise AssertionError("logout-revoked SSE ticket remained usable")
+                if web_channel._consume_log_stream_ticket(log_ticket) is not None:
+                    raise AssertionError("logout-revoked log ticket remained usable")
+                return {
+                    "auth_nonce_revoked": True,
+                    "file_and_preview_revoked": True,
+                    "unconsumed_tickets_revoked": True,
+                }
 
             _record(checks, REQUIRED_CHECKS[10], logout_revoke)
 
@@ -492,19 +518,31 @@ def run_checks(root: Path | None = None) -> List[Dict[str, Any]]:
 
             def preview():
                 config["web_preview_token_ttl_seconds"] = 60
+                preview_owner = "web:" + "a" * 32
                 original_time = web_channel.time.time
                 try:
                     web_channel.time.time = lambda: 1000.0
-                    token_value = web_channel._encode_dir_token(str(tmp.resolve()))
+                    token_value = web_channel._encode_dir_token(
+                        str(tmp.resolve()), preview_owner
+                    )
                     if len(token_value.split(".")[-1]) != 64:
                         raise AssertionError("preview HMAC truncated")
                     if web_channel._decode_dir_token(token_value) != str(tmp.resolve()):
                         raise AssertionError("preview token did not round-trip")
+                    if web_channel._decode_dir_capability(token_value) != (
+                        str(tmp.resolve()),
+                        preview_owner,
+                    ):
+                        raise AssertionError("preview token lost owner scope")
                     web_channel.time.time = lambda: 1061.0
                     try:
                         web_channel._decode_dir_token(token_value)
                     except ValueError:
-                        return {"hmac_hex_chars": 64, "expiry_rejected": True}
+                        return {
+                            "hmac_hex_chars": 64,
+                            "expiry_rejected": True,
+                            "owner_bound": True,
+                        }
                     raise AssertionError("expired preview token resolved")
                 finally:
                     web_channel.time.time = original_time

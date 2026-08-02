@@ -359,6 +359,13 @@ _STREAM_TICKET_TTL_SECONDS = 60
 _log_stream_tickets = {}  # ticket -> {owner_id, expiry}; consumed on GET
 _log_stream_ticket_lock = threading.Lock()
 _LOG_STREAM_TICKET_TTL_SECONDS = 60
+# URL-borne capabilities cannot carry an Authorization header.  Keep a
+# per-owner, process-local epoch so logout invalidates the short-lived links,
+# preview mounts and unconsumed EventSource tickets it issued.  The auth-policy
+# epoch below also invalidates them across password/session policy changes and
+# process restart.
+_url_capability_epochs = {}  # canonical owner key -> monotonically increasing int
+_url_capability_epoch_lock = threading.Lock()
 _login_attempts = {}  # client key -> [window_start, failed_attempts]
 _login_attempts_lock = threading.Lock()
 _LOGIN_WINDOW_SECONDS = 300
@@ -393,6 +400,43 @@ def _current_auth_policy_epoch() -> bytes:
             _auth_policy_fingerprint = fingerprint
             _auth_policy_epoch = uuid.uuid4().bytes
         return _auth_policy_epoch
+
+
+def _url_capability_owner_key(owner_id: Optional[str]) -> str:
+    """Return a stable map key without changing the serialized owner claim."""
+
+    return str(owner_id or "web:legacy")
+
+
+def _current_url_capability_epoch(owner_id: Optional[str]) -> str:
+    """Return the policy + per-owner revocation epoch for URL capabilities.
+
+    The random policy epoch deliberately changes after restart as well as after
+    password/session policy change.  That makes a durable file-signing secret
+    insufficient to replay an old URL in a new process.
+    """
+
+    policy_epoch = _current_auth_policy_epoch().hex()
+    owner_key = _url_capability_owner_key(owner_id)
+    with _url_capability_epoch_lock:
+        owner_epoch = _url_capability_epochs.get(owner_key, 0)
+    return f"{policy_epoch}:{owner_epoch}"
+
+
+def _revoke_owner_url_capabilities(owner_id: Optional[str]) -> None:
+    """Invalidate one owner's URL capabilities and unconsumed stream tickets."""
+
+    owner_key = _url_capability_owner_key(owner_id)
+    with _url_capability_epoch_lock:
+        _url_capability_epochs[owner_key] = _url_capability_epochs.get(owner_key, 0) + 1
+    with _stream_ticket_lock:
+        for ticket, record in list(_stream_tickets.items()):
+            if record.get("owner_id") == owner_id:
+                _stream_tickets.pop(ticket, None)
+    with _log_stream_ticket_lock:
+        for ticket, record in list(_log_stream_tickets.items()):
+            if record.get("owner_id") == owner_id:
+                _log_stream_tickets.pop(ticket, None)
 
 
 def _auth_signature(payload: str) -> str:
@@ -625,9 +669,13 @@ def _revoke_request_auth_token() -> None:
         parsed = _parse_auth_token(token, require_fresh=True)
         if parsed is not None:
             parsed_tokens.append(parsed)
+    owner_ids = set()
     with _revoked_auth_lock:
         for parsed in parsed_tokens:
             _revoked_auth_nonces[parsed["nonce"]] = parsed["expiry"]
+            owner_ids.add(f"web:{parsed['subject_id']}")
+    for owner_id in owner_ids:
+        _revoke_owner_url_capabilities(owner_id)
 
 
 def _parse_sse_event_cursor(value: Any) -> int:
@@ -651,6 +699,7 @@ def _issue_stream_ticket(owner_id: str, request_id: str, after_event_id: int = 0
             "owner_id": owner_id,
             "request_id": request_id,
             "after_event_id": _parse_sse_event_cursor(after_event_id),
+            "capability_epoch": _current_url_capability_epoch(owner_id),
             "expiry": now + _STREAM_TICKET_TTL_SECONDS,
         }
     return ticket
@@ -668,7 +717,12 @@ def _consume_stream_ticket_record(ticket: str, request_id: str) -> Optional[dict
         if record["request_id"] != request_id:
             return None
         _stream_tickets.pop(ticket, None)
-        return record
+    if not hmac.compare_digest(
+        str(record.get("capability_epoch") or ""),
+        _current_url_capability_epoch(record["owner_id"]),
+    ):
+        return None
+    return record
 
 
 def _consume_stream_ticket(ticket: str, request_id: str) -> Optional[str]:
@@ -688,6 +742,7 @@ def _issue_log_stream_ticket(owner_id: str) -> str:
                 _log_stream_tickets.pop(stale, None)
         _log_stream_tickets[ticket] = {
             "owner_id": owner_id,
+            "capability_epoch": _current_url_capability_epoch(owner_id),
             "expiry": now + _LOG_STREAM_TICKET_TTL_SECONDS,
         }
     return ticket
@@ -704,7 +759,12 @@ def _consume_log_stream_ticket(ticket: str) -> Optional[str]:
             _log_stream_tickets.pop(ticket, None)
             return None
         _log_stream_tickets.pop(ticket, None)
-        return str(record["owner_id"])
+    if not hmac.compare_digest(
+        str(record.get("capability_epoch") or ""),
+        _current_url_capability_epoch(record["owner_id"]),
+    ):
+        return None
+    return str(record["owner_id"])
 
 
 def _login_client_key() -> str:
@@ -889,8 +949,8 @@ def _require_web_session(session_id: str, owner_id: str):
 _PREVIEW_SECRET = None
 _PREVIEW_SECRET_LOCK = threading.Lock()
 _PREVIEW_SECRET_BYTES = 32
-_PREVIEW_TOKEN_VERSION = "v2"
-_FILE_CAPABILITY_VERSION = "f1"
+_PREVIEW_TOKEN_VERSION = "p3"
+_FILE_CAPABILITY_VERSION = "f2"
 
 
 def _read_preview_secret(path: str) -> bytes:
@@ -1007,6 +1067,7 @@ def _encode_file_capability(file_path: str, owner_id: Optional[str]) -> str:
     payload_data = {
         "path": real_path,
         "owner_id": str(owner_id or ""),
+        "capability_epoch": _current_url_capability_epoch(owner_id),
         "expires_at": int(time.time()) + _file_capability_ttl_seconds(),
     }
     body = base64.urlsafe_b64encode(
@@ -1042,6 +1103,7 @@ def _decode_file_capability(token: str) -> Tuple[str, Optional[str]]:
         data = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
         path = str(data["path"])
         owner_id = str(data.get("owner_id") or "")
+        capability_epoch = str(data["capability_epoch"])
         expires_at = int(data["expires_at"])
     except (KeyError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError("Malformed file capability") from exc
@@ -1050,55 +1112,77 @@ def _decode_file_capability(token: str) -> Tuple[str, Optional[str]]:
     real_path = os.path.realpath(path)
     if real_path != path:
         raise ValueError("Non-canonical file capability")
+    if not hmac.compare_digest(
+        capability_epoch, _current_url_capability_epoch(owner_id or None)
+    ):
+        raise ValueError("Revoked file capability")
     return real_path, owner_id or None
 
 
-def _encode_dir_token(dir_path: str) -> str:
-    """Encode a directory into an expiring full-HMAC preview capability."""
+def _encode_dir_token(dir_path: str, owner_id: Optional[str] = None) -> str:
+    """Encode an owner-bound directory into an expiring HMAC preview capability."""
+
     real = os.path.realpath(dir_path)
-    body = base64.urlsafe_b64encode(real.encode("utf-8")).decode("ascii").rstrip("=")
-    expires_hex = format(int(time.time()) + _preview_token_ttl_seconds(), "x")
-    payload = f"{_PREVIEW_TOKEN_VERSION}.{expires_hex}.{body}"
+    payload_data = {
+        "path": real,
+        "owner_id": str(owner_id or ""),
+        "capability_epoch": _current_url_capability_epoch(owner_id),
+        "expires_at": int(time.time()) + _preview_token_ttl_seconds(),
+    }
+    body = base64.urlsafe_b64encode(
+        json.dumps(payload_data, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).decode("ascii").rstrip("=")
+    payload = f"{_PREVIEW_TOKEN_VERSION}.{body}"
     signature = hmac.new(
         _get_preview_secret(), payload.encode("ascii"), hashlib.sha256
     ).hexdigest()
     return f"{payload}.{signature}"
 
 
-def _decode_dir_token(token: str) -> str:
-    """Verify signature, canonical encoding, and expiry for a preview token."""
+def _decode_dir_capability(token: str) -> Tuple[str, Optional[str]]:
+    """Verify an owner-bound directory capability and return its claims."""
+
     parts = (token or "").split(".")
-    if len(parts) != 4:
+    if len(parts) != 3:
         raise ValueError("Malformed preview token")
-    version, expires_hex, body, signature = parts
+    version, body, signature = parts
     if (
         version != _PREVIEW_TOKEN_VERSION
-        or not re.fullmatch(r"[0-9a-f]+", expires_hex or "")
         or not re.fullmatch(r"[A-Za-z0-9_-]+", body or "")
         or not re.fullmatch(r"[0-9a-f]{64}", signature or "")
     ):
         raise ValueError("Malformed preview token")
-    payload = f"{version}.{expires_hex}.{body}"
+    payload = f"{version}.{body}"
     expected = hmac.new(
         _get_preview_secret(), payload.encode("ascii"), hashlib.sha256
     ).hexdigest()
     if not hmac.compare_digest(signature, expected):
         raise ValueError("Bad preview token signature")
     try:
-        expires_at = int(expires_hex, 16)
-    except ValueError:
-        raise ValueError("Malformed preview token")
-    if time.time() >= expires_at:
+        padded = body + "=" * (-len(body) % 4)
+        data = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+        path = str(data["path"])
+        owner_id = str(data.get("owner_id") or "")
+        capability_epoch = str(data["capability_epoch"])
+        expires_at = int(data["expires_at"])
+    except (KeyError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Malformed preview token") from exc
+    if expires_at < int(time.time()):
         raise ValueError("Expired preview token")
-    padding = "=" * (-len(body) % 4)
-    try:
-        raw = base64.urlsafe_b64decode((body + padding).encode("ascii"))
-        real = raw.decode("utf-8")
-    except (ValueError, UnicodeDecodeError):
-        raise ValueError("Malformed preview token")
-    canonical = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
-    if canonical != body or os.path.realpath(real) != real:
+    real = os.path.realpath(path)
+    if real != path:
         raise ValueError("Non-canonical preview token")
+    if not hmac.compare_digest(
+        capability_epoch, _current_url_capability_epoch(owner_id or None)
+    ):
+        raise ValueError("Revoked preview token")
+    return real, owner_id or None
+
+
+def _decode_dir_token(token: str) -> str:
+    """Compatibility wrapper returning only the authorized preview directory."""
+
+    real, _owner_id = _decode_dir_capability(token)
     return real
 
 
@@ -1132,14 +1216,14 @@ def _is_path_allowed(real_path: str) -> bool:
     return False
 
 
-def _build_preview_url(abs_path: str) -> str:
+def _build_preview_url(abs_path: str, owner_id: Optional[str] = None) -> str:
     """
     Preview URL that mounts the file's *directory*, so relative assets
     referenced by an HTML page (./style.css, ./img/a.png) resolve correctly.
     """
     directory = os.path.dirname(abs_path)
     name = os.path.basename(abs_path)
-    return f"/preview/{_encode_dir_token(directory)}/{quote(name)}"
+    return f"/preview/{_encode_dir_token(directory, owner_id)}/{quote(name)}"
 
 
 def _build_file_url(abs_path: str, owner_id: Optional[str]) -> str:
@@ -1267,7 +1351,7 @@ def _build_artifact_payload(data: dict, owner_id: Optional[str] = None) -> dict:
         "previewable": bool(data.get("previewable")),
         "size": data.get("size", 0),
         "raw_url": _build_file_url(file_path, owner_id),
-        "preview_url": _build_preview_url(file_path),
+        "preview_url": _build_preview_url(file_path, owner_id),
     }
 
 
@@ -3189,7 +3273,7 @@ class PreviewHandler:
             rel_path = unquote(rel_path)
 
             try:
-                base_dir = _decode_dir_token(token)
+                base_dir, capability_owner = _decode_dir_capability(token)
             except ValueError:
                 raise web.notfound()
 
@@ -3198,7 +3282,11 @@ class PreviewHandler:
             # Confine to the mounted directory, then to the globally allowed roots.
             if os.path.commonpath([full_path, base_real]) != base_real:
                 raise web.notfound()
-            if not _is_path_allowed(full_path) or not os.path.isfile(full_path):
+            if (
+                not _is_path_allowed(full_path)
+                or _is_other_owner_upload_path(full_path, capability_owner)
+                or not os.path.isfile(full_path)
+            ):
                 raise web.notfound()
 
             content_type = mimetypes.guess_type(full_path)[0] or "application/octet-stream"
@@ -6802,7 +6890,7 @@ def _decorate_entry(svc, entry: dict, owner_id: Optional[str] = None) -> Optiona
         return None
     entry["abs_path"] = abs_path
     entry["raw_url"] = _build_file_url(abs_path, owner_id)
-    entry["preview_url"] = _build_preview_url(abs_path)
+    entry["preview_url"] = _build_preview_url(abs_path, owner_id)
     return entry
 
 
@@ -6895,7 +6983,7 @@ class WorkspaceResolveHandler:
             # A directory has nothing to serve; the client browses into it.
             if not entry["is_dir"]:
                 entry["raw_url"] = _build_file_url(entry["abs_path"], owner_id)
-                entry["preview_url"] = _build_preview_url(entry["abs_path"])
+                entry["preview_url"] = _build_preview_url(entry["abs_path"], owner_id)
             return json.dumps({"status": "success", "file": entry}, ensure_ascii=False)
         except (ValueError, FileNotFoundError) as e:
             return json.dumps({"status": "error", "message": str(e)})
