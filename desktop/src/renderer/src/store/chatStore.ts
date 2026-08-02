@@ -108,12 +108,11 @@ function attachmentsFromSteps(steps: MessageStep[]): Attachment[] {
     const url = (payload.url as string) || ''
     if (!rawPath && !url) continue
     const isRemote = url.toLowerCase().startsWith('http://') || url.toLowerCase().startsWith('https://')
-    // Local files are served via /api/file; remote URLs are used directly.
-    const previewUrl = isRemote
-      ? url
-      : rawPath.toLowerCase().startsWith('http')
-        ? rawPath
-        : apiClient.getServeFileUrl(rawPath)
+    const isCapability = url.startsWith('/file/')
+    // HistoryHandler refreshes a short, owner/path-bound capability for local
+    // files.  Do not reconstruct a raw /api/file URL with a bearer query.
+    const previewUrl = isRemote || isCapability ? url : ''
+    if (!previewUrl) continue
     const kind = (payload.file_type as string) || 'file'
     const fileType: Attachment['file_type'] =
       kind === 'image' ? 'image' : kind === 'video' ? 'video' : 'file'
@@ -165,13 +164,18 @@ function historyToMessage(m: HistoryMessage): ChatMessage {
     // History persists only the prompt text, so the attachment chips have to be
     // recovered from the `[label: path]` markers appended to it.
     const { text, attachments } = parseAttachmentMarkers(m.content)
+    const attachmentUrls = m.attachment_urls || {}
+    const resolvedAttachments = attachments?.map((attachment) => {
+      const previewUrl = attachmentUrls[attachment.file_path]
+      return previewUrl ? { ...attachment, preview_url: previewUrl } : attachment
+    })
     return {
       id: uid('user'),
       role: 'user',
       content: text,
       timestamp: m.created_at,
       userSeq: m._seq,
-      attachments,
+      attachments: resolvedAttachments,
     }
   }
 
@@ -341,7 +345,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         case 'image':
         case 'file': {
           // Media pushed by the `send` tool (file_to_send). `content` is either
-          // a backend /api/file?path=... URL or a passed-through http(s) URL.
+          // an owner/path-bound /file capability or a passed-through http(s) URL.
           const url = data.content || ''
           if (!url) break
           // Prefer the concrete media kind from the backend (image/video/...);

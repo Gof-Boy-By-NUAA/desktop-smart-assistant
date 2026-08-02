@@ -57,6 +57,7 @@ REQUIRED_CHECKS = (
     "login_bruteforce_rate_limited",
     "filesystem_root_serve_denied",
     "single_file_capability_tamper_and_expiry_rejected",
+    "legacy_bearer_file_and_log_url_bypasses_rejected",
 )
 SOURCE_PATHS = (
     "agent/knowledge/runtime.py",
@@ -83,6 +84,7 @@ SOURCE_PATHS = (
     "desktop/src/renderer/src/components/Markdown.tsx",
     "desktop/src/renderer/src/components/MessageBubble.tsx",
     "desktop/src/renderer/src/pages/DeliveryPage.tsx",
+    "desktop/src/renderer/src/pages/LogsPage.tsx",
     "benchmarks/security/web_boundary.py",
     "benchmarks/security/verify.py",
 )
@@ -878,6 +880,78 @@ def run_checks(root: Path | None = None) -> List[Dict[str, Any]]:
             return {"tamper_rejected": True, "expiry_rejected": True, "owner_bound": True}
 
         _record(checks, REQUIRED_CHECKS[26], single_file_capability)
+
+        def legacy_bearer_file_and_log_url_bypasses():
+            client = (root / "desktop/src/renderer/src/api/client.ts").read_text(
+                encoding="utf-8"
+            )
+            console = (root / "channel/web/static/js/console.js").read_text(
+                encoding="utf-8"
+            )
+            server = (root / "channel/web/web_channel.py").read_text(
+                encoding="utf-8-sig"
+            )
+            if (
+                "withToken(" in client
+                or "getServeFileUrl" in client
+                or "/api/file?path=" in console
+                or "_get_query_token" in server
+            ):
+                raise AssertionError("legacy bearer-capable URL construction remains")
+
+            workspace = tmp / "history-capability-workspace"
+            workspace.mkdir(exist_ok=True)
+            target = workspace / "history.txt"
+            target.write_text("private history", encoding="utf-8")
+            owner = "web:" + "e" * 32
+            history = {
+                "messages": [{
+                    "role": "assistant",
+                    "steps": [{
+                        "type": "tool",
+                        "result": json.dumps({
+                            "type": "file_to_send",
+                            "path": str(target),
+                            "url": "/api/file?path=old&token=leaked",
+                        }),
+                    }],
+                }]
+            }
+            with patch.object(
+                web_channel,
+                "conf",
+                return_value={
+                    "agent_workspace": str(workspace),
+                    "web_file_serve_root": str(workspace),
+                },
+            ), patch.object(web_channel, "_PREVIEW_SECRET", b"e" * 32):
+                decorated = web_channel._decorate_history_file_capabilities(
+                    history, owner
+                )
+                payload = json.loads(
+                    decorated["messages"][0]["steps"][0]["result"]
+                )
+                capability = str(payload.get("url") or "")
+                if not capability.startswith("/file/") or "token=" in capability:
+                    raise AssertionError("history preserved a bearer URL")
+                path, capability_owner = web_channel._decode_file_capability(
+                    capability.removeprefix("/file/")
+                )
+                if path != str(target.resolve()) or capability_owner != owner:
+                    raise AssertionError("history capability lost owner/path binding")
+
+            log_ticket = web_channel._issue_log_stream_ticket(owner)
+            if web_channel._consume_log_stream_ticket(log_ticket) != owner:
+                raise AssertionError("log ticket did not resolve owner")
+            if web_channel._consume_log_stream_ticket(log_ticket) is not None:
+                raise AssertionError("log ticket was replayable")
+            return {
+                "history_capability_bound": True,
+                "query_bearer_disabled": True,
+                "log_ticket_one_shot": True,
+            }
+
+        _record(checks, REQUIRED_CHECKS[27], legacy_bearer_file_and_log_url_bypasses)
 
     return checks
 

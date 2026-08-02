@@ -249,6 +249,18 @@ def test_history_handler_does_not_disclose_foreign_session(tmp_path):
     assert denied == {"status": "error", "message": "session not found"}
 
 
+def test_query_bearer_is_never_used_as_request_authentication():
+    from channel.web import web_channel
+
+    with patch.object(web_channel.web, "cookies", return_value={}), patch.object(
+        web_channel, "_get_bearer_token", return_value="header-bearer"
+    ), patch.object(
+        web_channel.web, "input", return_value=SimpleNamespace(token="query-bearer")
+    ) as query_input:
+        assert web_channel._request_auth_tokens() == ["header-bearer"]
+    query_input.assert_not_called()
+
+
 def test_stream_request_capability_is_bound_to_owner():
     from channel.web import web_channel
 

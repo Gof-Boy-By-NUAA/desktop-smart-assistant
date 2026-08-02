@@ -34,7 +34,8 @@
         "sse_bearer_url_bypass_rejected",
         "login_bruteforce_rate_limited",
         "filesystem_root_serve_denied",
-        "single_file_capability_tamper_and_expiry_rejected"
+        "single_file_capability_tamper_and_expiry_rejected",
+        "legacy_bearer_file_and_log_url_bypasses_rejected"
       ],
       "expected": [
         "conversation_cross_owner_zero_side_effect",
@@ -63,20 +64,21 @@
         "sse_bearer_url_bypass_rejected",
         "login_bruteforce_rate_limited",
         "filesystem_root_serve_denied",
-        "single_file_capability_tamper_and_expiry_rejected"
+        "single_file_capability_tamper_and_expiry_rejected",
+        "legacy_bearer_file_and_log_url_bypasses_rejected"
       ],
       "name": "required_checks_exact",
       "passed": true
     },
     {
-      "actual": "c767f9c4c18eae482f7a28901cb697e618dbbd538ef5e0cea0ce0e9b005ebac4",
-      "expected": "c767f9c4c18eae482f7a28901cb697e618dbbd538ef5e0cea0ce0e9b005ebac4",
+      "actual": "ff67c8530d9e90778b2d99b6858a4697b6edccb1e7151c0172ac1ba134f0dc6e",
+      "expected": "ff67c8530d9e90778b2d99b6858a4697b6edccb1e7151c0172ac1ba134f0dc6e",
       "name": "source_fingerprint",
       "passed": true
     },
     {
-      "actual": 27,
-      "expected": 27,
+      "actual": 28,
+      "expected": 28,
       "name": "reported_check_names_unique",
       "passed": true
     },
@@ -317,11 +319,20 @@
       },
       "name": "single_file_capability_tamper_and_expiry_rejected",
       "passed": true
+    },
+    {
+      "details": {
+        "history_capability_bound": true,
+        "log_ticket_one_shot": true,
+        "query_bearer_disabled": true
+      },
+      "name": "legacy_bearer_file_and_log_url_bypasses_rejected",
+      "passed": true
     }
   ],
   "report_path": "benchmarks\\results\\web-boundary-security.json",
-  "report_sha256": "e43b10599d49da6aebbcc2801c91028e1576f280b701b901d2969475b866aaf0",
+  "report_sha256": "d869fc21a7e7cb8a4588f17c429d0ed0f3c8de47c1a0f64d62dac5d7f657147c",
   "schema_version": 1,
-  "source_fingerprint_sha256": "c767f9c4c18eae482f7a28901cb697e618dbbd538ef5e0cea0ce0e9b005ebac4",
+  "source_fingerprint_sha256": "ff67c8530d9e90778b2d99b6858a4697b6edccb1e7151c0172ac1ba134f0dc6e",
   "status": "completed"
 }

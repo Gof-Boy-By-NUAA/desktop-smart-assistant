@@ -211,6 +211,15 @@
       },
       "name": "single_file_capability_tamper_and_expiry_rejected",
       "passed": true
+    },
+    {
+      "details": {
+        "history_capability_bound": true,
+        "log_ticket_one_shot": true,
+        "query_bearer_disabled": true
+      },
+      "name": "legacy_bearer_file_and_log_url_bypasses_rejected",
+      "passed": true
     }
   ],
   "limitations": {
@@ -247,9 +256,10 @@
     "sse_bearer_url_bypass_rejected",
     "login_bruteforce_rate_limited",
     "filesystem_root_serve_denied",
-    "single_file_capability_tamper_and_expiry_rejected"
+    "single_file_capability_tamper_and_expiry_rejected",
+    "legacy_bearer_file_and_log_url_bypasses_rejected"
   ],
   "schema_version": 1,
-  "source_fingerprint_sha256": "c767f9c4c18eae482f7a28901cb697e618dbbd538ef5e0cea0ce0e9b005ebac4",
+  "source_fingerprint_sha256": "ff67c8530d9e90778b2d99b6858a4697b6edccb1e7151c0172ac1ba134f0dc6e",
   "status": "completed"
 }

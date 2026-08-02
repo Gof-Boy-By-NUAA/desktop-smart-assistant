@@ -101,6 +101,18 @@ def test_ticket_cursor_is_request_and_owner_bound_and_consumed_once():
     assert web_channel._consume_stream_ticket_record(ticket, request_id) is None
 
 
+def test_log_stream_ticket_is_owner_bound_short_lived_and_consumed_once(monkeypatch):
+    owner = "web:" + "c" * 32
+    ticket = web_channel._issue_log_stream_ticket(owner)
+    assert web_channel._consume_log_stream_ticket(ticket) == owner
+    assert web_channel._consume_log_stream_ticket(ticket) is None
+
+    issued_at = web_channel.time.time()
+    expiring = web_channel._issue_log_stream_ticket(owner)
+    monkeypatch.setattr(web_channel.time, "time", lambda: issued_at + 61)
+    assert web_channel._consume_log_stream_ticket(expiring) is None
+
+
 def test_journal_capacity_exhaustion_is_explicit_not_a_silent_drop(monkeypatch):
     monkeypatch.setattr(web_channel, "_SSE_EVENT_JOURNAL_MAX_EVENTS", 1)
     monkeypatch.setattr(web_channel, "_SSE_EVENT_JOURNAL_MAX_BYTES", 1024 * 1024)
@@ -141,3 +153,79 @@ def test_file_capability_is_short_lived_and_bound_to_exact_owner_and_path(monkey
         raise AssertionError("expired file capability unexpectedly accepted")
     except ValueError:
         pass
+
+
+def test_history_file_capabilities_are_fresh_owner_bound_and_non_mutating(
+    monkeypatch, tmp_path
+):
+    target = tmp_path / "history-artifact.txt"
+    target.write_text("history artifact", encoding="utf-8")
+    owner = "web:" + "d" * 32
+    stored_payload = {
+        "type": "file_to_send",
+        "path": str(target),
+        "url": "/api/file?path=legacy&token=leaked-bearer",
+        "file_name": target.name,
+    }
+    history = {
+        "messages": [
+            {"role": "user", "content": f"show this\n[Image: {target}]"},
+            {
+                "role": "assistant",
+                "steps": [{"type": "tool", "result": json.dumps(stored_payload)}],
+            },
+        ]
+    }
+    monkeypatch.setattr(web_channel, "_is_path_allowed", lambda path: path == str(target))
+    monkeypatch.setattr(
+        web_channel, "_is_other_owner_upload_path", lambda path, principal: False
+    )
+    monkeypatch.setattr(web_channel, "_get_preview_secret", lambda: b"history-secret")
+
+    decorated = web_channel._decorate_history_file_capabilities(history, owner)
+
+    # The durable history stays raw; only the authenticated response obtains a
+    # fresh ephemeral URL.
+    assert "attachment_urls" not in history["messages"][0]
+    assert json.loads(history["messages"][1]["steps"][0]["result"]) == stored_payload
+
+    attachment_url = decorated["messages"][0]["attachment_urls"][str(target)]
+    payload = json.loads(decorated["messages"][1]["steps"][0]["result"])
+    assert attachment_url.startswith("/file/f1.")
+    assert payload["url"].startswith("/file/f1.")
+    assert "token=" not in payload["url"]
+    resolved_path, resolved_owner = web_channel._decode_file_capability(
+        attachment_url.removeprefix("/file/")
+    )
+    assert resolved_path == str(target)
+    assert resolved_owner == owner
+
+
+def test_history_file_capability_refuses_foreign_or_unavailable_path(monkeypatch, tmp_path):
+    target = tmp_path / "foreign.txt"
+    target.write_text("private", encoding="utf-8")
+    history = {
+        "messages": [
+            {
+                "role": "assistant",
+                "steps": [{
+                    "type": "tool",
+                    "result": json.dumps({
+                        "type": "file_to_send",
+                        "path": str(target),
+                        "url": "/api/file?path=legacy&token=leaked-bearer",
+                    }),
+                }],
+            }
+        ]
+    }
+    monkeypatch.setattr(web_channel, "_is_path_allowed", lambda path: True)
+    monkeypatch.setattr(
+        web_channel, "_is_other_owner_upload_path", lambda path, principal: True
+    )
+
+    decorated = web_channel._decorate_history_file_capabilities(
+        history, "web:" + "e" * 32
+    )
+    payload = json.loads(decorated["messages"][0]["steps"][0]["result"])
+    assert payload["url"] == ""

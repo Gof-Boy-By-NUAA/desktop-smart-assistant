@@ -111,6 +111,27 @@ def test_desktop_sse_uses_request_bound_ticket_not_bearer_query_string():
     assert "isStreamInterrupted: true" in desktop_store
 
 
+def test_file_and_log_stream_urls_never_carry_login_bearers():
+    client = (ROOT / "desktop/src/renderer/src/api/client.ts").read_text(encoding="utf-8")
+    desktop_store = (ROOT / "desktop/src/renderer/src/store/chatStore.ts").read_text(encoding="utf-8")
+    web_console = (ROOT / "channel/web/static/js/console.js").read_text(encoding="utf-8")
+    server = (ROOT / "channel/web/web_channel.py").read_text(encoding="utf-8-sig")
+
+    assert "withToken(" not in client
+    assert "getServeFileUrl" not in client
+    assert "/api/file?path=" not in web_console
+    assert "payload.url || payload.path" in web_console
+    assert "getServeFileUrl" not in desktop_store
+    assert "url.startsWith('/file/')" in desktop_store
+    assert "attachment_urls" in desktop_store
+    assert "_get_query_token" not in server
+    assert "_decorate_history_file_capabilities" in server
+    assert "'/api/logs/ticket'" in server
+    assert "_consume_log_stream_ticket(ticket)" in server
+    assert "'/api/logs/ticket'" in client
+    assert "/api/logs?ticket=${encodeURIComponent(ticket.ticket)}" in client
+
+
 def test_cancel_ui_requires_backend_or_sse_confirmation_before_cancelled_label():
     desktop_store = (
         ROOT / "desktop/src/renderer/src/store/chatStore.ts"

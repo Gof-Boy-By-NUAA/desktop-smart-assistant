@@ -271,6 +271,8 @@ export interface HistoryMessage {
   extras?: Record<string, unknown>
   /** Per-message sequence number used by delete/regenerate APIs. */
   _seq?: number
+  /** Fresh owner/path-bound URLs for attachment markers in this response only. */
+  attachment_urls?: Record<string, string>
 }
 
 export interface HistoryPage {

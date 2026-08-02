@@ -136,15 +136,6 @@ class ApiClient {
     })
   }
 
-  // EventSource can't set an Authorization header. Exchange the authenticated
-  // header for a short-lived request-bound ticket instead of putting the long-
-  // lived bearer credential in a URL that can enter proxy/browser history.
-  private withToken(url: string): string {
-    if (!this.authToken) return url
-    const sep = url.includes('?') ? '&' : '?'
-    return `${url}${sep}token=${encodeURIComponent(this.authToken)}`
-  }
-
   async createSSEStream(requestId: string, afterEventId = 0): Promise<EventSource> {
     const ticket = await this.request<{ status: string; ticket?: string }>('/stream/ticket', {
       method: 'POST',
@@ -202,14 +193,10 @@ class ApiClient {
     // capability. Do not append the long-lived bearer to a URL that may enter
     // browser history, proxy logs, or a copied link.
     if (previewUrl.startsWith('/file/')) return `${this.baseUrl}${previewUrl}`
-    // Served via <img src>, which can't set headers — carry the token in the
-    // query so protected file endpoints load under web_password. This is a
-    // legacy-history compatibility path and must not be used for new output.
-    return this.withToken(`${this.baseUrl}${previewUrl}`)
-  }
-
-  getServeFileUrl(absPath: string): string {
-    return this.withToken(`${this.baseUrl}/api/file?path=${encodeURIComponent(absPath)}`)
+    // Callers must obtain a fresh owner/path-bound capability from their
+    // authenticated API response.  Refuse legacy raw paths rather than putting
+    // a bearer credential into a URL.
+    return ''
   }
 
   // ---------------------------------------------------------
@@ -499,8 +486,16 @@ class ApiClient {
   // Logs / version
   // ---------------------------------------------------------
 
-  createLogStream(): EventSource {
-    return new EventSource(this.withToken(`${this.baseUrl}/api/logs`))
+  async createLogStream(): Promise<EventSource> {
+    const ticket = await this.request<{ status: string; ticket?: string }>('/api/logs/ticket', {
+      method: 'POST',
+    })
+    if (ticket.status !== 'success' || !ticket.ticket) {
+      throw new Error('Log-stream authorization ticket was not issued')
+    }
+    return new EventSource(
+      `${this.baseUrl}/api/logs?ticket=${encodeURIComponent(ticket.ticket)}`
+    )
   }
 
   async getVersion(): Promise<string> {

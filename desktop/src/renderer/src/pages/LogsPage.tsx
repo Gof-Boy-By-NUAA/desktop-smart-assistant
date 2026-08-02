@@ -13,25 +13,38 @@ const LogsPage: React.FC<LogsPageProps> = ({ baseUrl }) => {
 
   useEffect(() => {
     apiClient.setBaseUrl(baseUrl)
+    let closed = false
+    let es: EventSource | null = null
 
-    const es = apiClient.createLogStream()
+    void apiClient.createLogStream().then((stream) => {
+      if (closed) {
+        stream.close()
+        return
+      }
+      es = stream
+      es.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data)
+          if (data.type === 'init' && data.content) {
+            setLogs(data.content.split('\n').filter(Boolean))
+          } else if (data.type === 'line' && data.content) {
+            setLogs((prev) => {
+              const next = [...prev, data.content]
+              if (next.length > 2000) return next.slice(-1500)
+              return next
+            })
+          }
+        } catch { /* ignore */ }
+      }
+    }).catch(() => {
+      // Keep the existing connecting state instead of silently falling back to
+      // a bearer query URL. A page revisit obtains a fresh ticket.
+    })
 
-    es.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data)
-        if (data.type === 'init' && data.content) {
-          setLogs(data.content.split('\n').filter(Boolean))
-        } else if (data.type === 'line' && data.content) {
-          setLogs((prev) => {
-            const next = [...prev, data.content]
-            if (next.length > 2000) return next.slice(-1500)
-            return next
-          })
-        }
-      } catch { /* ignore */ }
+    return () => {
+      closed = true
+      es?.close()
     }
-
-    return () => es.close()
   }, [baseUrl])
 
   useEffect(() => {

@@ -1294,13 +1294,12 @@ const VIDEO_EXT_RE = /\.(?:mp4|webm|mov|avi|mkv)$/i;  // tested against URL with
 const IMAGE_EXT_RE = /\.(?:jpg|jpeg|png|gif|webp|bmp|svg)$/i;  // tested against URL without query string
 
 function _toWebUrl(url) {
-    if (/^\/[A-Za-z]/.test(url) && !url.startsWith('/api/')) {
-        return '/api/file?path=' + encodeURIComponent(url);
+    if (/^https?:\/\//i.test(url) || /^\/file\//.test(url) || /^\/preview\//.test(url)) {
+        return url;
     }
-    if (/^file:\/\/\//i.test(url)) {
-        return '/api/file?path=' + encodeURIComponent(url.replace(/^file:\/\/\//i, '/'));
-    }
-    return url;
+    // A local raw path must be converted by an authenticated API response
+    // before it reaches markup.  Never turn it into a bearer-authorized URL.
+    return '';
 }
 
 function _buildVideoHtml(url) {
@@ -3937,8 +3936,9 @@ function _renderSentFileFromToolResult(step) {
     try {
         payload = typeof step.result === 'string' ? JSON.parse(step.result) : step.result;
     } catch (_) { return ''; }
-    if (!payload || payload.type !== 'file_to_send' || !payload.path) return '';
-    const webUrl = _toWebUrl(payload.path);
+    if (!payload || payload.type !== 'file_to_send' || (!payload.path && !payload.url)) return '';
+    const webUrl = _toWebUrl(payload.url || payload.path);
+    if (!webUrl) return '';
     const fileType = payload.file_type || 'file';
     const fileName = payload.file_name || payload.path.split('/').pop();
     if (fileType === 'image') {

@@ -356,6 +356,9 @@ _revoked_auth_lock = threading.Lock()
 _stream_tickets = {}  # ticket -> {owner_id, request_id, expiry}; consumed on GET
 _stream_ticket_lock = threading.Lock()
 _STREAM_TICKET_TTL_SECONDS = 60
+_log_stream_tickets = {}  # ticket -> {owner_id, expiry}; consumed on GET
+_log_stream_ticket_lock = threading.Lock()
+_LOG_STREAM_TICKET_TTL_SECONDS = 60
 _login_attempts = {}  # client key -> [window_start, failed_attempts]
 _login_attempts_lock = threading.Lock()
 _LOGIN_WINDOW_SECONDS = 300
@@ -522,21 +525,17 @@ def _get_bearer_token():
     return ""
 
 
-def _get_query_token():
-    """Extract a token from the `token` query param for EventSource clients."""
-    try:
-        return web.input(token="").token or ""
-    except Exception:
-        return ""
-
-
 def _request_auth_tokens():
     tokens = []
     try:
         tokens.append(web.cookies().get("cow_auth_token", ""))
     except Exception:
         pass
-    tokens.extend((_get_bearer_token(), _get_query_token()))
+    # Never authenticate ordinary requests from a URL query value: URLs are
+    # copied into browser history, proxy logs and referrers.  SSE uses a
+    # separate request-bound one-shot ticket, while desktop API calls use the
+    # Authorization header and browser calls use the HttpOnly cookie.
+    tokens.append(_get_bearer_token())
     return [token for token in tokens if token]
 
 
@@ -676,6 +675,36 @@ def _consume_stream_ticket(ticket: str, request_id: str) -> Optional[str]:
     """Compatibility wrapper returning only the capability owner."""
     record = _consume_stream_ticket_record(ticket, request_id)
     return str(record["owner_id"]) if record is not None else None
+
+
+def _issue_log_stream_ticket(owner_id: str) -> str:
+    """Issue a short-lived one-shot capability for the diagnostics SSE stream."""
+
+    ticket = secrets.token_urlsafe(32)
+    with _log_stream_ticket_lock:
+        now = time.time()
+        for stale, record in list(_log_stream_tickets.items()):
+            if record["expiry"] <= now:
+                _log_stream_tickets.pop(stale, None)
+        _log_stream_tickets[ticket] = {
+            "owner_id": owner_id,
+            "expiry": now + _LOG_STREAM_TICKET_TTL_SECONDS,
+        }
+    return ticket
+
+
+def _consume_log_stream_ticket(ticket: str) -> Optional[str]:
+    """Consume a diagnostics stream capability exactly once."""
+
+    if not ticket:
+        return None
+    with _log_stream_ticket_lock:
+        record = _log_stream_tickets.get(ticket)
+        if not record or record["expiry"] <= time.time():
+            _log_stream_tickets.pop(ticket, None)
+            return None
+        _log_stream_tickets.pop(ticket, None)
+        return str(record["owner_id"])
 
 
 def _login_client_key() -> str:
@@ -1116,6 +1145,112 @@ def _build_preview_url(abs_path: str) -> str:
 def _build_file_url(abs_path: str, owner_id: Optional[str]) -> str:
     """Capability URL for browser media/download contexts without headers."""
     return _encode_file_capability(abs_path, owner_id)
+
+
+def _authorized_file_capability(
+    file_path: Any, owner_id: Optional[str]
+) -> Optional[str]:
+    """Issue a file URL only after the same checks as authenticated file reads.
+
+    This is deliberately used while *rendering a history response*, not while
+    persisting it: a durable history record may contain an old absolute path,
+    but must never preserve a bearer URL or a long-lived capability.
+    """
+
+    if not isinstance(file_path, str) or not file_path or not os.path.isabs(file_path):
+        return None
+    real_path = os.path.realpath(file_path)
+    if (
+        not _is_path_allowed(real_path)
+        or _is_other_owner_upload_path(real_path, owner_id)
+        or not os.path.isfile(real_path)
+    ):
+        return None
+    return _build_file_url(real_path, owner_id)
+
+
+def _decorate_history_file_capabilities(
+    result: dict[str, Any], owner_id: Optional[str]
+) -> dict[str, Any]:
+    """Add fresh file capabilities to a history response without mutating DB data."""
+
+    messages = result.get("messages")
+    if not isinstance(messages, list):
+        return result
+
+    decorated_messages: list[Any] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            decorated_messages.append(message)
+            continue
+        decorated_message = dict(message)
+
+        # User attachment chips are reconstructed by the desktop renderer from
+        # trailing [label: path] markers.  Return a separate map so the stored
+        # prompt and its absolute path remain unchanged.
+        attachment_urls: dict[str, str] = {}
+        content = decorated_message.get("content")
+        if isinstance(content, str):
+            for line in content.splitlines():
+                match = re.fullmatch(r"\[[^\]:]+\s*:\s*(.+)\]", line.strip())
+                if match is None:
+                    continue
+                raw_path = match.group(1).strip()
+                capability = _authorized_file_capability(raw_path, owner_id)
+                if capability is not None:
+                    attachment_urls[raw_path] = capability
+        if attachment_urls:
+            decorated_message["attachment_urls"] = attachment_urls
+
+        raw_steps = decorated_message.get("steps")
+        if isinstance(raw_steps, list):
+            decorated_steps: list[Any] = []
+            for raw_step in raw_steps:
+                if not isinstance(raw_step, dict):
+                    decorated_steps.append(raw_step)
+                    continue
+                step = dict(raw_step)
+                raw_result = step.get("result")
+                was_serialized = isinstance(raw_result, str)
+                try:
+                    payload = (
+                        json.loads(raw_result)
+                        if was_serialized
+                        else raw_result
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    payload = None
+                if (
+                    isinstance(payload, dict)
+                    and payload.get("type") == "file_to_send"
+                ):
+                    payload = dict(payload)
+                    existing_url = str(payload.get("url") or "")
+                    is_remote = existing_url.lower().startswith(
+                        ("http://", "https://")
+                    )
+                    capability = _authorized_file_capability(
+                        payload.get("path"), owner_id
+                    )
+                    if capability is not None:
+                        payload["url"] = capability
+                    elif not is_remote:
+                        # Do not replay an old /api/file URL (which could carry
+                        # a leaked bearer) when its local file is no longer safe
+                        # or available.
+                        payload["url"] = ""
+                    step["result"] = (
+                        json.dumps(payload, ensure_ascii=False)
+                        if was_serialized
+                        else payload
+                    )
+                decorated_steps.append(step)
+            decorated_message["steps"] = decorated_steps
+        decorated_messages.append(decorated_message)
+
+    decorated_result = dict(result)
+    decorated_result["messages"] = decorated_messages
+    return decorated_result
 
 
 def _build_artifact_payload(data: dict, owner_id: Optional[str] = None) -> dict:
@@ -2466,6 +2601,7 @@ class WebChannel(ChatChannel):
             '/api/readiness', 'ReadinessHandler',
             '/api/release/evidence', 'ReleaseEvidenceHandler',
             '/stream/ticket', 'StreamTicketHandler',
+            '/api/logs/ticket', 'LogsTicketHandler',
             '/auth/login', 'AuthLoginHandler',
             '/auth/check', 'AuthCheckHandler',
             '/auth/logout', 'AuthLogoutHandler',
@@ -3023,7 +3159,7 @@ class FileServeHandler:
             from urllib.parse import quote
             web.header('Content-Type', content_type)
             web.header('Content-Disposition', f"inline; filename*=UTF-8''{quote(file_name)}")
-            web.header('Cache-Control', 'public, max-age=3600')
+            web.header('Cache-Control', 'private, no-store')
             with open(file_path, 'rb') as f:
                 return f.read()
         except web.HTTPError:
@@ -3126,6 +3262,19 @@ class StreamTicketHandler:
             "status": "success",
             "ticket": _issue_stream_ticket(owner_id, request_id, after_event_id),
             "expires_in": _STREAM_TICKET_TTL_SECONDS,
+        })
+
+
+class LogsTicketHandler:
+    """Exchange normal authentication for a one-shot diagnostics SSE ticket."""
+
+    def POST(self):
+        owner_id = _require_auth()
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        return json.dumps({
+            "status": "success",
+            "ticket": _issue_log_stream_ticket(owner_id),
+            "expires_in": _LOG_STREAM_TICKET_TTL_SECONDS,
         })
 
 
@@ -6457,6 +6606,7 @@ class HistoryHandler:
                 page_size=int(params.page_size),
                 owner_id=owner_id,
             )
+            result = _decorate_history_file_capabilities(result, owner_id)
             return json.dumps({"status": "success", **result}, ensure_ascii=False)
         except Exception as e:
             logger.error(f"[WebChannel] History API error: {e}")
@@ -6535,7 +6685,16 @@ class MessageDeleteHandler:
 
 class LogsHandler:
     def GET(self):
-        _require_auth()
+        params = web.input(ticket='', token='')
+        ticket = str(getattr(params, 'ticket', '') or '')
+        if ticket:
+            _require_safe_request_host()
+            if _consume_log_stream_ticket(ticket) is None:
+                raise web.HTTPError("401 Unauthorized")
+        else:
+            if getattr(params, 'token', ''):
+                raise web.HTTPError("401 Unauthorized")
+            _require_auth()
         web.header('Content-Type', 'text/event-stream; charset=utf-8')
         web.header('Cache-Control', 'no-cache')
         web.header('X-Accel-Buffering', 'no')
