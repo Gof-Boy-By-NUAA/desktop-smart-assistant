@@ -1,0 +1,11 @@
+{
+  "cmrc2018_dev": {
+    "repository": "https://github.com/ymcui/cmrc2018.git",
+    "commit": "c0eb1b6ba219847457e6af3180da722bbeb656af",
+    "path": "data/cmrc2018_dev.json",
+    "sha256": "5cfe4414c28a8ecbb51670f78c0dc7d1049f286c2d5769b52f1f94bcc0752cf1",
+    "license": "CC BY-SA 4.0",
+    "license_url": "https://github.com/ymcui/cmrc2018/blob/c0eb1b6ba219847457e6af3180da722bbeb656af/LICENCE",
+    "homepage": "https://github.com/ymcui/cmrc2018"
+  }
+}

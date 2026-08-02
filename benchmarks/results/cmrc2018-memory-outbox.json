@@ -1,0 +1,128 @@
+{
+  "dataset": {
+    "available_document_count": 848,
+    "evaluated_document_count": 848,
+    "id": "cmrc2018_dev",
+    "real_data_ratio": 1.0,
+    "sha256": "5cfe4414c28a8ecbb51670f78c0dc7d1049f286c2d5769b52f1f94bcc0752cf1"
+  },
+  "environment": {
+    "platform": "Windows-10-10.0.26200-SP0",
+    "python": "3.11.8",
+    "sqlite": "3.43.1"
+  },
+  "gates": [
+    {
+      "actual": 848,
+      "expected": 848,
+      "name": "data.full_document_set",
+      "passed": true
+    },
+    {
+      "actual": 848,
+      "expected": 848,
+      "name": "outbox.fact_and_job_atomicity",
+      "passed": true
+    },
+    {
+      "actual": 848,
+      "expected": 848,
+      "name": "outbox.initial_active_count",
+      "passed": true
+    },
+    {
+      "actual": 848,
+      "expected": 848,
+      "name": "outbox.initial_projection_integrity",
+      "passed": true
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "name": "outbox.initial_index_integrity",
+      "passed": true
+    },
+    {
+      "actual": 50,
+      "expected": 50,
+      "name": "outbox.revoke_jobs_persisted",
+      "passed": true
+    },
+    {
+      "actual": 798,
+      "expected": 798,
+      "name": "outbox.final_active_count",
+      "passed": true
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "name": "outbox.final_index_integrity",
+      "passed": true
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "name": "outbox.pending_after_recovery",
+      "passed": true
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "name": "safety.revoked_index_pollution",
+      "passed": true
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "name": "safety.revoked_projection_pollution",
+      "passed": true
+    },
+    {
+      "actual": 1.578875,
+      "expected": 100.0,
+      "name": "performance.fact_write_p95_ms",
+      "passed": true
+    },
+    {
+      "actual": 28.36410037696558,
+      "expected": 20.0,
+      "name": "performance.initial_recovery_throughput",
+      "passed": true
+    },
+    {
+      "actual": 92.93295092043583,
+      "expected": 20.0,
+      "name": "performance.revoke_recovery_throughput",
+      "passed": true
+    }
+  ],
+  "generated_at": "2026-08-01T16:23:00.981644+00:00",
+  "implementation_sha256": "4257912c14fbbb913afb5587b14f9e2566906f5128ce48fd12372ee30003d70b",
+  "metrics": {
+    "fact_write_latency_ms_mean": 1.2302693396226414,
+    "fact_write_latency_ms_p50": 1.13285,
+    "fact_write_latency_ms_p95": 1.578875,
+    "final_active_count": 798,
+    "final_index_matches": true,
+    "initial_active_count": 848,
+    "initial_index_matches": true,
+    "initial_pending_job_count": 848,
+    "initial_projection_match_count": 848,
+    "initial_recovery_documents_per_second": 28.36410037696558,
+    "initial_recovery_ms": 29896.9468,
+    "pending_after_recovery": 0,
+    "pending_before_revoke_recovery": 50,
+    "revoke_count": 50,
+    "revoke_recovery_documents_per_second": 92.93295092043583,
+    "revoke_recovery_ms": 538.0223,
+    "revoked_index_count": 0,
+    "revoked_projection_count": 0
+  },
+  "passed": true,
+  "schema_version": 1,
+  "thresholds": {
+    "max_write_p95_ms": 100.0,
+    "min_recovery_documents_per_second": 20.0
+  }
+}

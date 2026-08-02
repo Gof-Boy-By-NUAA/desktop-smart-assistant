@@ -1,0 +1,110 @@
+name: Web Trust Boundary Gate
+
+on:
+  push:
+    paths:
+      - "agent/knowledge/**"
+      - "agent/memory/conversation_store.py"
+      - "agent/protocol/**"
+      - "agent/tools/scheduler/**"
+      - "agent/retrieval/lexical.py"
+      - "bridge/agent_bridge.py"
+      - "bridge/agent_initializer.py"
+      - "channel/web/**"
+      - "desktop/src/renderer/src/api/client.ts"
+      - "desktop/src/renderer/src/components/Markdown.tsx"
+      - "desktop/src/renderer/src/components/MessageBubble.tsx"
+      - "desktop/src/renderer/src/App.tsx"
+      - "desktop/src/renderer/src/components/LoginGate.tsx"
+      - "desktop/src/renderer/src/i18n.ts"
+      - "desktop/src/renderer/src/pages/TasksPage.tsx"
+      - "desktop/src/renderer/src/store/chatStore.ts"
+      - "desktop/src/renderer/src/types.ts"
+      - "benchmarks/security/**"
+      - "tests/test_web_session_security.py"
+      - "tests/test_web_boundary_benchmark.py"
+      - ".github/workflows/test-web-boundary.yml"
+  pull_request:
+    paths:
+      - "agent/knowledge/**"
+      - "agent/memory/conversation_store.py"
+      - "agent/protocol/**"
+      - "agent/tools/scheduler/**"
+      - "agent/retrieval/lexical.py"
+      - "bridge/agent_bridge.py"
+      - "bridge/agent_initializer.py"
+      - "channel/web/**"
+      - "desktop/src/renderer/src/api/client.ts"
+      - "desktop/src/renderer/src/components/Markdown.tsx"
+      - "desktop/src/renderer/src/components/MessageBubble.tsx"
+      - "desktop/src/renderer/src/App.tsx"
+      - "desktop/src/renderer/src/components/LoginGate.tsx"
+      - "desktop/src/renderer/src/i18n.ts"
+      - "desktop/src/renderer/src/pages/TasksPage.tsx"
+      - "desktop/src/renderer/src/store/chatStore.ts"
+      - "desktop/src/renderer/src/types.ts"
+      - "benchmarks/security/**"
+      - "tests/test_web_session_security.py"
+      - "tests/test_web_boundary_benchmark.py"
+      - ".github/workflows/test-web-boundary.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: web-boundary-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  attack-and-verify:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install declared application dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+          python -m pip install -r requirements.txt
+          python -m pip check
+
+      - name: Run Web boundary attack tests
+        run: >-
+          python -m pytest
+          tests/test_web_session_security.py
+          tests/test_web_boundary_benchmark.py
+          tests/test_knowledge_web.py
+          tests/test_governed_knowledge_runtime.py
+          -q
+
+      - name: Generate formal attack report
+        run: >-
+          python -m benchmarks.security.web_boundary
+          --output benchmarks/results/web-boundary-security.json
+
+      - name: Independently replay and verify report
+        run: >-
+          python -m benchmarks.security.verify
+          --report benchmarks/results/web-boundary-security.json
+          --output benchmarks/results/web-boundary-security-verification.json
+
+      - name: Upload Web boundary evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-trust-boundary-evidence
+          path: |
+            benchmarks/results/web-boundary-security.json
+            benchmarks/results/web-boundary-security-verification.json
+          if-no-files-found: error

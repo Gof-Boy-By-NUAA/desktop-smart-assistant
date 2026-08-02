@@ -1,0 +1,127 @@
+name: Governed Skill Runtime Tests
+
+on:
+  push:
+    paths:
+      - "agent/evolution/**"
+      - "agent/memory/governance/**"
+      - "agent/chat/service.py"
+      - "agent/protocol/agent.py"
+      - "agent/protocol/agent_stream.py"
+      - "agent/prompt/builder.py"
+      - "agent/skills/**"
+      - "agent/tools/bash/**"
+      - "agent/tools/edit/**"
+      - "agent/tools/ls/**"
+      - "agent/tools/read/**"
+      - "agent/tools/search_files/**"
+      - "agent/tools/send/**"
+      - "agent/tools/utils/governed_memory.py"
+      - "agent/tools/write/**"
+      - "common/path_safety.py"
+      - "bridge/agent_initializer.py"
+      - "benchmarks/customer/**"
+      - "benchmarks/skills/**"
+      - "config.py"
+      - "config-template.json"
+      - "requirements-optional.txt"
+      - "tests/fixtures/skill_*.py"
+      - "tests/fixtures/customer_executor_adapter.py"
+      - "tests/test_evolution*.py"
+      - "tests/test_governed_skill*.py"
+      - "tests/test_skill_shadow_retrieval.py"
+      - "tests/test_skill_selection_benchmark.py"
+      - "tests/test_customer_acceptance.py"
+      - "tests/test_security_ssrf_path_traversal.py"
+      - ".github/workflows/test-governed-skills.yml"
+  pull_request:
+    paths:
+      - "agent/evolution/**"
+      - "agent/memory/governance/**"
+      - "agent/chat/service.py"
+      - "agent/protocol/agent.py"
+      - "agent/protocol/agent_stream.py"
+      - "agent/prompt/builder.py"
+      - "agent/skills/**"
+      - "agent/tools/bash/**"
+      - "agent/tools/edit/**"
+      - "agent/tools/ls/**"
+      - "agent/tools/read/**"
+      - "agent/tools/search_files/**"
+      - "agent/tools/send/**"
+      - "agent/tools/utils/governed_memory.py"
+      - "agent/tools/write/**"
+      - "common/path_safety.py"
+      - "bridge/agent_initializer.py"
+      - "benchmarks/customer/**"
+      - "benchmarks/skills/**"
+      - "config.py"
+      - "config-template.json"
+      - "requirements-optional.txt"
+      - "tests/fixtures/skill_*.py"
+      - "tests/fixtures/customer_executor_adapter.py"
+      - "tests/test_evolution*.py"
+      - "tests/test_governed_skill*.py"
+      - "tests/test_skill_shadow_retrieval.py"
+      - "tests/test_skill_selection_benchmark.py"
+      - "tests/test_customer_acceptance.py"
+      - "tests/test_security_ssrf_path_traversal.py"
+      - ".github/workflows/test-governed-skills.yml"
+  workflow_dispatch:
+
+jobs:
+  governed-skill-tests:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install focused test dependencies
+        run: >-
+          python -m pip install
+          pytest regex requests PyYAML python-dotenv croniter cryptography
+
+      - name: Run governed skill tests
+        run: >-
+          python -m pytest
+          tests/test_governed_skills.py
+          tests/test_governed_skill_boundaries.py
+          tests/test_skill_shadow_retrieval.py
+          tests/test_skill_selection_benchmark.py
+          tests/test_customer_acceptance.py
+          tests/test_tenant_aware_lexical_retrieval.py
+          tests/test_evolution.py
+          tests/test_evolution_security.py
+          tests/test_evolution_skill_governance.py
+          tests/test_security_ssrf_path_traversal.py
+          -q
+
+      - name: Compile governed skill runtime
+        run: >-
+          python -m compileall -q
+          agent/evolution
+          agent/chat/service.py
+          agent/protocol/agent.py
+          agent/protocol/agent_stream.py
+          agent/prompt/builder.py
+          agent/skills
+          agent/tools/utils/governed_memory.py
+          common/path_safety.py
+          bridge/agent_initializer.py
+          benchmarks/customer
+          benchmarks/skills
+          config.py
+          tests/fixtures/skill_governance_lock_worker.py
+          tests/fixtures/skill_projection_crash_worker.py
+          tests/fixtures/customer_executor_adapter.py
+          tests/test_governed_skills.py
+          tests/test_governed_skill_boundaries.py
+          tests/test_skill_shadow_retrieval.py
+          tests/test_skill_selection_benchmark.py
+          tests/test_customer_acceptance.py

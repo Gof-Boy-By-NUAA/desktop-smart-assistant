@@ -1,0 +1,125 @@
+{
+  "checks": [
+    {
+      "actual": 3,
+      "expected": 3,
+      "name": "schema_version",
+      "passed": true
+    },
+    {
+      "actual": "29ccb24adb2cd5ea5fb6ac804c19843cf3d0e83a52971c1a063e81f2b9370338",
+      "expected": "29ccb24adb2cd5ea5fb6ac804c19843cf3d0e83a52971c1a063e81f2b9370338",
+      "name": "comparison_implementation_sha256",
+      "passed": true
+    },
+    {
+      "actual": "5cfe4414c28a8ecbb51670f78c0dc7d1049f286c2d5769b52f1f94bcc0752cf1",
+      "expected": "5cfe4414c28a8ecbb51670f78c0dc7d1049f286c2d5769b52f1f94bcc0752cf1",
+      "name": "baseline.dataset.sha256",
+      "passed": true
+    },
+    {
+      "actual": "5cfe4414c28a8ecbb51670f78c0dc7d1049f286c2d5769b52f1f94bcc0752cf1",
+      "expected": "5cfe4414c28a8ecbb51670f78c0dc7d1049f286c2d5769b52f1f94bcc0752cf1",
+      "name": "improved.dataset.sha256",
+      "passed": true
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "name": "gate.recall_at_1",
+      "passed": true
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "name": "gate.recall_at_5",
+      "passed": true
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "name": "gate.recall_at_10",
+      "passed": true
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "name": "gate.mrr_at_10",
+      "passed": true
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "name": "gate.empty_result_rate",
+      "passed": true
+    },
+    {
+      "actual": {
+        "gate_passed": true,
+        "statistics_match": true
+      },
+      "expected": {
+        "gate_passed": true,
+        "statistics_match": true
+      },
+      "name": "paired.latency_ms_mean",
+      "passed": true
+    },
+    {
+      "actual": {
+        "gate_passed": true,
+        "statistics_match": true
+      },
+      "expected": {
+        "gate_passed": true,
+        "statistics_match": true
+      },
+      "name": "paired.latency_ms_p50",
+      "passed": true
+    },
+    {
+      "actual": {
+        "gate_passed": true,
+        "statistics_match": true
+      },
+      "expected": {
+        "gate_passed": true,
+        "statistics_match": true
+      },
+      "name": "paired.latency_ms_p95",
+      "passed": true
+    },
+    {
+      "actual": {
+        "gate_passed": true,
+        "statistics_match": true
+      },
+      "expected": {
+        "gate_passed": true,
+        "statistics_match": true
+      },
+      "name": "paired.index_latency_ms",
+      "passed": true
+    },
+    {
+      "actual": 9,
+      "expected": 9,
+      "name": "gate_count",
+      "passed": true
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "name": "report.passed",
+      "passed": true
+    }
+  ],
+  "comparison_implementation_sha256": "29ccb24adb2cd5ea5fb6ac804c19843cf3d0e83a52971c1a063e81f2b9370338",
+  "dataset_path": "benchmarks\\.cache\\cmrc2018-source\\data\\cmrc2018_dev.json",
+  "dataset_sha256": "5cfe4414c28a8ecbb51670f78c0dc7d1049f286c2d5769b52f1f94bcc0752cf1",
+  "passed": true,
+  "report_path": "benchmarks\\results\\cmrc2018-comparison.json",
+  "report_sha256": "634eb08f0ed6babc7334f3f371616064dc903fd564ac54161a34ec1c38362f3d",
+  "schema_version": 1
+}

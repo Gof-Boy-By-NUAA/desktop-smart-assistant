@@ -1,0 +1,209 @@
+{
+  "datasets": {
+    "retrieval_cmrc2018": {
+      "exists": true,
+      "path": "benchmarks/.cache/cmrc2018-source/data/cmrc2018_dev.json",
+      "sha256": "5cfe4414c28a8ecbb51670f78c0dc7d1049f286c2d5769b52f1f94bcc0752cf1"
+    },
+    "skills_selection": {
+      "exists": true,
+      "path": "benchmarks/skills/github_issue_skill_selection.json",
+      "sha256": "ed5587e918854a32e8ee143550f2ef88e841bf311a3efbc3eb43c756edf889d8"
+    }
+  },
+  "generated_at": "2026-08-02T15:06:31.816340+00:00",
+  "git": {
+    "all_source_paths_tracked": false,
+    "clean": false,
+    "commit": "0b1b295b0d2d816decad0e91bb0835d13cb86d37",
+    "commit_bound": false,
+    "source_file_count": 192,
+    "status_sha256": "c006b272eca7b25ae6693ec32814a75ea30b61c481f861edbdd701adf0cce8e3",
+    "tracked_source_count": 0
+  },
+  "hard_denials": {
+    "72H_SOAK": "NOT_RUN",
+    "BRANCH_PROTECTION": "ABSENT",
+    "CUSTOMER_ATTESTATION": "ABSENT",
+    "CUSTOMER_TEST_EXECUTION": "NOT_RUN",
+    "DOCKER_BUILD": "NOT_RUN",
+    "EXTERNAL_VERIFIER_ATTESTATION": "ABSENT",
+    "FDE_CASE_EVIDENCE": "ABSENT",
+    "GIT_COMMIT_BOUND_EVIDENCE": "ABSENT",
+    "INSTALLER_SMOKE_TEST": "NOT_RUN",
+    "KNOWLEDGE_INDEPENDENT_VERIFICATION": "NO",
+    "KNOWLEDGE_LOCAL_RECOMPUTATION_VERIFIED": "YES",
+    "MIGRATION_ROLLBACK_TEST": "NOT_RUN",
+    "PRODUCTION_ALERT_FIRE_TEST": "NOT_RUN",
+    "REMOTE_CI_REQUIRED_CHECKS": "NOT_RUN",
+    "REPRODUCIBLE_BUILD": "NOT_RUN",
+    "SESSION_CITATION_PRODUCTION_VERIFIED": "NOT_RUN",
+    "SESSION_CITATION_UI_CLOSED_LOOP": "YES",
+    "SIGNED_RELEASE_ARTIFACT": "ABSENT",
+    "SKILLS_GOLD_DATASET_VALID": "NO",
+    "SKILLS_PRODUCTION_GATE_ELIGIBLE": "NO",
+    "TARGET_CUSTOMER_ACCEPTANCE": "NO"
+  },
+  "passed": false,
+  "reports": {
+    "customer_acceptance": {
+      "exists": true,
+      "limitations": null,
+      "passed": false,
+      "path": "benchmarks/results/customer-skill-acceptance.json",
+      "schema_version": 1,
+      "sha256": "35c26d30c08f48fae66290100811dc5e2ce60257bb3d67949e2e197d6ff04dbc",
+      "status": "pending_customer_inputs"
+    },
+    "knowledge_comparison": {
+      "current_implementation_sha256": "86931e99b064f73bec47eec221cf3f87522e0eee81da7f1530f3391aee3f066a",
+      "declared_implementation_sha256": "86931e99b064f73bec47eec221cf3f87522e0eee81da7f1530f3391aee3f066a",
+      "exists": true,
+      "fresh": true,
+      "implementation_fingerprint_field": "comparison_implementation_sha256",
+      "limitations": null,
+      "passed": true,
+      "path": "benchmarks/results/cmrc2018-knowledge-comparison.json",
+      "schema_version": 4,
+      "sha256": "80db21ca44831e781a9dc42abb11d9ff8df2d2612d70547daa161e0a9d7ea9bc",
+      "status": "completed"
+    },
+    "knowledge_verification": {
+      "current_implementation_sha256": "86931e99b064f73bec47eec221cf3f87522e0eee81da7f1530f3391aee3f066a",
+      "current_report_sha256": "80db21ca44831e781a9dc42abb11d9ff8df2d2612d70547daa161e0a9d7ea9bc",
+      "declared_implementation_sha256": "86931e99b064f73bec47eec221cf3f87522e0eee81da7f1530f3391aee3f066a",
+      "declared_report_sha256": "80db21ca44831e781a9dc42abb11d9ff8df2d2612d70547daa161e0a9d7ea9bc",
+      "exists": true,
+      "fresh": true,
+      "implementation_fingerprint_field": "comparison_implementation_sha256",
+      "limitations": null,
+      "passed": true,
+      "path": "benchmarks/results/cmrc2018-knowledge-comparison-verification.json",
+      "schema_version": 1,
+      "sha256": "f652fe622144039d4762887f3cd1f538b408e5e377e01ac93bf3c0bff7bd6bbe",
+      "source_report_linked": true,
+      "status": "completed",
+      "verified_report": "knowledge_comparison"
+    },
+    "memory_outbox": {
+      "current_implementation_sha256": "4257912c14fbbb913afb5587b14f9e2566906f5128ce48fd12372ee30003d70b",
+      "declared_implementation_sha256": "4257912c14fbbb913afb5587b14f9e2566906f5128ce48fd12372ee30003d70b",
+      "exists": true,
+      "fresh": true,
+      "implementation_fingerprint_field": "implementation_sha256",
+      "limitations": null,
+      "passed": true,
+      "path": "benchmarks/results/cmrc2018-memory-outbox.json",
+      "schema_version": 1,
+      "sha256": "0b5bbf571b68a95a0ecacb0daf0d67744ca5a54ac2a27e38c511a9c015ebd767",
+      "status": "completed"
+    },
+    "retrieval_comparison": {
+      "current_implementation_sha256": "29ccb24adb2cd5ea5fb6ac804c19843cf3d0e83a52971c1a063e81f2b9370338",
+      "declared_implementation_sha256": "29ccb24adb2cd5ea5fb6ac804c19843cf3d0e83a52971c1a063e81f2b9370338",
+      "exists": true,
+      "fresh": true,
+      "implementation_fingerprint_field": "comparison_implementation_sha256",
+      "limitations": null,
+      "passed": true,
+      "path": "benchmarks/results/cmrc2018-comparison.json",
+      "schema_version": 3,
+      "sha256": "634eb08f0ed6babc7334f3f371616064dc903fd564ac54161a34ec1c38362f3d",
+      "status": "completed"
+    },
+    "retrieval_verification": {
+      "current_implementation_sha256": "29ccb24adb2cd5ea5fb6ac804c19843cf3d0e83a52971c1a063e81f2b9370338",
+      "current_report_sha256": "634eb08f0ed6babc7334f3f371616064dc903fd564ac54161a34ec1c38362f3d",
+      "declared_implementation_sha256": "29ccb24adb2cd5ea5fb6ac804c19843cf3d0e83a52971c1a063e81f2b9370338",
+      "declared_report_sha256": "634eb08f0ed6babc7334f3f371616064dc903fd564ac54161a34ec1c38362f3d",
+      "exists": true,
+      "fresh": true,
+      "implementation_fingerprint_field": "comparison_implementation_sha256",
+      "limitations": null,
+      "passed": true,
+      "path": "benchmarks/results/cmrc2018-comparison-verification.json",
+      "schema_version": 1,
+      "sha256": "7a7043868e52c2b23c03a9a9072e80571815b2d3f2fc51f0886f84f26c25df4c",
+      "source_report_linked": true,
+      "status": "completed",
+      "verified_report": "retrieval_comparison"
+    },
+    "skills_selection": {
+      "current_implementation_sha256": "8d355b3c997037dc2d5287a333ed45daa9dcf0694ff99c9b01296ef4ac94297e",
+      "declared_implementation_sha256": null,
+      "exists": true,
+      "fresh": false,
+      "implementation_fingerprint_field": "implementation_sha256",
+      "limitations": {
+        "customer_success_rate_measured": false,
+        "governed_subset_only": true,
+        "label_rule_leakage": true,
+        "production_gate_eligible": false
+      },
+      "passed": false,
+      "path": "benchmarks/results/cmrc2018-skills-selection.json",
+      "schema_version": 1,
+      "sha256": "f8c084a55266b367e48a4fe35fdee2f2619feb6293aeb42958f574176afaa117",
+      "status": "blocked_invalid_dataset"
+    },
+    "web_boundary_security": {
+      "current_implementation_sha256": "c767f9c4c18eae482f7a28901cb697e618dbbd538ef5e0cea0ce0e9b005ebac4",
+      "declared_implementation_sha256": "c767f9c4c18eae482f7a28901cb697e618dbbd538ef5e0cea0ce0e9b005ebac4",
+      "exists": true,
+      "fresh": true,
+      "implementation_fingerprint_field": "source_fingerprint_sha256",
+      "limitations": {
+        "customer_execution_verified": false,
+        "local_execution_only": true,
+        "production_deployment_verified": false,
+        "remote_ci_protected": false
+      },
+      "passed": true,
+      "path": "benchmarks/results/web-boundary-security.json",
+      "schema_version": 1,
+      "sha256": "e43b10599d49da6aebbcc2801c91028e1576f280b701b901d2969475b866aaf0",
+      "status": "completed"
+    },
+    "web_boundary_verification": {
+      "current_implementation_sha256": "c767f9c4c18eae482f7a28901cb697e618dbbd538ef5e0cea0ce0e9b005ebac4",
+      "current_report_sha256": "e43b10599d49da6aebbcc2801c91028e1576f280b701b901d2969475b866aaf0",
+      "declared_implementation_sha256": "c767f9c4c18eae482f7a28901cb697e618dbbd538ef5e0cea0ce0e9b005ebac4",
+      "declared_report_sha256": "e43b10599d49da6aebbcc2801c91028e1576f280b701b901d2969475b866aaf0",
+      "exists": true,
+      "fresh": true,
+      "implementation_fingerprint_field": "source_fingerprint_sha256",
+      "limitations": {
+        "local_execution_only": true,
+        "production_deployment_verified": false,
+        "remote_ci_protected": false
+      },
+      "passed": true,
+      "path": "benchmarks/results/web-boundary-security-verification.json",
+      "schema_version": 1,
+      "sha256": "46888e4c6515717ac01bda39d0bd7b7b0dc09b8e01306066829ed7ffda465d26",
+      "source_report_linked": true,
+      "status": "completed",
+      "verified_report": "web_boundary_security"
+    }
+  },
+  "repository_root": "C:\\Users\\UnlimitedPower\\Documents\\桌面智能助手\\SmartAssistant",
+  "required_conditions": {
+    "all_formal_reports_present": true,
+    "clean_release_tree": false,
+    "customer_acceptance": false,
+    "docker_build": false,
+    "external_verifier_attestation": false,
+    "git_commit_bound_evidence": false,
+    "installer_smoke_test": false,
+    "knowledge_formal_gate": true,
+    "memory_formal_gate": true,
+    "migration_rollback_test": false,
+    "reproducible_build": false,
+    "retrieval_formal_gate": true,
+    "session_citation_closed_loop": true,
+    "skills_formal_gate": false,
+    "soak_and_alert_test": false
+  },
+  "schema_version": 1,
+  "source_fingerprint_sha256": "5af889a236ea10efcec56db68d12606e88933e059cae9f190be6712da6ad8a6b"
+}

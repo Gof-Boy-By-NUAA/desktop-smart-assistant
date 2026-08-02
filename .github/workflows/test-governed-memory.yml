@@ -1,0 +1,133 @@
+name: Governed Memory Core Tests
+
+on:
+  push:
+    paths:
+      - "agent/memory/governance/**"
+      - "agent/memory/manager.py"
+      - "agent/memory/config.py"
+      - "agent/evolution/executor.py"
+      - "agent/retrieval/**"
+      - "agent/tools/memory/**"
+      - "agent/tools/utils/governed_memory.py"
+      - "common/path_safety.py"
+      - "agent/tools/read/read.py"
+      - "agent/tools/write/write.py"
+      - "agent/tools/edit/edit.py"
+      - "agent/tools/search_files/search_files.py"
+      - "agent/prompt/builder.py"
+      - "bridge/agent_initializer.py"
+      - "tests/test_governed_memory.py"
+      - "tests/test_governed_memory_runtime.py"
+      - "tests/test_memory_governed_retrieval_integration.py"
+      - "tests/test_memory_outbox_benchmark.py"
+      - "tests/test_agent_initializer_identity.py"
+      - "tests/fixtures/memory_outbox_worker.py"
+      - "benchmarks/memory/**"
+      - "benchmarks/retrieval/data_sources.json"
+      - "benchmarks/retrieval/dataset.py"
+      - "benchmarks/retrieval/metrics.py"
+      - ".github/workflows/test-governed-memory.yml"
+  pull_request:
+    paths:
+      - "agent/memory/governance/**"
+      - "agent/memory/manager.py"
+      - "agent/memory/config.py"
+      - "agent/evolution/executor.py"
+      - "agent/retrieval/**"
+      - "agent/tools/memory/**"
+      - "agent/tools/utils/governed_memory.py"
+      - "common/path_safety.py"
+      - "agent/tools/read/read.py"
+      - "agent/tools/write/write.py"
+      - "agent/tools/edit/edit.py"
+      - "agent/tools/search_files/search_files.py"
+      - "agent/prompt/builder.py"
+      - "bridge/agent_initializer.py"
+      - "tests/test_governed_memory.py"
+      - "tests/test_governed_memory_runtime.py"
+      - "tests/test_memory_governed_retrieval_integration.py"
+      - "tests/test_memory_outbox_benchmark.py"
+      - "tests/test_agent_initializer_identity.py"
+      - "tests/fixtures/memory_outbox_worker.py"
+      - "benchmarks/memory/**"
+      - "benchmarks/retrieval/data_sources.json"
+      - "benchmarks/retrieval/dataset.py"
+      - "benchmarks/retrieval/metrics.py"
+      - ".github/workflows/test-governed-memory.yml"
+  workflow_dispatch:
+
+jobs:
+  governed-memory-tests:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        python-version: ["3.8", "3.11", "3.13"]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install focused test dependencies
+        run: python -m pip install pytest regex requests PyYAML python-dotenv croniter
+
+      - name: Run governed memory tests
+        run: >-
+          python -m pytest
+          tests/test_governed_memory.py
+          tests/test_governed_memory_runtime.py
+          tests/test_memory_governed_retrieval_integration.py
+          tests/test_memory_outbox_benchmark.py
+          tests/test_agent_initializer_identity.py
+          -q
+
+      - name: Compile governed memory package
+        run: >-
+          python -m compileall -q
+          agent/memory/governance
+          agent/memory/manager.py
+          agent/evolution/executor.py
+          agent/retrieval
+          agent/tools/memory
+          agent/tools/utils/governed_memory.py
+          common/path_safety.py
+          tests/test_governed_memory.py
+          tests/test_governed_memory_runtime.py
+          tests/test_memory_governed_retrieval_integration.py
+          tests/test_memory_outbox_benchmark.py
+          tests/test_agent_initializer_identity.py
+          tests/fixtures/memory_outbox_worker.py
+          benchmarks/memory
+
+  governed-memory-real-data-gate:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install benchmark dependencies
+        run: python -m pip install regex requests PyYAML python-dotenv croniter
+
+      - name: Run full CMRC 2018 memory outbox gate
+        run: >-
+          python -m benchmarks.memory.outbox
+          --output benchmarks/results/cmrc2018-memory-outbox.json
+
+      - name: Upload benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cmrc2018-memory-outbox
+          path: benchmarks/results/cmrc2018-memory-outbox.json
+          if-no-files-found: error

@@ -1,0 +1,255 @@
+{
+  "checks": [
+    {
+      "details": {
+        "denied_operations": 4
+      },
+      "name": "conversation_cross_owner_zero_side_effect",
+      "passed": true
+    },
+    {
+      "details": {
+        "denied_operations": 3
+      },
+      "name": "ownerless_store_bypass_rejected",
+      "passed": true
+    },
+    {
+      "details": {
+        "message_count": 0,
+        "state": "deleted"
+      },
+      "name": "delete_tombstone_blocks_late_writer",
+      "passed": true
+    },
+    {
+      "details": {
+        "winner_count": 1,
+        "worker_count": 12
+      },
+      "name": "concurrent_claim_exactly_one_winner",
+      "passed": true
+    },
+    {
+      "details": {
+        "errors": 0,
+        "worker_count": 8
+      },
+      "name": "concurrent_legacy_migration_recovers_all",
+      "passed": true
+    },
+    {
+      "details": {
+        "secret_bytes": 32,
+        "worker_count": 8
+      },
+      "name": "concurrent_knowledge_startup_recovers_all",
+      "passed": true
+    },
+    {
+      "details": {
+        "binding_present": true
+      },
+      "name": "session_citation_server_capability_present",
+      "passed": true
+    },
+    {
+      "details": {
+        "uri_match": true
+      },
+      "name": "session_citation_resolves_without_client_session_claim",
+      "passed": true
+    },
+    {
+      "details": {
+        "tamper_rejected": true
+      },
+      "name": "session_citation_tamper_rejected",
+      "passed": true
+    },
+    {
+      "details": {
+        "cross_principal_rejected": true
+      },
+      "name": "session_citation_cross_principal_rejected",
+      "passed": true
+    },
+    {
+      "details": {
+        "revoked": true
+      },
+      "name": "auth_logout_revokes_presented_nonce",
+      "passed": true
+    },
+    {
+      "details": {
+        "invalidated": true
+      },
+      "name": "auth_restart_invalidates_bearer",
+      "passed": true
+    },
+    {
+      "details": {
+        "old_bearer_invalid": true,
+        "subject_preserved": true
+      },
+      "name": "password_rotation_preserves_non_auth_subject",
+      "passed": true
+    },
+    {
+      "details": {
+        "anonymous_public_bind": "rejected",
+        "default": "loopback",
+        "password_public_bind": "rejected"
+      },
+      "name": "public_bind_without_password_fails_closed",
+      "passed": true
+    },
+    {
+      "details": {
+        "expiry_rejected": true,
+        "hmac_hex_chars": 64
+      },
+      "name": "preview_capability_full_hmac_and_expiry",
+      "passed": true
+    },
+    {
+      "details": {
+        "owner_roots_distinct": true,
+        "prefix_sibling_rejected": true
+      },
+      "name": "upload_prefix_sibling_escape_rejected",
+      "passed": true
+    },
+    {
+      "details": {
+        "desktop": true,
+        "web": true
+      },
+      "name": "web_and_desktop_citation_ui_wired",
+      "passed": true
+    },
+    {
+      "details": {
+        "identity_source": "server",
+        "request_fields": [
+          "uri"
+        ]
+      },
+      "name": "citation_handler_rejects_client_identity_claims",
+      "passed": true
+    },
+    {
+      "details": {
+        "cancel_event_set": false,
+        "victim_still_owned": true
+      },
+      "name": "session_delete_foreign_owner_zero_cancel_side_effect",
+      "passed": true
+    },
+    {
+      "details": {
+        "cache_mutated": false,
+        "foreign_tasks_visible": 0
+      },
+      "name": "scheduler_cross_owner_context_injection_rejected",
+      "passed": true
+    },
+    {
+      "details": {
+        "host_rejected": true,
+        "origin_rejected": true
+      },
+      "name": "dns_rebinding_host_origin_rejected",
+      "passed": true
+    },
+    {
+      "details": {
+        "active_resolved": true,
+        "tombstone_code": 410
+      },
+      "name": "session_citation_tombstone_revokes_capability",
+      "passed": true
+    },
+    {
+      "details": {
+        "file_endpoint_rejected": true,
+        "workspace_resolve_rejected": true
+      },
+      "name": "generic_file_upload_owner_bypass_rejected",
+      "passed": true
+    },
+    {
+      "details": {
+        "bearer_query_rejected": true,
+        "one_shot": true,
+        "request_bound": true
+      },
+      "name": "sse_bearer_url_bypass_rejected",
+      "passed": true
+    },
+    {
+      "details": {
+        "limited": true,
+        "max_failures": 5
+      },
+      "name": "login_bruteforce_rate_limited",
+      "passed": true
+    },
+    {
+      "details": {
+        "filesystem_root_rejected": true
+      },
+      "name": "filesystem_root_serve_denied",
+      "passed": true
+    },
+    {
+      "details": {
+        "expiry_rejected": true,
+        "owner_bound": true,
+        "tamper_rejected": true
+      },
+      "name": "single_file_capability_tamper_and_expiry_rejected",
+      "passed": true
+    }
+  ],
+  "limitations": {
+    "customer_execution_verified": false,
+    "local_execution_only": true,
+    "production_deployment_verified": false,
+    "remote_ci_protected": false
+  },
+  "passed": true,
+  "required_checks": [
+    "conversation_cross_owner_zero_side_effect",
+    "ownerless_store_bypass_rejected",
+    "delete_tombstone_blocks_late_writer",
+    "concurrent_claim_exactly_one_winner",
+    "concurrent_legacy_migration_recovers_all",
+    "concurrent_knowledge_startup_recovers_all",
+    "session_citation_server_capability_present",
+    "session_citation_resolves_without_client_session_claim",
+    "session_citation_tamper_rejected",
+    "session_citation_cross_principal_rejected",
+    "auth_logout_revokes_presented_nonce",
+    "auth_restart_invalidates_bearer",
+    "password_rotation_preserves_non_auth_subject",
+    "public_bind_without_password_fails_closed",
+    "preview_capability_full_hmac_and_expiry",
+    "upload_prefix_sibling_escape_rejected",
+    "web_and_desktop_citation_ui_wired",
+    "citation_handler_rejects_client_identity_claims",
+    "session_delete_foreign_owner_zero_cancel_side_effect",
+    "scheduler_cross_owner_context_injection_rejected",
+    "dns_rebinding_host_origin_rejected",
+    "session_citation_tombstone_revokes_capability",
+    "generic_file_upload_owner_bypass_rejected",
+    "sse_bearer_url_bypass_rejected",
+    "login_bruteforce_rate_limited",
+    "filesystem_root_serve_denied",
+    "single_file_capability_tamper_and_expiry_rejected"
+  ],
+  "schema_version": 1,
+  "source_fingerprint_sha256": "c767f9c4c18eae482f7a28901cb697e618dbbd538ef5e0cea0ce0e9b005ebac4",
+  "status": "completed"
+}

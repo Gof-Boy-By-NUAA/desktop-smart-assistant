@@ -1,0 +1,53 @@
+# VCS, local IDE and cache state
+.git
+.github
+.idea
+.vscode
+.cursor
+.pytest_cache
+**/__pycache__
+**/*.py[cod]
+
+# Never copy credentials or machine-local configuration into an image
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+.preview_secret
+knowledge/.system/citation-capability.key
+config.json
+config.yaml
+client_config.json
+plugins.json
+user_datas.pkl
+**/.dev.vars
+
+# Runtime state and customer/user content
+logs
+*.log
+run.log
+nohup.out
+tmp
+workspace
+local
+ref
+.cow.pid
+QR.png
+
+# Build outputs and heavyweight development-only content
+desktop/node_modules
+desktop/dist
+desktop/release
+desktop/resources/.icon-work
+desktop/resources/bin
+node_modules
+dist
+build
+*.egg-info
+.venv
+venv*
+benchmarks/.cache
+benchmarks/results
+.research

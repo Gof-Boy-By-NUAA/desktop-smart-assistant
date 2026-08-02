@@ -1,0 +1,134 @@
+name: Full Regression and Packaging Checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: full-regression-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python-regression:
+    runs-on: windows-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install declared application dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+          python -m pip install -r requirements.txt
+
+      - name: Verify dependency closure
+        run: python -m pip check
+
+      - name: Verify real web dependencies import
+        run: >-
+          python -c
+          "import web, multipart, cheroot, more_itertools;
+          print('web dependency imports: OK')"
+
+      - name: Run web tests in an isolated process
+        run: python -m pytest tests/test_knowledge_web.py -q
+
+      - name: Run production skill injection and dataset gate tests
+        run: >-
+          python -m pytest
+          tests/test_skill_shadow_retrieval.py
+          tests/test_skill_selection_benchmark.py
+          -q
+
+      - name: Run full Python regression suite
+        run: python -m pytest -q
+
+      - name: Verify strict UTF-8 source decoding
+        shell: pwsh
+        run: |
+          $strictUtf8 = [System.Text.UTF8Encoding]::new($false, $true)
+          $extensions = @(
+            '.css', '.html', '.js', '.json', '.md', '.mdx', '.py', '.sh',
+            '.spec', '.toml', '.ts', '.tsx', '.txt', '.yaml', '.yml'
+          )
+          $excluded = '\\(\.git|\.pytest_cache|__pycache__|node_modules|benchmarks\\.cache)\\'
+          $badFiles = @()
+          Get-ChildItem -Recurse -File |
+            Where-Object { $extensions -contains $_.Extension -and $_.FullName -notmatch $excluded } |
+            ForEach-Object {
+              try {
+                [void]$strictUtf8.GetString([System.IO.File]::ReadAllBytes($_.FullName))
+              } catch {
+                $badFiles += $_.FullName
+              }
+            }
+          if ($badFiles.Count -gt 0) {
+            $badFiles | ForEach-Object { Write-Error "Invalid UTF-8: $_" }
+            exit 1
+          }
+          Write-Host "Strict UTF-8 check passed"
+
+      - name: Compile owned Python sources
+        run: >-
+          python -m compileall -q
+          agent app.py bridge channel cli common config.py models plugins
+          tests translate voice benchmarks/knowledge benchmarks/retrieval
+          benchmarks/skills
+
+      - name: Parse desktop backend spec
+        run: >-
+          python -c
+          "from pathlib import Path;
+          path=Path('desktop/build/smart-assistant-backend.spec');
+          compile(path.read_text(encoding='utf-8'), str(path), 'exec');
+          print('desktop backend spec syntax: OK')"
+
+  desktop-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    defaults:
+      run:
+        working-directory: desktop
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Install desktop dependencies
+        run: npm ci
+
+      - name: Build desktop renderer and main process
+        run: npm run build
+
+      - name: Verify attribution resources are configured
+        run: >-
+          node -e
+          "const fs=require('fs');
+          const p=require('./package.json');
+          const r=p.build.extraResources || [];
+          for (const f of ['../LICENSE','../NOTICE']) {
+            if (!r.some(x => x.from === f)) throw new Error('missing '+f);
+            if (!fs.existsSync(f)) throw new Error('source not found '+f);
+          }
+          console.log('desktop attribution resources: OK');"

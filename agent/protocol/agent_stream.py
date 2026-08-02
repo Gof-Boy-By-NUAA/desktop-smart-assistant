@@ -1,0 +1,2498 @@
+"""
+Agent Stream Execution Module - Multi-turn reasoning based on tool-call
+
+Provides streaming output, event system, and complete tool-call loop
+"""
+import json
+import re
+import time
+from typing import List, Dict, Any, Optional, Callable, Tuple
+
+from agent.protocol.cancel import AgentCancelledError
+from agent.protocol.models import LLMRequest, LLMModel
+from agent.protocol.message_utils import (
+    sanitize_claude_messages,
+    compress_turn_to_text_only,
+    identify_complete_turns,
+    build_compaction_summary_text,
+    find_first_user_text_block,
+)
+from agent.tools.base_tool import BaseTool, ToolResult
+from common.log import logger
+from common.i18n import t as _t
+
+# Optional: repair malformed JSON args from non-strict providers (e.g. unescaped quotes in long content).
+try:
+    from json_repair import repair_json as _repair_json
+    _HAS_JSON_REPAIR = True
+except ImportError:
+    _HAS_JSON_REPAIR = False
+
+
+# Maximum number of characters of model "reasoning / thinking" content to persist
+# in conversation history. The full reasoning is still streamed to the UI in real
+# time (subject to its own SSE / rendering limits); this bound only controls what
+# is stored in DB and replayed in history. Long reasoning is not useful for later
+# context (the LLM never sees thinking blocks anyway) and bloats DB.
+# Keep aligned with the frontend REASONING_RENDER_CAP and the SSE
+# MAX_REASONING_STREAM_CHARS so that storage / stream / display all match.
+MAX_STORED_REASONING_CHARS = 4 * 1024  # 4 KB
+
+# 工具结果进入模型上下文前的字符上限。所有收缩路径都必须替换整个 JSON，
+# 不能切片序列化文本，否则会制造不可解析 JSON 或半截引用 URI。
+MAX_CURRENT_TURN_RESULT_CHARS = 50000
+MAX_HISTORY_RESULT_CHARS = 20000
+AGGRESSIVE_RESULT_CHARS = 10000
+
+_LEGACY_TRUNCATION_MARKERS = (
+    "[Output truncated:",
+    "[Historical output truncated:",
+    "[Truncated for context recovery:",
+)
+
+# Marker inserted between head and tail when reasoning is truncated.
+_REASONING_TRUNCATE_MARKER = "\n\n... [reasoning truncated, {omitted} chars omitted] ...\n\n"
+
+# --------------------------------------------------------------------------
+# Fatal-error classification.
+#
+# Both branches below drop the whole in-memory context, so a false positive
+# costs the user their working conversation. Every marker must therefore be
+# specific enough that it cannot appear in an unrelated failure: generic words
+# ("without", "each", "must have", "not found") matched far too much, and a
+# bare "400" substring also matched token counts such as 4000.
+# --------------------------------------------------------------------------
+
+# Word-bounded so "4000" / "40096" are not read as HTTP 400.
+_RE_HTTP_400 = re.compile(r"\b400\b")
+
+_CONTEXT_OVERFLOW_MARKERS = (
+    "context length exceeded", "maximum context length", "prompt is too long",
+    "context overflow", "context window", "exceeds model context",
+    "request_too_large", "request exceeds the maximum size",
+    "too many tokens", "input is too long",
+)
+
+# Structural tool_use/tool_result pairing complaints only.
+_MESSAGE_FORMAT_MARKERS = (
+    "tool_use", "tool_result", "tool_call_id", "tool_calls",
+    "tool result", "tool id",
+    "must be a response to a preceeding message",
+)
+
+
+def _is_context_overflow(error_str_lower: str) -> bool:
+    if "[context_overflow]" in error_str_lower:
+        return True
+    return any(m in error_str_lower for m in _CONTEXT_OVERFLOW_MARKERS)
+
+
+def _is_message_format_error(error_str_lower: str) -> bool:
+    """Detect broken tool_use/tool_result pairing rejected by the provider.
+
+    Requires both a structural marker and a 400-class signal, so an unrelated
+    400 (bad model name, missing parameter, oversized upload) never qualifies.
+    """
+    if not any(m in error_str_lower for m in _MESSAGE_FORMAT_MARKERS):
+        return False
+    return bool(
+        _RE_HTTP_400.search(error_str_lower)
+        or "invalid_request" in error_str_lower
+        or "invalidparameter" in error_str_lower
+    )
+
+
+def _truncate_reasoning_for_storage(text: str) -> str:
+    """Trim long reasoning to head + tail with an omission marker.
+
+    Keeps the first and last halves of MAX_STORED_REASONING_CHARS so both the
+    initial chain-of-thought and the final conclusions are preserved for UI
+    replay, without storing the entire (often very large) middle.
+    """
+    if not text:
+        return text
+    if len(text) <= MAX_STORED_REASONING_CHARS:
+        return text
+    half = MAX_STORED_REASONING_CHARS // 2
+    head = text[:half]
+    tail = text[-half:]
+    omitted = len(text) - len(head) - len(tail)
+    return head + _REASONING_TRUNCATE_MARKER.format(omitted=omitted) + tail
+
+
+# Appended only for the file-writing tools, where "send less" needs to say how.
+_SPLIT_WRITE_ADVICE = (
+    "To change an existing file, use edit rather than rewriting the whole file. "
+    "To create a large file, write the first part, then append each remaining part "
+    "with edit using an empty oldText (calling write again would overwrite what you "
+    "just wrote)."
+)
+
+
+def _cut_off_message(cause: str, tool_name: Optional[str]) -> str:
+    message = (
+        f"Your tool call was cut off by {cause}, so it did not run and nothing was written. "
+        "Repeating the same call will be cut off again - send less in one call instead."
+    )
+    if tool_name in ("write", "edit"):
+        message += " " + _SPLIT_WRITE_ADVICE
+    return message
+
+
+def _parse_tool_args(args_str: str, finish_reason: Optional[str],
+                     tool_name: Optional[str] = None) -> Tuple[dict, Optional[str]]:
+    """Parse tool args JSON. Returns (args, error_msg); error_msg is None on success.
+
+    On JSONDecodeError: detect truncation first (skip repair, surface max_tokens hint);
+    otherwise try json-repair for escape issues; finally fall back to the raw decoder error.
+    """
+    truncated_by_limit = finish_reason in ("length", "max_tokens")
+    if not args_str:
+        # No arguments at all is valid for tools that take none, so only the
+        # finish reason can convict here. _execute_tool catches the rest by
+        # checking the call against the tool's required parameters.
+        if truncated_by_limit:
+            return {}, _cut_off_message("the output token limit", tool_name)
+        return {}, None
+    try:
+        return json.loads(args_str), None
+    except json.JSONDecodeError as e:
+        if truncated_by_limit or not args_str.rstrip().endswith("}"):
+            cause = "the output token limit" if truncated_by_limit else "arguments ending mid-JSON"
+            return {}, _cut_off_message(cause, tool_name)
+        if _HAS_JSON_REPAIR:
+            try:
+                repaired = _repair_json(args_str, return_objects=True)
+                if isinstance(repaired, dict):
+                    logger.warning(f"Tool args JSON repaired ({len(args_str)} chars)")
+                    return repaired, None
+            except Exception:
+                pass
+        return {}, f"Invalid JSON in tool arguments: {e.msg}"
+
+
+def _reject_nonfinite_json(value: str) -> None:
+    """拒绝 JSON 标准不允许的 NaN 和 Infinity。"""
+    raise ValueError(f"non-finite JSON constant: {value}")
+
+
+def _json_for_model(value: Any) -> str:
+    """生成严格 JSON；不允许依赖 Python 专属的非有限浮点扩展。"""
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+    )
+
+
+def _tool_result_transport_error(
+    code: str,
+    *,
+    message: str,
+    tool_name: Optional[str] = None,
+    original_chars: Optional[int] = None,
+    max_chars: Optional[int] = None,
+    result_type: Optional[str] = None,
+    requested_limit: Optional[int] = None,
+) -> str:
+    """构造不会携带原结果片段的结构化传输错误。"""
+    error = {
+        "code": code,
+        "message": message,
+        "retryable": True,
+        "retry_hint": "请缩小查询范围或降低 limit 后重试。",
+    }
+    optional_fields = {
+        "tool_name": tool_name,
+        "original_chars": original_chars,
+        "max_chars": max_chars,
+        "result_type": result_type,
+        "requested_limit": requested_limit,
+    }
+    error.update({key: value for key, value in optional_fields.items() if value is not None})
+    return _json_for_model({"status": "error", "error": error})
+
+
+def _serialize_tool_result_for_model(
+    result: Dict[str, Any],
+    tool_name: str,
+    arguments: Optional[Dict[str, Any]] = None,
+    max_chars: int = MAX_CURRENT_TURN_RESULT_CHARS,
+) -> Tuple[str, bool, int]:
+    """把一次工具执行结果编码为完整 JSON。
+
+    返回值依次为 JSON 文本、是否发生传输错误、原始序列化字符数。
+    超限时不保留正文前缀，避免模型把半截知识引用当成可用证据。
+    """
+    status = result.get("status")
+    raw_result = result.get("result", "")
+    if status == "error":
+        payload: Any = {"status": "error", "error": raw_result}
+    elif isinstance(raw_result, (dict, list, str, int, float, bool)) or raw_result is None:
+        payload = raw_result
+    else:
+        payload = result
+
+    try:
+        encoded = _json_for_model(payload)
+    except (TypeError, ValueError, OverflowError):
+        encoded = _tool_result_transport_error(
+            "tool_result_not_json_serializable",
+            message="工具结果无法安全序列化为 JSON。",
+            tool_name=tool_name,
+            result_type=type(raw_result).__name__,
+        )
+        return encoded, True, 0
+
+    original_chars = len(encoded)
+    if original_chars <= max_chars:
+        return encoded, False, original_chars
+
+    requested_limit = None
+    if isinstance(arguments, dict):
+        candidate_limit = arguments.get("limit")
+        if isinstance(candidate_limit, int) and not isinstance(candidate_limit, bool):
+            requested_limit = candidate_limit
+    encoded = _tool_result_transport_error(
+        "tool_result_too_large",
+        message="工具结果过大，无法安全放入模型上下文。",
+        tool_name=tool_name,
+        original_chars=original_chars,
+        max_chars=max_chars,
+        result_type=type(raw_result).__name__,
+        requested_limit=requested_limit,
+    )
+    return encoded, True, original_chars
+
+
+def _normalize_tool_result_json(
+    content: Any,
+    *,
+    max_chars: Optional[int] = None,
+    oversize_code: str = "tool_result_too_large",
+) -> Tuple[str, bool]:
+    """规范历史或合成工具结果，保证最终内容是严格且完整的 JSON。"""
+    if isinstance(content, str) and any(
+        marker in content for marker in _LEGACY_TRUNCATION_MARKERS
+    ):
+        return _tool_result_transport_error(
+            "legacy_truncated_tool_result",
+            message="旧版工具结果曾被截断，已拒绝将不完整内容送入模型。",
+            result_type="str",
+        ), True
+
+    try:
+        if isinstance(content, str):
+            try:
+                parsed = json.loads(content, parse_constant=_reject_nonfinite_json)
+            except (json.JSONDecodeError, ValueError):
+                parsed = content
+        else:
+            parsed = content
+        encoded = _json_for_model(parsed)
+    except (TypeError, ValueError, OverflowError):
+        return _tool_result_transport_error(
+            "tool_result_not_json_serializable",
+            message="工具结果无法安全序列化为 JSON。",
+            result_type=type(content).__name__,
+        ), True
+
+    if max_chars is None or len(encoded) <= max_chars:
+        return encoded, False
+    return _tool_result_transport_error(
+        oversize_code,
+        message="工具结果超过当前上下文传输上限，完整内容未发送。",
+        original_chars=len(encoded),
+        max_chars=max_chars,
+        result_type=type(parsed).__name__,
+    ), True
+
+
+class AgentStreamExecutor:
+    """
+    Agent Stream Executor
+    
+    Handles multi-turn reasoning loop based on tool-call:
+    1. LLM generates response (may include tool calls)
+    2. Execute tools
+    3. Return results to LLM
+    4. Repeat until no more tool calls
+    """
+
+    def __init__(
+            self,
+            agent,  # Agent instance
+            model: LLMModel,
+            system_prompt: str,
+            tools: List[BaseTool],
+            max_turns: int = 50,
+            on_event: Optional[Callable] = None,
+            messages: Optional[List[Dict]] = None,
+            max_context_turns: int = 30,
+            cancel_event=None,
+            steer_inbox=None,
+            skill_filter=None,
+    ):
+        """
+        Initialize stream executor
+        
+        Args:
+            agent: Agent instance (for accessing context)
+            model: LLM model
+            system_prompt: System prompt
+            tools: List of available tools
+            max_turns: Maximum number of turns
+            on_event: Event callback function
+            messages: Optional existing message history (for persistent conversations)
+            max_context_turns: Maximum number of conversation turns to keep in context
+            cancel_event: Optional threading.Event used to signal user cancel.
+                Checked at every safe point (turn boundary, before tool execution,
+                during LLM streaming). When set, raises AgentCancelledError which
+                run_stream catches to gracefully wind down.
+            steer_inbox: Optional SteerInbox for explicit instructions sent to
+                this active run. Drained only at message-safe checkpoints.
+        """
+        self.agent = agent
+        self.model = model
+        self.system_prompt = system_prompt
+        # Convert tools list to dict
+        self.tools = {tool.name: tool for tool in tools} if isinstance(tools, list) else tools
+        self.max_turns = max_turns
+        self.on_event = on_event
+        self.max_context_turns = max_context_turns
+        self.cancel_event = cancel_event
+        self.steer_inbox = steer_inbox
+        self.skill_filter = skill_filter
+
+        # Message history - use provided messages or create new list
+        self.messages = messages if messages is not None else []
+        
+        # Tool failure tracking for retry protection
+        self.tool_failure_history = []  # List of (tool_name, args_hash, success) tuples
+        
+        # Track files to send (populated by read tool)
+        self.files_to_send = []  # List of file metadata dicts
+
+        # Absolute paths already reported as artifacts, so a write-then-edit
+        # sequence on the same file only surfaces one card in the UI.
+        self._emitted_artifacts = set()
+
+    def _check_cancelled(self) -> None:
+        """Raise AgentCancelledError if the user requested cancellation.
+
+        Called at safe points (turn start, between tool calls, between LLM
+        chunks). Cheap to call: just an Event.is_set() probe.
+        """
+        if self.cancel_event is not None and self.cancel_event.is_set():
+            raise AgentCancelledError("agent cancelled by user")
+
+    def _drain_steering(self) -> List[str]:
+        if self.steer_inbox is None:
+            return []
+        return self.steer_inbox.drain()
+
+    @staticmethod
+    def _steering_text(updates: List[str]) -> str:
+        if len(updates) == 1:
+            body = updates[0]
+        else:
+            body = "\n".join(f"{idx}. {text}" for idx, text in enumerate(updates, 1))
+        return (
+            "[Steering update for the active task]\n"
+            "Use this new instruction for the current task before continuing.\n\n"
+            f"{body}"
+        )
+
+    def _append_steering(
+        self,
+        updates: List[str],
+        pending_tool_calls: Optional[List[Dict]] = None,
+        content_blocks: Optional[List[Dict]] = None,
+    ) -> None:
+        """Append guidance, closing any tool_use blocks that will be skipped."""
+        if not updates:
+            return
+        blocks = content_blocks if content_blocks is not None else []
+        for tool_call in pending_tool_calls or []:
+            blocks.append({
+                "type": "tool_result",
+                "tool_use_id": tool_call["id"],
+                "content": "Skipped because the user redirected the active task.",
+                "is_error": True,
+            })
+        blocks.append({"type": "text", "text": self._steering_text(updates)})
+        if content_blocks is None:
+            self.messages.append({"role": "user", "content": blocks})
+        self._emit_event("agent_steered", {"count": len(updates)})
+        logger.info(f"[Agent] Applied {len(updates)} steering update(s)")
+
+    def _close_or_apply_final_steering(self) -> bool:
+        """Return True only when the run can finish without losing a steer."""
+        updates = self._drain_steering()
+        if updates:
+            self._append_steering(updates)
+            return False
+        if self.steer_inbox is None:
+            return True
+        if self.steer_inbox.close_if_empty():
+            return True
+        updates = self._drain_steering()
+        if updates:
+            self._append_steering(updates)
+        return False
+
+    def _drain_and_close_steering(self) -> None:
+        """Preserve any final guidance before the max-step summary call."""
+        if self.steer_inbox is None:
+            return
+        while True:
+            updates = self._drain_steering()
+            if updates:
+                self._append_steering(updates)
+            if self.steer_inbox.close_if_empty():
+                return
+
+    def _handle_cancelled(self, partial_response: str) -> None:
+        """Wind down ``self.messages`` after a user-initiated cancel.
+
+        The messages list may be in any of these states when we get here:
+          (a) Last message is an assistant message containing tool_use
+              blocks but the matching tool_result has not been appended yet.
+          (b) Last message is an assistant text-only reply (cancel happened
+              right before the next turn started).
+          (c) Last message is a user tool_result message and we cancelled
+              between turns.
+
+        For (a) we MUST synthesise tool_result blocks, otherwise the next
+        request will fail Claude/OpenAI's strict pairing validation. For
+        (b)/(c) the state is already valid and we just append a small
+        cancellation note so the user/LLM both see the boundary clearly.
+        """
+        try:
+            # Step 1: close any orphaned tool_use in the trailing assistant
+            # message by injecting matching tool_result blocks.
+            if self.messages and isinstance(self.messages[-1], dict) \
+                    and self.messages[-1].get("role") == "assistant":
+                last = self.messages[-1]
+                content = last.get("content")
+                if isinstance(content, list):
+                    pending_tool_use_ids = [
+                        block.get("id")
+                        for block in content
+                        if isinstance(block, dict) and block.get("type") == "tool_use"
+                    ]
+                    pending_tool_use_ids = [tid for tid in pending_tool_use_ids if tid]
+                    if pending_tool_use_ids:
+                        tool_result_blocks = [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": tid,
+                                "content": "Cancelled by user before this tool finished.",
+                                "is_error": True,
+                            }
+                            for tid in pending_tool_use_ids
+                        ]
+                        self.messages.append({
+                            "role": "user",
+                            "content": tool_result_blocks,
+                        })
+                        logger.info(
+                            f"[Agent] Injected {len(tool_result_blocks)} cancellation "
+                            f"tool_result blocks to keep message history valid"
+                        )
+
+            # Step 2: append a stable "interrupted" marker so the LLM sees a
+            # clear stop boundary on the next turn.
+            self.messages.append({
+                "role": "assistant",
+                "content": [{"type": "text", "text": self._cancellation_marker()}],
+            })
+        except Exception as e:
+            logger.warning(f"[Agent] _handle_cancelled cleanup failed: {e}")
+
+    def _cancellation_marker(self) -> str:
+        """Stop-boundary note, listing background jobs a cancel does not kill."""
+        marker = "_(Cancelled by user)_"
+        try:
+            from agent.tools.bash import background
+            running = [
+                job
+                for job in background.list_jobs(
+                    owner_id=getattr(self.agent, "conversation_owner_id", None),
+                    session_id=getattr(self.agent, "session_id", None),
+                )
+                if job["running"]
+            ]
+        except Exception:
+            return marker
+        if not running:
+            return marker
+        lines = "\n".join(
+            f"- {job['id']}: {job['command']} ({job['elapsed']}s elapsed)"
+            for job in running
+        )
+        return (
+            f"{marker}\nBackground commands are still running - cancelling does not "
+            f"stop them. Use bash(bash_id=..., kill=true) to stop one.\n{lines}"
+        )
+
+    def _emit_event(self, event_type: str, data: dict = None):
+        """Emit event"""
+        if self.on_event:
+            try:
+                self.on_event({
+                    "type": event_type,
+                    "timestamp": time.time(),
+                    "data": data or {}
+                })
+            except Exception as e:
+                logger.error(f"Event callback error: {e}")
+
+    # Tools whose successful execution may have produced a user-facing file.
+    _ARTIFACT_TOOLS = ("write", "edit")
+
+    def _maybe_emit_artifact(self, tool_call: dict, result: dict) -> None:
+        """Report a file written by `write`/`edit` so clients can preview it."""
+        if not self.on_event:
+            return
+        if tool_call.get("name") not in self._ARTIFACT_TOOLS:
+            return
+        if result.get("status") != "success":
+            return
+
+        data = result.get("result")
+        path = data.get("path") if isinstance(data, dict) else None
+        if not path:
+            path = (tool_call.get("arguments") or {}).get("path")
+        if not path:
+            return
+
+        from agent.protocol.artifact import safe_build_artifact
+
+        artifact = safe_build_artifact(path)
+        if not artifact:
+            return
+        if artifact["path"] in self._emitted_artifacts:
+            return
+        self._emitted_artifacts.add(artifact["path"])
+        logger.info(f"🗂  Artifact: {artifact['rel_path']} ({artifact['kind']})")
+        self._emit_event("artifact", artifact)
+
+    def _is_thinking_enabled(self) -> bool:
+        """Whether deep-thinking mode is on at the model layer.
+
+        Mirrors the global toggle used by ``bridge.agent_bridge`` when deciding
+        whether to send ``thinking={"type": "enabled"}`` to the model. Used for
+        logging and reasoning-update event emission across all channels.
+        """
+        from config import conf
+        return bool(conf().get("enable_thinking", False))
+
+    def _should_render_thinking_inline(self) -> bool:
+        """Whether ``<think>...</think>`` blocks embedded directly in ``content``
+        (MiniMax, some third-party proxies) should be surfaced to the channel.
+
+        Only the Web console can render them in a collapsible panel. IM channels
+        (WeChat/WeCom/DingTalk/Feishu) must strip them, otherwise users see raw
+        XML tags in their chat.
+        """
+        from config import conf
+        channel_type = getattr(self.model, 'channel_type', '') or ''
+        return conf().get("enable_thinking", False) and channel_type == 'web'
+
+    def _filter_think_tags(self, text: str) -> str:
+        """
+        Handle <think>...</think> blocks in content returned by some LLM providers
+        (e.g., MiniMax).
+
+        - When inline thinking rendering is allowed (Web + thinking enabled):
+          remove only the tags, keep the content inside.
+        - Otherwise (IM channels, or thinking disabled globally): remove both
+          the tags and the content entirely.
+        """
+        if not text:
+            return text
+        import re
+        if self._should_render_thinking_inline():
+            text = re.sub(r'<think>', '', text)
+            text = re.sub(r'</think>', '', text)
+        else:
+            text = re.sub(r'<think>[\s\S]*?</think>', '', text)
+            # Also strip unclosed <think> tag at the end (streaming partial)
+            text = re.sub(r'<think>[\s\S]*$', '', text)
+        return text
+
+    def _hash_args(self, args: dict) -> str:
+        """Generate a simple hash for tool arguments"""
+        import hashlib
+        # Sort keys for consistent hashing
+        args_str = json.dumps(args, sort_keys=True, ensure_ascii=False)
+        return hashlib.md5(args_str.encode()).hexdigest()[:8]
+    
+    def _check_consecutive_failures(self, tool_name: str, args: dict) -> Tuple[bool, str, bool]:
+        """
+        Check if tool has failed too many times consecutively or called repeatedly with same args
+        
+        Returns:
+            (should_stop, reason, is_critical)
+            - should_stop: Whether to stop tool execution
+            - reason: Reason for stopping
+            - is_critical: Whether to abort entire conversation (True for 8+ failures)
+        """
+        args_hash = self._hash_args(args)
+        
+        # Count consecutive calls (both success and failure) for same tool + args
+        # This catches infinite loops where tool succeeds but LLM keeps calling it
+        same_args_calls = 0
+        for name, ahash, success in reversed(self.tool_failure_history):
+            if name == tool_name and ahash == args_hash:
+                same_args_calls += 1
+            else:
+                break  # Different tool or args, stop counting
+        
+        # Stop at 5 consecutive calls with same args (whether success or failure)
+        if same_args_calls >= 5:
+            return True, f"工具 '{tool_name}' 使用相同参数已被调用 {same_args_calls} 次，停止执行以防止无限循环。如果需要查看配置，结果已在之前的调用中返回。", False
+        
+        # Count consecutive failures for same tool + args
+        same_args_failures = 0
+        for name, ahash, success in reversed(self.tool_failure_history):
+            if name == tool_name and ahash == args_hash:
+                if not success:
+                    same_args_failures += 1
+                else:
+                    break  # Stop at first success
+            else:
+                break  # Different tool or args, stop counting
+        
+        if same_args_failures >= 3:
+            return True, f"工具 '{tool_name}' 使用相同参数连续失败 {same_args_failures} 次，停止执行以防止无限循环", False
+        
+        # Count consecutive failures for same tool (any args)
+        same_tool_failures = 0
+        for name, ahash, success in reversed(self.tool_failure_history):
+            if name == tool_name:
+                if not success:
+                    same_tool_failures += 1
+                else:
+                    break  # Stop at first success
+            else:
+                break  # Different tool, stop counting
+        
+        # Hard stop at 8 failures - abort with critical message
+        if same_tool_failures >= 8:
+            return True, _t(
+                "抱歉，我没能完成这个任务。可能是我理解有误或者当前方法不太合适。\n\n建议你：\n• 换个方式描述需求试试\n• 把任务拆分成更小的步骤\n• 或者换个思路来解决",
+                "Sorry, I couldn't complete this task. I may have misunderstood, or my current approach isn't quite right.\n\nYou could try:\n• Rephrasing your request\n• Breaking the task into smaller steps\n• Taking a different approach",
+            ), True
+        
+        # Warning at 6 failures
+        if same_tool_failures >= 6:
+            return True, f"工具 '{tool_name}' 连续失败 {same_tool_failures} 次（使用不同参数），停止执行以防止无限循环", False
+        
+        return False, "", False
+    
+    def _record_tool_result(self, tool_name: str, args: dict, success: bool):
+        """Record tool execution result for failure tracking"""
+        args_hash = self._hash_args(args)
+        self.tool_failure_history.append((tool_name, args_hash, success))
+        # Keep only last 50 records to avoid memory bloat
+        if len(self.tool_failure_history) > 50:
+            self.tool_failure_history = self.tool_failure_history[-50:]
+
+    def _start_skill_shadow(self, user_message: str) -> None:
+        """启动影子检索，并在显式开启时执行生产元数据注入。"""
+
+        self._skill_shadow_runtime = None
+        self._skill_shadow_run = None
+        self._skill_shadow_message_start = None
+        self._skill_shadow_call_ids = {}
+        self._skill_shadow_tool_ordinal = 0
+        self._skill_injection_state = None
+        self.agent.__dict__.pop("_last_skill_injection", None)
+        injection_requested = False
+        manager = None
+        try:
+            from config import conf
+
+            shadow_enabled = bool(
+                conf().get("skill_shadow_retrieval_enabled", False)
+            )
+            injection_enabled = bool(
+                conf().get("skill_retrieval_injection_enabled", False)
+            )
+            if injection_enabled and self.skill_filter is not None:
+                self._set_skill_injection_state("explicit_filter", (), None)
+                injection_enabled = False
+            injection_requested = injection_enabled
+            if not shadow_enabled and not injection_enabled:
+                return
+            manager = getattr(self.agent, "skill_manager", None)
+            identity = getattr(self.agent, "identity_context", None)
+            if manager is None or identity is None:
+                if injection_enabled:
+                    self._fail_closed_skill_injection(
+                        manager,
+                        "identity_unavailable" if manager is not None else "manager_unavailable",
+                    )
+                return
+            runtime = manager.get_shadow_runtime()
+            if runtime is None:
+                if injection_enabled:
+                    self._fail_closed_skill_injection(
+                        manager, "governance_unavailable"
+                    )
+                return
+            model_id = self._skill_model_id()
+            session_id = getattr(self.agent, "session_id", None) or getattr(
+                self.model, "session_id", None
+            )
+            shadow_top_k = int(
+                conf().get("skill_shadow_retrieval_top_k", 5) or 5
+            )
+            injection_top_k = int(
+                conf().get("skill_retrieval_injection_top_k", 5) or 5
+            )
+            top_k = max(
+                shadow_top_k if shadow_enabled else 0,
+                injection_top_k if injection_enabled else 0,
+            )
+            if top_k <= 0:
+                raise ValueError("技能检索 top_k 必须大于零")
+            run = runtime.start_run(
+                identity,
+                user_message,
+                model_id,
+                session_id,
+                top_k=top_k,
+            )
+            self._skill_shadow_runtime = runtime
+            self._skill_shadow_run = run
+            self._skill_shadow_message_start = len(self.messages) - 1
+            if injection_enabled:
+                self._apply_production_skill_injection(
+                    manager,
+                    identity,
+                    runtime,
+                    run,
+                    model_id,
+                    injection_top_k,
+                )
+        except Exception as error:
+            logger.warning(
+                "[SkillShadow] start skipped after %s", type(error).__name__
+            )
+            if injection_requested:
+                self._fail_closed_skill_injection(
+                    manager,
+                    "retrieval_failed",
+                    failure_class=type(error).__name__,
+                )
+
+    def _skill_model_id(self) -> str:
+        """返回本轮用于模型兼容性复核的稳定模型标识。"""
+
+        return str(
+            getattr(self.model, "model", None)
+            or getattr(self.model, "model_name", None)
+            or type(self.model).__name__
+        ).strip()
+
+    @staticmethod
+    def _candidate_audit_metadata(candidates) -> list:
+        """只保留可复核的治理标识，不记录任务或技能正文。"""
+
+        return [
+            {
+                "skill_id": str(candidate.skill_id),
+                "version": int(candidate.version),
+                "content_hash": str(candidate.content_hash),
+            }
+            for candidate in candidates
+        ]
+
+    def _set_skill_injection_state(
+        self,
+        status: str,
+        candidates,
+        run,
+        *,
+        telemetry_recorded: bool = False,
+        failure_class: str = None,
+    ) -> None:
+        """发布不含任务、参数和结果正文的本轮注入状态。"""
+
+        state = {
+            "status": str(status),
+            "run_id": str(run.run_id) if run is not None else None,
+            "selected": self._candidate_audit_metadata(candidates),
+            "selected_count": len(candidates),
+            "telemetry_recorded": bool(telemetry_recorded),
+        }
+        if failure_class:
+            state["failure_class"] = str(failure_class)
+        self._skill_injection_state = state
+        self.agent._last_skill_injection = dict(state)
+        self._emit_event("skill_injection", dict(state))
+
+    def _apply_production_skill_injection(
+        self,
+        manager,
+        identity,
+        runtime,
+        run,
+        model_id: str,
+        top_k: int,
+    ) -> None:
+        """在治理锁内复核 Top-K 候选并重建本轮系统提示词。"""
+
+        candidates = tuple(run.candidates[:top_k])
+        with manager.production_injection_lock():
+            manager.refresh_skills()
+            verified, names = manager.verify_production_candidates(
+                identity, candidates, model_id
+            )
+            skill_filter = manager.production_skill_filter(names)
+            self.system_prompt = self.agent.get_full_system_prompt(
+                skill_filter=skill_filter,
+                strict_skill_filter=True,
+                preverified_skill_filter=True,
+            )
+            reverified, renames = manager.verify_production_candidates(
+                identity, verified, model_id
+            )
+            if reverified != verified:
+                verified = reverified
+                skill_filter = manager.production_skill_filter(renames)
+                self.system_prompt = self.agent.get_full_system_prompt(
+                    skill_filter=skill_filter,
+                    strict_skill_filter=True,
+                    preverified_skill_filter=True,
+                )
+
+        if verified:
+            status = "injected"
+        elif candidates:
+            status = "no_eligible_candidate"
+        else:
+            status = "no_match"
+        try:
+            runtime.record_injection(run, status, verified)
+        except Exception as error:
+            logger.warning(
+                "[SkillInjection] telemetry failed after %s",
+                type(error).__name__,
+            )
+            self._fail_closed_skill_injection(
+                manager,
+                "telemetry_failed",
+                failure_class=type(error).__name__,
+            )
+            return
+        self._set_skill_injection_state(
+            status,
+            verified,
+            run,
+            telemetry_recorded=True,
+        )
+
+    def _fail_closed_skill_injection(
+        self,
+        manager,
+        status: str,
+        *,
+        failure_class: str = None,
+    ) -> None:
+        """检索或复核失败时移除全部治理技能元数据。"""
+
+        try:
+            if manager is None:
+                raise RuntimeError("技能管理器不可用")
+            with manager.production_injection_lock():
+                manager.refresh_skills()
+                skill_filter = manager.production_skill_filter(())
+                self.system_prompt = self.agent.get_full_system_prompt(
+                    skill_filter=skill_filter,
+                    strict_skill_filter=True,
+                    preverified_skill_filter=True,
+                )
+        except Exception as error:
+            # 极端故障下移除整个技能区段，确保未知格式也不会回退全量治理技能。
+            self.system_prompt = self.agent._strip_skill_sections(
+                self.system_prompt
+            )
+            if failure_class is None:
+                failure_class = type(error).__name__
+        self._set_skill_injection_state(
+            status, (), None, failure_class=failure_class
+        )
+
+    def _finish_skill_shadow(self, status: str, final_response: object) -> None:
+        """结束影子运行；遥测失败不得改变用户响应。"""
+
+        runtime = getattr(self, "_skill_shadow_runtime", None)
+        run = getattr(self, "_skill_shadow_run", None)
+        if runtime is None or run is None:
+            return
+        try:
+            runtime.finish_run(run, status, final_response)
+            message_start = getattr(self, "_skill_shadow_message_start", None)
+            message_end = len(self.messages)
+            if (
+                isinstance(message_start, int)
+                and 0 <= message_start < message_end
+            ):
+                completed = list(
+                    getattr(self.agent, "_skill_shadow_completed_runs", ()) or ()
+                )
+                completed.append(
+                    {
+                        "run_id": run.run_id,
+                        "message_start": message_start,
+                        "message_end": message_end,
+                    }
+                )
+                self.agent._skill_shadow_completed_runs = completed[-32:]
+                self.agent._last_skill_shadow_run_id = run.run_id
+                self.agent._skill_shadow_run_ids = [
+                    item["run_id"] for item in completed[-32:]
+                ]
+        except Exception as error:
+            logger.warning(
+                "[SkillShadow] finish skipped after %s", type(error).__name__
+            )
+
+    def _shadow_record_tool_use(self, tool_call: Dict[str, Any]) -> None:
+        """记录不含参数值的工具调用结构。"""
+
+        runtime = getattr(self, "_skill_shadow_runtime", None)
+        run = getattr(self, "_skill_shadow_run", None)
+        if runtime is None or run is None:
+            return
+        try:
+            call_id = self._shadow_tool_call_id(tool_call)
+            runtime.record_tool_use(
+                run,
+                call_id,
+                str(tool_call.get("name") or "unknown"),
+                tool_call.get("arguments", {}),
+            )
+        except Exception as error:
+            logger.warning(
+                "[SkillShadow] tool-use skipped after %s", type(error).__name__
+            )
+
+    def _shadow_record_tool_result(
+        self, tool_call: Dict[str, Any], result: Dict[str, Any]
+    ) -> None:
+        """记录不含结果正文的工具结果结构。"""
+
+        runtime = getattr(self, "_skill_shadow_runtime", None)
+        run = getattr(self, "_skill_shadow_run", None)
+        if runtime is None or run is None:
+            return
+        try:
+            call_id = self._shadow_tool_call_id(tool_call)
+            runtime.record_tool_result(
+                run,
+                call_id,
+                str(result.get("status") or "unknown"),
+                max(0.0, float(result.get("execution_time") or 0.0)) * 1000.0,
+                result.get("result"),
+            )
+        except Exception as error:
+            logger.warning(
+                "[SkillShadow] tool-result skipped after %s", type(error).__name__
+            )
+
+    def _shadow_tool_call_id(self, tool_call: Dict[str, Any]) -> str:
+        """生成仅供影子遥测关联的运行内唯一调用标识。"""
+
+        mapping = getattr(self, "_skill_shadow_call_ids", None)
+        if mapping is None:
+            mapping = {}
+            self._skill_shadow_call_ids = mapping
+        object_key = id(tool_call)
+        existing = mapping.get(object_key)
+        if existing is not None:
+            return existing
+        ordinal = int(getattr(self, "_skill_shadow_tool_ordinal", 0)) + 1
+        self._skill_shadow_tool_ordinal = ordinal
+        external_id = str(tool_call.get("id") or "missing")
+        shadow_id = "%d:%s" % (ordinal, external_id)
+        mapping[object_key] = shadow_id
+        return shadow_id
+
+    def run_stream(self, user_message: str) -> str:
+        """
+        Execute streaming reasoning loop
+        
+        Args:
+            user_message: User message
+            
+        Returns:
+            Final response text
+        """
+        shadow_status = "running"
+
+        # 日志只记录长度，不写入用户任务原文。
+        thinking_enabled = self._is_thinking_enabled()
+        thinking_label = " | 💭 thinking" if thinking_enabled else ""
+        logger.info(
+            f"🤖 {self.model.model}{thinking_label} | user_chars={len(user_message)}"
+        )
+        
+        # Add user message (Claude format - use content blocks for consistency)
+        self.messages.append({
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": user_message
+                }
+            ]
+        })
+
+        # Trim context ONCE before the agent loop starts, not during tool steps.
+        # This ensures tool_use/tool_result chains created during the current run
+        # are never stripped mid-execution (which would cause LLM loops).
+        self._trim_messages()
+
+        # Validate after trimming: trimming may leave orphaned tool_use at the
+        # boundary (e.g. the last kept turn ends with an assistant tool_use whose
+        # tool_result was in a discarded turn).
+        self._validate_and_fix_messages()
+
+        self._start_skill_shadow(user_message)
+
+        self._emit_event("agent_start")
+
+        # Reset the run-scoped MCP tool-retrieval accumulator. On-demand tool
+        # retrieval only grows this set within a run, so a tool that already
+        # produced a tool_use never disappears from the schema mid-run (which
+        # would make Claude/MiniMax raise a message-format error).
+        self._retrieved_mcp_names = set()
+
+        final_response = ""
+        turn = 0
+
+        cancelled = False
+        try:
+            while turn < self.max_turns:
+                # Check at the very top of every turn so a cancel arriving
+                # between turns short-circuits cleanly.
+                self._check_cancelled()
+
+                steering_updates = self._drain_steering()
+                if steering_updates:
+                    self._append_steering(steering_updates)
+
+                turn += 1
+                logger.info(f"[Agent] Turn {turn}")
+                self._emit_event("turn_start", {"turn": turn})
+
+                # Call LLM (enable retry_on_empty for better reliability)
+                assistant_msg, tool_calls = self._call_llm_stream(retry_on_empty=True)
+                final_response = assistant_msg
+
+                # A steer that arrived while the model was streaming takes
+                # precedence over its proposed continuation. Tool calls have
+                # already been written to history, so close every one with a
+                # synthetic result before asking the model to reconsider.
+                steering_updates = self._drain_steering()
+                if steering_updates:
+                    self._append_steering(
+                        steering_updates,
+                        pending_tool_calls=tool_calls,
+                    )
+                    self._emit_event("turn_end", {
+                        "turn": turn,
+                        "has_tool_calls": bool(tool_calls),
+                        "tool_count": len(tool_calls),
+                        "steered": True,
+                    })
+                    continue
+
+                # No tool calls, end loop
+                if not tool_calls:
+                    # 检查是否返回了空响应
+                    if not assistant_msg:
+                        logger.warning(f"[Agent] LLM returned empty response after retry (no content and no tool calls)")
+                        logger.info(f"[Agent] This usually happens when LLM thinks the task is complete after tool execution")
+                        
+                        # 如果之前有工具调用，强制要求 LLM 生成文本回复
+                        if turn > 1:
+                            logger.info(f"[Agent] Requesting explicit response from LLM...")
+                            
+                            # Remember position so we can remove the injected prompt later
+                            prompt_insert_idx = len(self.messages)
+                            
+                            # 添加一条消息，明确要求回复用户
+                            self.messages.append({
+                                "role": "user",
+                                "content": [{
+                                    "type": "text",
+                                    "text": "请向用户说明刚才工具执行的结果或回答用户的问题。"
+                                }]
+                            })
+                            
+                            # 再调用一次 LLM
+                            assistant_msg, tool_calls = self._call_llm_stream(retry_on_empty=False)
+                            final_response = assistant_msg
+                            
+                            # Remove the injected prompt from history so it doesn't
+                            # appear as a user message in persisted conversations.
+                            # _call_llm_stream may have appended an assistant message
+                            # after the prompt, so we locate and remove only the prompt.
+                            if (prompt_insert_idx < len(self.messages)
+                                    and self.messages[prompt_insert_idx].get("role") == "user"):
+                                self.messages.pop(prompt_insert_idx)
+                                logger.debug("[Agent] Removed injected explicit-response prompt from message history")
+                            
+                            # If LLM responded with tool_calls instead of text, fall through
+                            # to the tool execution path below (don't break the loop).
+                            if tool_calls:
+                                logger.info(
+                                    f"[Agent] LLM returned tool_calls in explicit-response retry, "
+                                    f"continuing to execute tools instead of breaking"
+                                )
+                            elif not assistant_msg:
+                                # Still empty (no text and no tool_calls): use fallback
+                                logger.warning(f"[Agent] Still empty after explicit request")
+                                final_response = _t(
+                                    "抱歉，我暂时无法生成回复。请尝试换一种方式描述你的需求，或稍后再试。",
+                                    "Sorry, I can't generate a reply right now. Please try rephrasing your request, or try again later.",
+                                )
+                                logger.info(f"Generated fallback response for empty LLM output")
+                        else:
+                            # First-turn empty reply, fall back directly
+                            final_response = _t(
+                                "抱歉，我暂时无法生成回复。请尝试换一种方式描述你的需求，或稍后再试。",
+                                "Sorry, I can't generate a reply right now. Please try rephrasing your request, or try again later.",
+                            )
+                            logger.info(f"Generated fallback response for empty LLM output")
+                    else:
+                        logger.info(f"💭 assistant_chars={len(assistant_msg)}")
+                    
+                    # If the explicit-response retry produced tool_calls, skip the break
+                    # and continue down to the tool execution branch in this same iteration.
+                    if not tool_calls:
+                        steering_updates = self._drain_steering()
+                        if steering_updates:
+                            self._append_steering(steering_updates)
+                            self._emit_event("turn_end", {
+                                "turn": turn,
+                                "has_tool_calls": False,
+                                "steered": True,
+                            })
+                            continue
+                        if not self._close_or_apply_final_steering():
+                            self._emit_event("turn_end", {
+                                "turn": turn,
+                                "has_tool_calls": False,
+                                "steered": True,
+                            })
+                            continue
+                        logger.debug(f"✅ Done (no tool calls)")
+                        self._emit_event("turn_end", {
+                            "turn": turn,
+                            "has_tool_calls": False
+                        })
+                        break
+
+                # 日志只记录参数键、类型和长度，不记录参数值。
+                tool_calls_str = []
+                for tc in tool_calls:
+                    args = tc.get('arguments') or {}
+                    if isinstance(args, dict):
+                        parts = []
+                        for k, v in args.items():
+                            value_length = len(v) if hasattr(v, "__len__") else 0
+                            parts.append(
+                                f"{k}:type={type(v).__name__},length={value_length}"
+                            )
+                        args_str = ', '.join(parts)
+                        if args_str:
+                            tool_calls_str.append(f"{tc['name']}({args_str})")
+                        else:
+                            tool_calls_str.append(tc['name'])
+                    else:
+                        tool_calls_str.append(tc['name'])
+                logger.info(f"🔧 {', '.join(tool_calls_str)}")
+
+                # Execute tools
+                tool_results = []
+                tool_result_blocks = []
+
+                try:
+                    for tool_index, tool_call in enumerate(tool_calls):
+                        # Honour cancel between tool invocations within the same turn
+                        self._check_cancelled()
+                        steering_updates = self._drain_steering()
+                        if steering_updates:
+                            self._append_steering(
+                                steering_updates,
+                                pending_tool_calls=tool_calls[tool_index:],
+                                content_blocks=tool_result_blocks,
+                            )
+                            break
+                        result = self._execute_tool(tool_call)
+                        tool_results.append(result)
+                        
+                        # Debug: Check if tool is being called repeatedly with same args
+                        if turn > 2:
+                            # Check last N tool calls for repeats
+                            repeat_count = sum(
+                                1 for name, ahash, _ in self.tool_failure_history[-10:]
+                                if name == tool_call["name"] and ahash == self._hash_args(tool_call["arguments"])
+                            )
+                            if repeat_count >= 3:
+                                logger.warning(
+                                    f"⚠️  Tool '{tool_call['name']}' has been called {repeat_count} times "
+                                    f"with same arguments. This may indicate a loop."
+                                )
+                        
+                        # Check if this is a file to send
+                        if result.get("status") == "success" and isinstance(result.get("result"), dict):
+                            result_data = result.get("result")
+                            if result_data.get("type") == "file_to_send":
+                                self.files_to_send.append(result_data)
+                                logger.info(f"📎 File queued for sending: {result_data.get('file_name', result_data.get('path'))}")
+                                self._emit_event("file_to_send", result_data)
+
+                        # Surface user-facing files written by the agent
+                        self._maybe_emit_artifact(tool_call, result)
+                        
+                        # Check for critical error - abort entire conversation
+                        if result.get("status") == "critical_error":
+                            logger.error(f"💥 Fatal error detected, aborting conversation")
+                            final_response = result.get('result') or _t("任务执行失败", "Task execution failed")
+                            shadow_status = "critical_error"
+                            return final_response
+                        
+                        # 日志只记录结果类型和长度，不记录结果正文。
+                        status_emoji = "✅" if result.get("status") == "success" else "❌"
+                        result_data = result.get('result', '')
+                        result_length = (
+                            len(result_data)
+                            if hasattr(result_data, "__len__")
+                            else 0
+                        )
+                        logger.info(
+                            f"  {status_emoji} {tool_call['name']} "
+                            f"({result.get('execution_time', 0):.2f}s) "
+                            f"result_type={type(result_data).__name__} "
+                            f"result_length={result_length}"
+                        )
+
+                        # 工具结果统一编码为严格 JSON，超限时整块替换为结构化错误。
+                        is_error = result.get("status") == "error"
+                        result_content, transport_error, original_chars = (
+                            _serialize_tool_result_for_model(
+                                result,
+                                tool_call["name"],
+                                tool_call.get("arguments"),
+                            )
+                        )
+                        if transport_error:
+                            is_error = True
+                            logger.info(
+                                f"📎 Replaced unsafe tool result for '{tool_call['name']}': "
+                                f"original_chars={original_chars}"
+                            )
+
+                        tool_result_block = {
+                            "type": "tool_result",
+                            "tool_use_id": tool_call["id"],
+                            "content": result_content
+                        }
+                        
+                        # Add is_error field for Claude API (helps model understand failures)
+                        if is_error:
+                            tool_result_block["is_error"] = True
+                        
+                        tool_result_blocks.append(tool_result_block)
+                
+                finally:
+                    # CRITICAL: Always add tool_result to maintain message history integrity
+                    # Even if tool execution fails, we must add error results to match tool_use
+                    if tool_result_blocks:
+                        # Add tool results to message history as user message (Claude format)
+                        self.messages.append({
+                            "role": "user",
+                            "content": tool_result_blocks
+                        })
+                        
+                        # Detect potential infinite loop: same tool called multiple times with success
+                        # If detected, add a hint to LLM to stop calling tools and provide response
+                        if turn >= 3 and len(tool_calls) > 0:
+                            tool_name = tool_calls[0]["name"]
+                            args_hash = self._hash_args(tool_calls[0]["arguments"])
+                            
+                            # Count recent successful calls with same tool+args
+                            recent_success_count = 0
+                            for name, ahash, success in reversed(self.tool_failure_history[-10:]):
+                                if name == tool_name and ahash == args_hash and success:
+                                    recent_success_count += 1
+                            
+                            # If tool was called successfully 3+ times with same args, add hint to stop loop
+                            if recent_success_count >= 3:
+                                logger.warning(
+                                    f"⚠️  Detected potential loop: '{tool_name}' called {recent_success_count} times "
+                                    f"with same args. Adding hint to LLM to provide final response."
+                                )
+                                # Add a gentle hint message to guide LLM to respond
+                                self.messages.append({
+                                    "role": "user",
+                                    "content": [{
+                                        "type": "text",
+                                        "text": "工具已成功执行并返回结果。请基于这些信息向用户做出回复，不要重复调用相同的工具。"
+                                    }]
+                                })
+                    elif tool_calls:
+                        # If we have tool_calls but no tool_result_blocks (unexpected error),
+                        # create error results for all tool calls to maintain message integrity
+                        logger.warning("⚠️ Tool execution interrupted, adding error results to maintain message history")
+                        emergency_blocks = []
+                        for tool_call in tool_calls:
+                            emergency_blocks.append({
+                                "type": "tool_result",
+                                "tool_use_id": tool_call["id"],
+                                "content": "Error: Tool execution was interrupted",
+                                "is_error": True
+                            })
+                        self.messages.append({
+                            "role": "user",
+                            "content": emergency_blocks
+                        })
+
+                self._emit_event("turn_end", {
+                    "turn": turn,
+                    "has_tool_calls": True,
+                    "tool_count": len(tool_calls)
+                })
+
+            if turn >= self.max_turns:
+                logger.warning(f"⚠️  Reached max decision step limit: {self.max_turns}")
+                self._drain_and_close_steering()
+                
+                # Force model to summarize without tool calls
+                logger.info(f"[Agent] Requesting summary from LLM after reaching max steps...")
+                
+                # Remember position before injecting the prompt so we can remove it later
+                prompt_insert_idx = len(self.messages)
+                
+                # Add a temporary prompt to force summary
+                self.messages.append({
+                    "role": "user",
+                    "content": [{
+                        "type": "text",
+                        "text": f"你已经执行了{turn}个决策步骤，达到了单次运行的最大步数限制。请总结一下你目前的执行过程和结果，告诉用户当前的进展情况。不要再调用工具，直接用文字回复。"
+                    }]
+                })
+                
+                # Call LLM one more time to get summary (without retry to avoid loops)
+                try:
+                    summary_response, summary_tools = self._call_llm_stream(retry_on_empty=False)
+                    if summary_response:
+                        final_response = summary_response
+                        logger.info(
+                            f"💭 summary_chars={len(summary_response)}"
+                        )
+                    else:
+                        # Fallback if model still doesn't respond
+                        final_response = _t(
+                            f"我已经执行了{turn}个决策步骤，达到了单次运行的步数上限。任务可能还未完全完成，建议你将任务拆分成更小的步骤，或者换一种方式描述需求。",
+                            f"I've taken {turn} decision steps and reached the per-run limit. The task may not be fully complete — try breaking it into smaller steps, or describe your request differently.",
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to get summary from LLM: {e}")
+                    final_response = _t(
+                        f"我已经执行了{turn}个决策步骤，达到了单次运行的步数上限。任务可能还未完全完成，建议你将任务拆分成更小的步骤，或者换一种方式描述需求。",
+                        f"I've taken {turn} decision steps and reached the per-run limit. The task may not be fully complete — try breaking it into smaller steps, or describe your request differently.",
+                    )
+                finally:
+                    # Remove the injected user prompt from history to avoid polluting
+                    # persisted conversation records. The assistant summary (if any)
+                    # was already appended by _call_llm_stream and is kept.
+                    if (prompt_insert_idx < len(self.messages)
+                            and self.messages[prompt_insert_idx].get("role") == "user"):
+                        self.messages.pop(prompt_insert_idx)
+                        logger.debug("[Agent] Removed injected max-steps prompt from message history")
+
+        except AgentCancelledError:
+            # User-initiated stop: wind down message history cleanly so the
+            # next turn is unaffected; channels emit a "cancelled" UI event.
+            cancelled = True
+            shadow_status = "cancelled"
+            logger.info(f"[Agent] 🛑 Cancelled by user (turn {turn})")
+            self._handle_cancelled(final_response)
+            if not final_response or not final_response.strip():
+                final_response = "_(Cancelled)_"
+
+        except Exception as e:
+            shadow_status = "error"
+            logger.error(f"❌ Agent execution error: {e}")
+            self._emit_event("error", {"error": str(e)})
+            raise
+
+        finally:
+            if self.steer_inbox is not None:
+                self.steer_inbox.close()
+            final_response = final_response.strip() if final_response else final_response
+            if cancelled:
+                # Emit before agent_end so channels can mark UI as cancelled
+                self._emit_event("agent_cancelled", {"final_response": final_response})
+            logger.info(f"[Agent] 🏁 Done ({turn} turns)" + (" [cancelled]" if cancelled else ""))
+            if shadow_status == "running":
+                shadow_status = "max_turns" if turn >= self.max_turns else "completed"
+            self._finish_skill_shadow(shadow_status, final_response)
+            self._emit_event("agent_end", {"final_response": final_response, "cancelled": cancelled})
+
+        return final_response
+
+    def _select_tools_for_injection(self) -> list:
+        """Decide which tools to inject into the current LLM turn.
+
+        Built-in tools are ALWAYS injected in full (skills and core flows hard
+        depend on them). MCP tools are also injected in full UNLESS on-demand
+        retrieval is enabled AND the MCP tool count exceeds the configured
+        threshold — then only the most relevant MCP tools are injected, unioned
+        with those already selected earlier in this run (only-grows, so a tool
+        that already produced a tool_use never vanishes from the schema).
+
+        Degrades safely: disabled feature, no embedding provider, embedding
+        failure, count below threshold, or any error → inject all tools. Tools
+        are never silently dropped.
+        """
+        all_tools = list(self.tools.values())
+        try:
+            from config import conf
+            if not conf().get("mcp_tool_retrieval_enabled", False):
+                return all_tools
+
+            from agent.tools.mcp.mcp_tool import McpTool
+            mcp_tools = [t for t in all_tools if isinstance(t, McpTool)]
+            builtin_tools = [t for t in all_tools if not isinstance(t, McpTool)]
+
+            threshold = int(conf().get("mcp_tool_retrieval_threshold", 20) or 20)
+            if len(mcp_tools) <= threshold:
+                return all_tools
+
+            top_k = int(conf().get("mcp_tool_retrieval_top_k", 10) or 10)
+
+            from agent.tools import ToolManager
+            from agent.tools.mcp.tool_retrieval import (
+                build_retrieval_query,
+                select_mcp_tools,
+            )
+
+            tm = ToolManager()
+            tool_vectors = tm.get_mcp_tool_vectors()
+            query = build_retrieval_query(self.messages)
+            query_vector = tm.embed_query(query)
+
+            selected = select_mcp_tools(
+                query_vector,
+                tool_vectors,
+                top_k,
+                getattr(self, "_retrieved_mcp_names", set()),
+            )
+            if selected is None:
+                # No provider / empty index / error → full injection.
+                return all_tools
+
+            # Persist the accumulated selection for subsequent turns.
+            self._retrieved_mcp_names = selected
+
+            selected_mcp = [t for t in mcp_tools if t.name in selected]
+            logger.info(
+                f"[ToolRetrieval] Injecting {len(builtin_tools)} built-in + "
+                f"{len(selected_mcp)}/{len(mcp_tools)} MCP tool(s) (top_k={top_k})"
+            )
+            return builtin_tools + selected_mcp
+        except Exception as e:
+            logger.debug(f"[ToolRetrieval] full injection (retrieval skipped): {e}")
+            return all_tools
+
+    def _call_llm_stream(self, retry_on_empty=True, retry_count=0, max_retries=3,
+                         _overflow_retry: bool = False) -> Tuple[str, List[Dict]]:
+        """
+        Call LLM with streaming and automatic retry on errors
+        
+        Args:
+            retry_on_empty: Whether to retry once if empty response is received
+            retry_count: Current retry attempt (internal use)
+            max_retries: Maximum number of retries for API errors
+            _overflow_retry: Internal flag indicating this is a retry after context overflow
+        
+        Returns:
+            (response_text, tool_calls)
+        """
+        # Validate and fix message history (e.g. orphaned tool_result blocks).
+        # Context trimming is done once in run_stream() before the loop starts,
+        # NOT here — trimming mid-execution would strip the current run's
+        # tool_use/tool_result chains and cause LLM loops.
+        self._validate_and_fix_messages()
+
+        # Prepare messages
+        messages = self._prepare_messages()
+        turns = self._identify_complete_turns()
+        logger.info(f"Sending {len(messages)} messages ({len(turns)} turns) to LLM")
+
+        # Pull in any MCP tools that finished loading since this turn started.
+        # Cheap dict reconciliation (microseconds) — lets the agent pick up
+        # newly available MCP tools mid-conversation without a session restart.
+        try:
+            from agent.tools import ToolManager
+            ToolManager().sync_mcp_into_agent(self)
+        except Exception as e:
+            logger.debug(f"[Agent] MCP sync skipped: {e}")
+
+        # Prepare tool definitions. Prefer get_json_schema() when it yields
+        # real properties (lets tools augment schema at runtime), otherwise
+        # fall back to the static `tool.params` (MCP tools rely on this).
+        tools_schema = None
+        if self.tools:
+            tools_schema = []
+            for tool in self._select_tools_for_injection():
+                input_schema = tool.params
+                try:
+                    dynamic = (tool.get_json_schema() or {}).get("parameters") or {}
+                    if dynamic.get("properties"):
+                        input_schema = dynamic
+                except Exception:
+                    pass
+                tools_schema.append({
+                    "name": tool.name,
+                    "description": tool.description,
+                    "input_schema": input_schema,
+                })
+
+        # Debug: dump the full system prompt and messages sent to the LLM.
+        # Gated behind `debug` config to avoid flooding normal logs.
+        # try:
+        #     from config import conf
+        #     if conf().get("debug", False):
+        #         logger.debug(
+        #             "[Agent][debug] system_prompt sent to LLM "
+        #             f"({len(self.system_prompt or '')} chars):\n"
+        #             "================ SYSTEM PROMPT BEGIN ================\n"
+        #             f"{self.system_prompt}\n"
+        #             "================ SYSTEM PROMPT END =================="
+        #         )
+        #         logger.info(f"[Agent][debug] messages sent to LLM: {messages}")
+        # except Exception:
+        #     pass
+
+        # Create request
+        request = LLMRequest(
+            messages=messages,
+            temperature=0,
+            stream=True,
+            tools=tools_schema,
+            system=self.system_prompt  # Pass system prompt separately for Claude API
+        )
+
+        self._emit_event("message_start", {"role": "assistant"})
+
+        # Streaming response
+        full_content = ""
+        full_reasoning = ""
+        tool_calls_buffer = {}  # {index: {id, name, arguments}}
+        gemini_raw_parts = None  # Preserve Gemini thoughtSignature for round-trip
+        stop_reason = None  # Track why the stream stopped
+
+        try:
+            stream = self.model.call_stream(request)
+
+            # Probe cancel every N chunks to bound reaction time without
+            # checking on every token.
+            _cancel_probe_counter = 0
+            _CANCEL_PROBE_EVERY = 8
+
+            for chunk in stream:
+                _cancel_probe_counter += 1
+                if _cancel_probe_counter >= _CANCEL_PROBE_EVERY:
+                    _cancel_probe_counter = 0
+                    if self.cancel_event is not None and self.cancel_event.is_set():
+                        # Persist partial text only; tool_use args may be
+                        # truncated mid-stream and would fail validation.
+                        logger.info("[Agent] cancel detected mid-stream, aborting LLM call")
+                        if full_content:
+                            partial_msg = {
+                                "role": "assistant",
+                                "content": [{"type": "text", "text": full_content}],
+                            }
+                            self.messages.append(partial_msg)
+                        self._emit_event("message_end", {
+                            "content": full_content,
+                            "tool_calls": [],
+                            "cancelled": True,
+                        })
+                        raise AgentCancelledError("cancelled during LLM streaming")
+
+                # Check for errors
+                if isinstance(chunk, dict) and chunk.get("error"):
+                    # Extract error message from nested structure
+                    error_data = chunk.get("error", {})
+                    if isinstance(error_data, dict):
+                        error_msg = error_data.get("message", chunk.get("message", "Unknown error"))
+                        error_code = error_data.get("code", "")
+                        error_type = error_data.get("type", "")
+                    else:
+                        error_msg = chunk.get("message", str(error_data))
+                        error_code = ""
+                        error_type = ""
+                    
+                    status_code = chunk.get("status_code", "N/A")
+                    
+                    # Log error with all available information
+                    logger.error(f"🔴 Stream API Error:")
+                    logger.error(f"   Message: {error_msg}")
+                    logger.error(f"   Status Code: {status_code}")
+                    logger.error(f"   Error Code: {error_code}")
+                    logger.error(f"   Error Type: {error_type}")
+                    logger.error(f"   Full chunk: {chunk}")
+                    
+                    # Check if this is a context overflow error (keyword-based, works for all models)
+                    # Don't rely on specific status codes as different providers use different codes
+                    error_msg_lower = error_msg.lower()
+                    is_overflow = any(keyword in error_msg_lower for keyword in [
+                        'context length exceeded', 'maximum context length', 'prompt is too long',
+                        'context overflow', 'context window', 'too large', 'exceeds model context',
+                        'request_too_large', 'request exceeds the maximum size', 'tokens exceed'
+                    ])
+                    
+                    if is_overflow:
+                        # Mark as context overflow for special handling
+                        raise Exception(f"[CONTEXT_OVERFLOW] {error_msg} (Status: {status_code})")
+                    else:
+                        # Raise exception with full error message for retry logic
+                        raise Exception(f"{error_msg} (Status: {status_code}, Code: {error_code}, Type: {error_type})")
+
+                # Parse chunk
+                if isinstance(chunk, dict) and chunk.get("choices"):
+                    choice = chunk["choices"][0]
+                    delta = choice.get("delta", {})
+                    
+                    # Capture finish_reason if present
+                    finish_reason = choice.get("finish_reason")
+                    if finish_reason:
+                        stop_reason = finish_reason
+
+                    reasoning_delta = delta.get("reasoning_content") or ""
+                    if reasoning_delta:
+                        full_reasoning += reasoning_delta
+                        if self._is_thinking_enabled():
+                            self._emit_event("reasoning_update", {"delta": reasoning_delta})
+
+                    # Handle text content
+                    content_delta = delta.get("content") or ""
+                    if content_delta:
+                        # Filter out <think> tags from content
+                        filtered_delta = self._filter_think_tags(content_delta)
+                        full_content += filtered_delta
+                        if filtered_delta:  # Only emit if there's content after filtering
+                            self._emit_event("message_update", {"delta": filtered_delta})
+
+                    # Handle tool calls
+                    if "tool_calls" in delta and delta["tool_calls"]:
+                        for tc_delta in delta["tool_calls"]:
+                            index = tc_delta.get("index", 0)
+
+                            if index not in tool_calls_buffer:
+                                tool_calls_buffer[index] = {
+                                    "id": "",
+                                    "name": "",
+                                    "arguments": ""
+                                }
+
+                            if tc_delta.get("id"):
+                                tool_calls_buffer[index]["id"] = tc_delta["id"]
+
+                            if "function" in tc_delta:
+                                func = tc_delta["function"]
+                                if func.get("name"):
+                                    tool_calls_buffer[index]["name"] = func["name"]
+                                if func.get("arguments"):
+                                    tool_calls_buffer[index]["arguments"] += func["arguments"]
+
+                    # Preserve _gemini_raw_parts for Gemini thoughtSignature round-trip
+                    # (direct Gemini: list of parts; LinkAI proxy: base64 string of JSON parts)
+                    if "_gemini_raw_parts" in delta:
+                        gemini_raw_parts = delta["_gemini_raw_parts"]
+                    elif isinstance(choice, dict) and choice.get("_gemini_raw_parts"):
+                        gemini_raw_parts = choice["_gemini_raw_parts"]
+
+        except AgentCancelledError:
+            # Must propagate untouched; never treat as a retryable error.
+            raise
+
+        except Exception as e:
+            error_str = str(e)
+            error_str_lower = error_str.lower()
+            
+            # Context overflow is non-retryable and needs the working context reset.
+            is_context_overflow = _is_context_overflow(error_str_lower)
+
+            # Incomplete tool_use/tool_result pairs rejected by the provider.
+            # MiniMax's "tool result's tool id(...) not found" (code 2013) is
+            # covered by the "tool result" / "tool id" markers.
+            is_message_format_error = _is_message_format_error(error_str_lower)
+            
+            if is_context_overflow or is_message_format_error:
+                error_type = "context overflow" if is_context_overflow else "message format error"
+                logger.error(f"💥 {error_type} detected: {e}")
+
+                # Flush memory before trimming to preserve context that will be lost
+                if is_context_overflow and self.agent.memory_manager:
+                    user_id = getattr(self.agent, '_current_user_id', None)
+                    self.agent.memory_manager.flush_memory(
+                        messages=self.messages, user_id=user_id,
+                        reason="overflow", max_messages=0
+                    )
+
+                # Strategy: try aggressive trimming first, only clear as last resort
+                if is_context_overflow and not _overflow_retry:
+                    trimmed = self._aggressive_trim_for_overflow()
+                    if trimmed:
+                        logger.warning("🔄 Aggressively trimmed context, retrying...")
+                        return self._call_llm_stream(
+                            retry_on_empty=retry_on_empty,
+                            retry_count=retry_count,
+                            max_retries=max_retries,
+                            _overflow_retry=True
+                        )
+
+                # Aggressive trim didn't help, or this is a message format error.
+                # Reset the working context only: the persisted history is
+                # irreplaceable, and it can never reintroduce broken tool pairs
+                # because every load path strips tool_use/tool_result blocks.
+                logger.warning("🔄 Resetting in-memory context to recover (stored history kept)")
+                self.messages.clear()
+                if is_context_overflow:
+                    raise Exception(_t(
+                        "抱歉，对话历史过长导致上下文溢出。我已重置当前上下文（历史记录仍然保留），请重新描述你的需求。",
+                        "Sorry, the conversation history got too long and overflowed the context. I've reset the current context (your history is kept) — please describe your request again.",
+                    ))
+                else:
+                    raise Exception(_t(
+                        "抱歉，之前的对话出现了问题。我已重置当前上下文（历史记录仍然保留），请重新发送你的消息。",
+                        "Sorry, something went wrong with the earlier conversation. I've reset the current context (your history is kept) — please send your message again.",
+                    ))
+            
+            # Check if error is rate limit (429)
+            is_rate_limit = '429' in error_str_lower or 'rate limit' in error_str_lower
+            
+            # Check if error is retryable (timeout, connection, server busy, etc.)
+            is_retryable = any(keyword in error_str_lower for keyword in [
+                'timeout', 'timed out', 'connection', 'network', 
+                'rate limit', 'overloaded', 'unavailable', 'busy', 'retry',
+                '429', '500', '502', '503', '504', '512'
+            ])
+            
+            if is_retryable and retry_count < max_retries:
+                # Rate limit needs longer wait time
+                if is_rate_limit:
+                    wait_time = 30 + (retry_count * 15)  # 30s, 45s, 60s for rate limit
+                else:
+                    wait_time = (retry_count + 1) * 2  # 2s, 4s, 6s for other errors
+                
+                logger.warning(f"⚠️ LLM API error (attempt {retry_count + 1}/{max_retries}): {e}")
+                logger.info(f"Retrying in {wait_time}s...")
+                time.sleep(wait_time)
+                return self._call_llm_stream(
+                    retry_on_empty=retry_on_empty, 
+                    retry_count=retry_count + 1,
+                    max_retries=max_retries
+                )
+            else:
+                if retry_count >= max_retries:
+                    logger.error(f"❌ LLM API error after {max_retries} retries: {e}", exc_info=True)
+                else:
+                    logger.error(f"❌ LLM call error (non-retryable): {e}", exc_info=True)
+                raise
+
+        # Parse tool calls
+        tool_calls = []
+        for idx in sorted(tool_calls_buffer.keys()):
+            tc = tool_calls_buffer[idx]
+
+            # Ensure tool call has a valid ID (some providers return empty/None IDs)
+            tool_id = tc.get("id") or ""
+            if not tool_id:
+                import uuid
+                tool_id = f"call_{uuid.uuid4().hex[:24]}"
+
+            args_str = tc.get("arguments") or ""
+            arguments, parse_err = _parse_tool_args(args_str, stop_reason, tc["name"])
+            if parse_err:
+                logger.error(
+                    f"Tool args parse failed for {tc['name']} ({len(args_str)} chars): {parse_err}"
+                )
+                tool_calls.append({
+                    "id": tool_id,
+                    "name": tc["name"],
+                    "arguments": {},
+                    "_parse_error": parse_err,
+                })
+                continue
+
+            tool_calls.append({
+                "id": tool_id,
+                "name": tc["name"],
+                "arguments": arguments
+            })
+
+        # Check for empty response and retry once if enabled
+        if retry_on_empty and not full_content and not tool_calls:
+            logger.warning(f"⚠️  LLM returned empty response (stop_reason: {stop_reason}), retrying once...")
+            self._emit_event("message_end", {
+                "content": "",
+                "tool_calls": [],
+                "empty_retry": True,
+                "stop_reason": stop_reason
+            })
+            # Retry without retry flag to avoid infinite loop
+            return self._call_llm_stream(
+                retry_on_empty=False, 
+                retry_count=retry_count,
+                max_retries=max_retries
+            )
+
+        # Filter full_content one more time (in case tags were split across chunks)
+        full_content = self._filter_think_tags(full_content)
+        
+        # Add assistant message to history (Claude format uses content blocks)
+        assistant_msg = {"role": "assistant", "content": []}
+
+        if full_reasoning:
+            stored_reasoning = _truncate_reasoning_for_storage(full_reasoning)
+            if len(stored_reasoning) < len(full_reasoning):
+                logger.info(
+                    f"[reasoning] truncated for storage: "
+                    f"{len(full_reasoning)} -> {len(stored_reasoning)} chars"
+                )
+            assistant_msg["content"].append({
+                "type": "thinking",
+                "thinking": stored_reasoning
+            })
+
+        if full_content:
+            assistant_msg["content"].append({
+                "type": "text",
+                "text": full_content
+            })
+
+        # Add tool_use blocks if present
+        if tool_calls:
+            for tc in tool_calls:
+                assistant_msg["content"].append({
+                    "type": "tool_use",
+                    "id": tc.get("id", ""),
+                    "name": tc.get("name", ""),
+                    "input": tc.get("arguments", {})
+                })
+        
+        if gemini_raw_parts:
+            assistant_msg["_gemini_raw_parts"] = gemini_raw_parts
+
+        # Only append if content is not empty
+        if assistant_msg["content"]:
+            self.messages.append(assistant_msg)
+
+        self._emit_event("message_end", {
+            "content": full_content,
+            "tool_calls": tool_calls
+        })
+
+        return full_content, tool_calls
+
+    def _required_params(self, tool_name: str) -> list:
+        """Parameter names a tool's schema declares as required."""
+        tool = self.tools.get(tool_name)
+        params = getattr(tool, "params", None)
+        required = params.get("required") if isinstance(params, dict) else None
+        return list(required) if isinstance(required, list) else []
+
+    def _execute_tool(self, tool_call: Dict) -> Dict[str, Any]:
+        """
+        Execute tool
+        
+        Args:
+            tool_call: {"id": str, "name": str, "arguments": dict}
+            
+        Returns:
+            Tool execution result
+        """
+        tool_name = tool_call["name"]
+        tool_id = tool_call["id"]
+        arguments = tool_call["arguments"]
+        self._shadow_record_tool_use(tool_call)
+
+        if "_parse_error" in tool_call:
+            result = {
+                "status": "error",
+                "result": tool_call["_parse_error"],
+                "execution_time": 0,
+            }
+            self._record_tool_result(tool_name, arguments, False)
+            self._shadow_record_tool_result(tool_call, result)
+            return result
+
+        # A call whose arguments never arrived parses into an empty dict, which
+        # would otherwise reach the tool and be reported as one missing field -
+        # sending the model off to fix a parameter it never got to send.
+        missing = self._required_params(tool_name) if not arguments else []
+        if missing:
+            result = {
+                "status": "error",
+                "result": (
+                    f"Your {tool_name} call arrived with no arguments at all, so it did not "
+                    f"run and nothing was written. It requires: {', '.join(missing)}. "
+                    "The arguments were most likely cut off before they were sent."
+                    + (" " + _SPLIT_WRITE_ADVICE if tool_name in ("write", "edit") else "")
+                ),
+                "execution_time": 0,
+            }
+            logger.error(f"Tool {tool_name} called with no arguments (required: {missing})")
+            self._record_tool_result(tool_name, arguments, False)
+            self._shadow_record_tool_result(tool_call, result)
+            return result
+
+        # Check for consecutive failures (retry protection)
+        should_stop, stop_reason, is_critical = self._check_consecutive_failures(tool_name, arguments)
+        if should_stop:
+            logger.error(f"🛑 {stop_reason}")
+            self._record_tool_result(tool_name, arguments, False)
+            
+            if is_critical:
+                # Critical failure - abort entire conversation
+                result = {
+                    "status": "critical_error",
+                    "result": stop_reason,
+                    "execution_time": 0
+                }
+            else:
+                # Normal failure - let LLM try different approach
+                result = {
+                    "status": "error",
+                    "result": f"{stop_reason}\n\n当前方法行不通，请尝试完全不同的方法或向用户询问更多信息。",
+                    "execution_time": 0
+                }
+            self._shadow_record_tool_result(tool_call, result)
+            return result
+
+        self._emit_event("tool_execution_start", {
+            "tool_call_id": tool_id,
+            "tool_name": tool_name,
+            "arguments": arguments
+        })
+
+        try:
+            tool = self.tools.get(tool_name)
+            if not tool:
+                raise ValueError(self._build_tool_not_found_message(tool_name))
+
+            # Set tool context
+            tool.model = self.model
+            tool.context = self.agent
+            tool.cancel_event = self.cancel_event
+            tool.progress_callback = lambda message: self._emit_event(
+                "tool_execution_progress",
+                {
+                    "tool_call_id": tool_id,
+                    "tool_name": tool_name,
+                    "message": message,
+                }
+            )
+
+            # Execute tool
+            start_time = time.time()
+            try:
+                result: ToolResult = tool.execute_tool(arguments)
+            finally:
+                tool.progress_callback = None
+                tool.cancel_event = None
+            execution_time = time.time() - start_time
+
+            result_dict = {
+                "status": result.status,
+                "result": result.result,
+                "execution_time": execution_time
+            }
+
+            # Record tool result for failure tracking
+            success = result.status == "success"
+            self._record_tool_result(tool_name, arguments, success)
+
+            # Auto-refresh skills after skill creation
+            if tool_name == "bash" and result.status == "success":
+                command = arguments.get("command", "")
+                if "init_skill.py" in command and self.agent.skill_manager:
+                    logger.info("Detected skill creation, refreshing skills...")
+                    self.agent.refresh_skills()
+                    logger.info(f"Skills refreshed! Now have {len(self.agent.skill_manager.skills)} skills")
+
+            self._emit_event("tool_execution_end", {
+                "tool_call_id": tool_id,
+                "tool_name": tool_name,
+                **result_dict
+            })
+
+            self._shadow_record_tool_result(tool_call, result_dict)
+            return result_dict
+
+        except Exception as e:
+            logger.error(f"Tool execution error: {e}")
+            error_result = {
+                "status": "error",
+                "result": str(e),
+                "execution_time": 0
+            }
+            # Record failure
+            self._record_tool_result(tool_name, arguments, False)
+            
+            self._emit_event("tool_execution_end", {
+                "tool_call_id": tool_id,
+                "tool_name": tool_name,
+                **error_result
+            })
+            self._shadow_record_tool_result(tool_call, error_result)
+            return error_result
+
+    def _build_tool_not_found_message(self, tool_name: str) -> str:
+        """Build a helpful error message when a tool is not found.
+
+        If a skill with the same name exists in skill_manager, read its
+        SKILL.md and include the content so the LLM knows how to use it.
+        """
+        available_tools = list(self.tools.keys())
+        base_msg = f"Tool '{tool_name}' not found. Available tools: {available_tools}"
+
+        skill_manager = getattr(self.agent, 'skill_manager', None)
+        if not skill_manager:
+            return base_msg
+
+        skill_entry = skill_manager.get_eligible_skill(tool_name)
+        if not skill_entry:
+            return base_msg
+
+        skill = skill_entry.skill
+        skill_md_path = skill.file_path
+        # 使用刷新时已经核验的内存快照，避免校验后再次读取被替换的磁盘内容。
+        skill_content = skill.content or skill.description
+
+        logger.info(
+            f"[Agent] Tool '{tool_name}' not found, but matched skill '{skill.name}'. "
+            f"Guiding LLM to use the skill instead."
+        )
+
+        return (
+            f"Tool '{tool_name}' is not a built-in tool, but a matching skill "
+            f"'{skill.name}' is available. You should use existing tools (e.g. bash with curl) "
+            f"to accomplish this task following the skill instructions below:\n\n"
+            f"--- SKILL: {skill.name} (path: {skill_md_path}) ---\n"
+            f"{skill_content}\n"
+            f"--- END SKILL ---\n\n"
+            f"Available tools: {available_tools}"
+        )
+
+    def _validate_and_fix_messages(self):
+        """Delegate to the shared sanitizer (see message_sanitizer.py)."""
+        sanitize_claude_messages(self.messages)
+
+    def _identify_complete_turns(self) -> List[Dict]:
+        """
+        识别完整的对话轮次
+        
+        一个完整轮次包括：
+        1. 用户消息（text）
+        2. AI 回复（可能包含 tool_use）
+        3. 工具结果（tool_result，如果有）
+        4. 后续 AI 回复（如果有）
+        
+        Returns:
+            List of turns, each turn is a dict with 'messages' list
+        """
+        return identify_complete_turns(self.messages)
+    
+    def _estimate_turn_tokens(self, turn: Dict) -> int:
+        """估算一个轮次的 tokens"""
+        return sum(
+            self.agent._estimate_message_tokens(msg) 
+            for msg in turn['messages']
+        )
+
+    def _truncate_historical_tool_results(self):
+        """把历史工具结果规范为 JSON，并整块替换超过 20K 字符的结果。
+
+        当前轮在创建时执行 50K 字符门禁。此步骤先缩小历史大结果，再进行
+        令牌裁剪，从而尽量避免丢弃整个对话轮次。
+        """
+        if len(self.messages) < 2:
+            return
+
+        # Find where the last user text message starts (= current turn boundary)
+        # We skip the current turn's messages to preserve their full content
+        current_turn_start = len(self.messages)
+        for i in range(len(self.messages) - 1, -1, -1):
+            msg = self.messages[i]
+            if msg.get("role") == "user":
+                content = msg.get("content", [])
+                if isinstance(content, list) and any(
+                    isinstance(b, dict) and b.get("type") == "text" for b in content
+                ):
+                    current_turn_start = i
+                    break
+                elif isinstance(content, str):
+                    current_turn_start = i
+                    break
+
+        truncated_count = 0
+        for i in range(current_turn_start):
+            msg = self.messages[i]
+            if msg.get("role") != "user":
+                continue
+            content = msg.get("content", [])
+            if not isinstance(content, list):
+                continue
+
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") != "tool_result":
+                    continue
+                result_content = block.get("content", "")
+                normalized, replaced = _normalize_tool_result_json(
+                    result_content,
+                    max_chars=MAX_HISTORY_RESULT_CHARS,
+                    oversize_code="historical_tool_result_too_large",
+                )
+                block["content"] = normalized
+                if replaced:
+                    truncated_count += 1
+
+        if truncated_count > 0:
+            logger.info(
+                f"📎 Replaced {truncated_count} unsafe historical tool result(s) "
+                f"at {MAX_HISTORY_RESULT_CHARS} chars"
+            )
+
+    def _aggressive_trim_for_overflow(self) -> bool:
+        """在接口返回真实上下文溢出时执行激进收缩。
+
+        依次把超限工具结果替换为结构化错误、只保留最近五个完整轮次，并
+        收缩过长用户消息。返回是否发生了值得重试的变化。
+        """
+        if not self.messages:
+            return False
+
+        original_count = len(self.messages)
+
+        # 第一步：把所有超限工具结果整块替换为结构化错误。
+        truncated = 0
+        for msg in self.messages:
+            content = msg.get("content", [])
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                # Truncate tool_result blocks
+                if block.get("type") == "tool_result":
+                    normalized, replaced = _normalize_tool_result_json(
+                        block.get("content", ""),
+                        max_chars=AGGRESSIVE_RESULT_CHARS,
+                        oversize_code="context_recovery_tool_result_too_large",
+                    )
+                    block["content"] = normalized
+                    if replaced:
+                        truncated += 1
+                # Truncate tool_use input blocks (e.g. large write content)
+                if block.get("type") == "tool_use" and isinstance(block.get("input"), dict):
+                    input_str = json.dumps(block["input"], ensure_ascii=False)
+                    if len(input_str) > AGGRESSIVE_LIMIT:
+                        # Keep only a summary of the input
+                        for key, val in block["input"].items():
+                            if isinstance(val, str) and len(val) > 1000:
+                                block["input"][key] = (
+                                    val[:1000]
+                                    + f"... [truncated {len(val)} chars]"
+                                )
+                        truncated += 1
+
+        # Step 2: Truncate overly long user text messages (e.g. pasted content)
+        USER_MSG_LIMIT = 10000
+        for msg in self.messages:
+            if msg.get("role") != "user":
+                continue
+            content = msg.get("content", [])
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        text = block.get("text", "")
+                        if len(text) > USER_MSG_LIMIT:
+                            block["text"] = (
+                                text[:USER_MSG_LIMIT]
+                                + f"\n\n[Message truncated for context recovery: "
+                                f"{len(text)} -> {USER_MSG_LIMIT} chars]"
+                            )
+                            truncated += 1
+            elif isinstance(content, str) and len(content) > USER_MSG_LIMIT:
+                msg["content"] = (
+                    content[:USER_MSG_LIMIT]
+                    + f"\n\n[Message truncated for context recovery: "
+                    f"{len(content)} -> {USER_MSG_LIMIT} chars]"
+                )
+                truncated += 1
+
+        # Step 3: Keep only the last 5 complete turns
+        turns = self._identify_complete_turns()
+        if len(turns) > 5:
+            kept_turns = turns[-5:]
+            new_messages = []
+            for turn in kept_turns:
+                new_messages.extend(turn["messages"])
+            removed = len(turns) - 5
+            self.messages[:] = new_messages
+            logger.info(
+                f"🔧 Aggressive trim: removed {removed} old turns, "
+                f"truncated {truncated} large blocks, "
+                f"{original_count} -> {len(self.messages)} messages"
+            )
+            return True
+
+        if truncated > 0:
+            logger.info(
+                f"🔧 Aggressive trim: truncated {truncated} large blocks "
+                f"(no turns removed, only {len(turns)} turn(s) left)"
+            )
+            return True
+
+        # Nothing left to trim
+        logger.warning("🔧 Aggressive trim: nothing to trim, will clear history")
+        return False
+
+    def _build_context_summary_callback(self, discarded_turns: list, kept_turns: list):
+        """
+        Build a callback that injects an LLM summary into the first user
+        message of *kept_turns*. Returns None if no valid injection target.
+
+        The callback is passed to flush_from_messages so that the same LLM
+        call that writes daily memory also provides the in-context summary.
+        """
+        if not kept_turns:
+            return None
+
+        # Find the first user text block in kept_turns as injection target
+        target_block = find_first_user_text_block(kept_turns)
+        if not target_block:
+            return None
+
+        turn_count = len(discarded_turns)
+        original_text = target_block["text"]
+
+        def _on_summary_ready(summary: str):
+            if not summary or not summary.strip():
+                return
+            target_block["text"] = build_compaction_summary_text(
+                summary, turn_count, original_text
+            )
+            logger.info(
+                f"📝 Context summary injected "
+                f"({len(summary)} chars, {turn_count} turns)"
+            )
+
+        return _on_summary_ready
+
+    def _trim_messages(self):
+        """
+        智能清理消息历史，保持对话完整性
+
+        使用完整轮次作为清理单位，确保：
+        1. 不会在对话中间截断
+        2. 工具调用链（tool_use + tool_result）保持完整
+        3. 每轮对话都是完整的（用户消息 + AI回复 + 工具调用）
+        """
+        if not self.messages or not self.agent:
+            return
+
+        # Step 0: Truncate large tool results in historical turns (30K -> 10K)
+        self._truncate_historical_tool_results()
+
+        # Step 1: 识别完整轮次
+        turns = self._identify_complete_turns()
+        
+        if not turns:
+            return
+        
+        # Step 2: 轮次限制 - 超出时移除前一半，保留后一半
+        if len(turns) > self.max_context_turns:
+            removed_count = len(turns) // 2
+            keep_count = len(turns) - removed_count
+            
+            discarded_turns = turns[:removed_count]
+            turns = turns[-keep_count:]
+
+            logger.info(
+                f"💾 Context turns exceeded: {keep_count + removed_count} > {self.max_context_turns}, "
+                f"trimmed to {keep_count} turns (removed {removed_count})"
+            )
+
+            # Flush to daily memory + inject context summary (single async LLM call)
+            if self.agent.memory_manager:
+                discarded_messages = []
+                for turn in discarded_turns:
+                    discarded_messages.extend(turn["messages"])
+                if discarded_messages:
+                    user_id = getattr(self.agent, '_current_user_id', None)
+                    cb = self._build_context_summary_callback(discarded_turns, turns)
+                    self.agent.memory_manager.flush_memory(
+                        messages=discarded_messages, user_id=user_id,
+                        reason="trim", max_messages=0,
+                        context_summary_callback=cb,
+                    )
+
+        # Step 3: Token 限制 - 保留完整轮次
+        # Get context window from agent (based on model)
+        context_window = self.agent._get_model_context_window()
+
+        # Use configured max_context_tokens if available
+        if hasattr(self.agent, 'max_context_tokens') and self.agent.max_context_tokens:
+            max_tokens = self.agent.max_context_tokens
+        else:
+            # Reserve 10% for response generation
+            reserve_tokens = int(context_window * 0.1)
+            max_tokens = context_window - reserve_tokens
+
+        # Estimate system prompt tokens
+        system_tokens = self.agent._estimate_message_tokens({"role": "system", "content": self.system_prompt})
+        available_tokens = max_tokens - system_tokens
+
+        # Calculate current tokens
+        current_tokens = sum(self._estimate_turn_tokens(turn) for turn in turns)
+        
+        # If under limit, reconstruct messages and return
+        if current_tokens + system_tokens <= max_tokens:
+            # Reconstruct message list from turns
+            new_messages = []
+            for turn in turns:
+                new_messages.extend(turn['messages'])
+            
+            old_count = len(self.messages)
+            self.messages = new_messages
+            
+            # Log if we removed messages due to turn limit
+            if old_count > len(self.messages):
+                logger.info(f"   Rebuilt message list: {old_count} -> {len(self.messages)} messages")
+            return
+
+        # Token limit exceeded — tiered strategy based on turn count:
+        #
+        #   Few turns (<5):  Compress ALL turns to text-only (strip tool chains,
+        #                    keep user query + final reply).  Never discard turns
+        #                    — losing even one is too painful when context is thin.
+        #
+        #   Many turns (>=5): Directly discard the first half of turns.
+        #                     With enough turns the oldest ones are less
+        #                     critical, and keeping the recent half intact
+        #                     (with full tool chains) is more useful.
+
+        COMPRESS_THRESHOLD = 5
+
+        if len(turns) < COMPRESS_THRESHOLD:
+            # --- Few turns: compress ALL turns to text-only, never discard ---
+            compressed_turns = []
+            for t in turns:
+                compressed = compress_turn_to_text_only(t)
+                if compressed["messages"]:
+                    compressed_turns.append(compressed)
+
+            new_messages = []
+            for turn in compressed_turns:
+                new_messages.extend(turn["messages"])
+
+            new_tokens = sum(self._estimate_turn_tokens(t) for t in compressed_turns)
+            old_count = len(self.messages)
+            self.messages = new_messages
+
+            logger.info(
+                f"📦 Context tokens exceeded (turns<{COMPRESS_THRESHOLD}): "
+                f"~{current_tokens + system_tokens} > {max_tokens}, "
+                f"compressed all {len(turns)} turns to plain text "
+                f"({old_count} -> {len(self.messages)} messages, "
+                f"~{current_tokens + system_tokens} -> ~{new_tokens + system_tokens} tokens)"
+            )
+            return
+
+        # --- Many turns (>=5): discard the older half, keep the newer half ---
+        removed_count = len(turns) // 2
+        keep_count = len(turns) - removed_count
+        discarded_turns = turns[:removed_count]
+        kept_turns = turns[-keep_count:]
+        kept_tokens = sum(self._estimate_turn_tokens(t) for t in kept_turns)
+
+        logger.info(
+            f"🔄 Context tokens exceeded: ~{current_tokens + system_tokens} > {max_tokens}, "
+            f"trimmed to {keep_count} turns (removed {removed_count})"
+        )
+
+        if self.agent.memory_manager:
+            discarded_messages = []
+            for turn in discarded_turns:
+                discarded_messages.extend(turn["messages"])
+            if discarded_messages:
+                user_id = getattr(self.agent, '_current_user_id', None)
+                cb = self._build_context_summary_callback(discarded_turns, kept_turns)
+                self.agent.memory_manager.flush_memory(
+                    messages=discarded_messages, user_id=user_id,
+                    reason="trim", max_messages=0,
+                    context_summary_callback=cb,
+                )
+
+        new_messages = []
+        for turn in kept_turns:
+            new_messages.extend(turn['messages'])
+
+        old_count = len(self.messages)
+        self.messages = new_messages
+
+        logger.info(
+            f"   Removed {removed_count} turns "
+            f"({old_count} -> {len(self.messages)} messages, "
+            f"~{current_tokens + system_tokens} -> ~{kept_tokens + system_tokens} tokens)"
+        )
+
+    def _prepare_messages(self) -> List[Dict[str, Any]]:
+        """
+        Prepare messages to send to LLM
+        
+        Note: For Claude API, system prompt should be passed separately via system parameter,
+        not as a message. The AgentLLMModel will handle this.
+        """
+        # 最后一道传输门禁：合成结果和旧会话数据也必须成为严格 JSON。
+        normalized_count = 0
+        for message in self.messages:
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") != "tool_result":
+                    continue
+                normalized, replaced = _normalize_tool_result_json(
+                    block.get("content", ""),
+                    max_chars=MAX_CURRENT_TURN_RESULT_CHARS,
+                )
+                if normalized != block.get("content"):
+                    block["content"] = normalized
+                    normalized_count += 1
+                if replaced:
+                    block["is_error"] = True
+        if normalized_count:
+            logger.info(
+                f"[Agent] Normalized {normalized_count} tool result(s) as strict JSON"
+            )
+
+        # 系统提示词由模型适配器单独处理，这里只返回消息历史。
+        return self.messages

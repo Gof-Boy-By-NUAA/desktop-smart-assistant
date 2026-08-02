@@ -1,0 +1,128 @@
+name: Governed Knowledge Quality Gate
+
+on:
+  push:
+    paths:
+      - "agent/knowledge/**"
+      - "agent/retrieval/**"
+      - "agent/memory/storage.py"
+      - "agent/tools/knowledge/**"
+      - "agent/tools/ls/**"
+      - "agent/tools/memory/memory_get.py"
+      - "agent/tools/read/**"
+      - "agent/tools/search_files/**"
+      - "agent/tools/send/**"
+      - "agent/tools/utils/governed_memory.py"
+      - "agent/prompt/builder.py"
+      - "agent/prompt/workspace.py"
+      - "skills/knowledge-wiki/**"
+      - "benchmarks/knowledge/**"
+      - "benchmarks/retrieval/smart_assistant_baseline.py"
+      - "benchmarks/retrieval/data_sources.json"
+      - "benchmarks/retrieval/dataset.py"
+      - "benchmarks/retrieval/metrics.py"
+      - "tests/test_knowledge_benchmark.py"
+      - "tests/test_knowledge_verifier.py"
+      - "tests/test_governed_knowledge_runtime.py"
+      - "tests/test_knowledge_service.py"
+      - "tests/test_knowledge_privacy_boundary.py"
+      - "tests/test_send_privacy_boundary.py"
+      - ".github/workflows/test-governed-knowledge.yml"
+  pull_request:
+    paths:
+      - "agent/knowledge/**"
+      - "agent/retrieval/**"
+      - "agent/memory/storage.py"
+      - "agent/tools/knowledge/**"
+      - "agent/tools/ls/**"
+      - "agent/tools/memory/memory_get.py"
+      - "agent/tools/read/**"
+      - "agent/tools/search_files/**"
+      - "agent/tools/send/**"
+      - "agent/tools/utils/governed_memory.py"
+      - "agent/prompt/builder.py"
+      - "agent/prompt/workspace.py"
+      - "skills/knowledge-wiki/**"
+      - "benchmarks/knowledge/**"
+      - "benchmarks/retrieval/smart_assistant_baseline.py"
+      - "benchmarks/retrieval/data_sources.json"
+      - "benchmarks/retrieval/dataset.py"
+      - "benchmarks/retrieval/metrics.py"
+      - "tests/test_knowledge_benchmark.py"
+      - "tests/test_knowledge_verifier.py"
+      - "tests/test_governed_knowledge_runtime.py"
+      - "tests/test_knowledge_service.py"
+      - "tests/test_knowledge_privacy_boundary.py"
+      - "tests/test_send_privacy_boundary.py"
+      - ".github/workflows/test-governed-knowledge.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  governed-knowledge-quality-gate:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install focused test dependencies
+        run: python -m pip install pytest regex requests PyYAML python-dotenv croniter
+
+      - name: Cache pinned CMRC 2018 source
+        uses: actions/cache@v4
+        with:
+          path: benchmarks/.cache/cmrc2018-source
+          key: cmrc2018-${{ runner.os }}-${{ hashFiles('benchmarks/retrieval/data_sources.json') }}
+
+      - name: Run governed knowledge unit tests
+        run: >-
+          python -m pytest
+          tests/test_knowledge_benchmark.py
+          tests/test_knowledge_verifier.py
+          tests/test_governed_knowledge_runtime.py
+          tests/test_knowledge_service.py
+          tests/test_knowledge_privacy_boundary.py
+          tests/test_send_privacy_boundary.py
+          -q
+
+      - name: Compile governed knowledge modules
+        run: >-
+          python -m compileall -q
+          agent/knowledge
+          agent/tools/knowledge
+          agent/tools/send
+          benchmarks/knowledge
+          tests/test_knowledge_benchmark.py
+          tests/test_knowledge_verifier.py
+          tests/test_knowledge_privacy_boundary.py
+          tests/test_send_privacy_boundary.py
+
+      - name: Run full three-round CMRC 2018 knowledge gate
+        run: >-
+          python -m benchmarks.knowledge.compare
+          --output benchmarks/results/cmrc2018-knowledge-comparison.json
+
+      - name: Independently verify full knowledge evidence
+        run: >-
+          python -m benchmarks.knowledge.verify
+          --report benchmarks/results/cmrc2018-knowledge-comparison.json
+          --output benchmarks/results/cmrc2018-knowledge-comparison-verification.json
+
+      - name: Upload benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cmrc2018-governed-knowledge-comparison
+          path: |
+            benchmarks/results/cmrc2018-knowledge-comparison.json
+            benchmarks/results/cmrc2018-knowledge-comparison-verification.json
+          if-no-files-found: error

@@ -1,0 +1,429 @@
+﻿"""Generate and independently verify the release evidence manifest.
+
+The manifest is deliberately fail-closed.  It records what is available in the
+working tree, but it never turns a missing customer/deployment artifact into a
+PASS.  ``verify`` re-hashes every referenced file instead of trusting the
+values written by ``generate``.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import subprocess
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Iterable
+
+
+SCHEMA_VERSION = 1
+REPORTS = {
+    "retrieval_comparison": "benchmarks/results/cmrc2018-comparison.json",
+    "retrieval_verification": "benchmarks/results/cmrc2018-comparison-verification.json",
+    "knowledge_comparison": "benchmarks/results/cmrc2018-knowledge-comparison.json",
+    "knowledge_verification": "benchmarks/results/cmrc2018-knowledge-comparison-verification.json",
+    "memory_outbox": "benchmarks/results/cmrc2018-memory-outbox.json",
+    "skills_selection": "benchmarks/results/cmrc2018-skills-selection.json",
+    "customer_acceptance": "benchmarks/results/customer-skill-acceptance.json",
+    "web_boundary_security": "benchmarks/results/web-boundary-security.json",
+    "web_boundary_verification": "benchmarks/results/web-boundary-security-verification.json",
+}
+DATASETS = {
+    "retrieval_cmrc2018": "benchmarks/.cache/cmrc2018-source/data/cmrc2018_dev.json",
+    "skills_selection": "benchmarks/skills/github_issue_skill_selection.json",
+}
+# These files define the contract/evidence machinery.  The digest is not a
+# security signature; it is a stale-report detector and must be checked by a
+# separately protected CI job before release.
+SOURCE_PATHS = (
+    "agent/knowledge",
+    "agent/memory/governance",
+    "agent/retrieval",
+    "agent/skills",
+    "benchmarks/customer",
+    "benchmarks/evidence",
+    "benchmarks/knowledge",
+    "benchmarks/memory",
+    "benchmarks/retrieval",
+    "benchmarks/security",
+    "benchmarks/skills",
+    "channel/web",
+    "desktop/src",
+    ".github/workflows",
+    "docker/Dockerfile.latest",
+    ".dockerignore",
+    "requirements.txt",
+    "desktop/build/requirements-desktop.txt",
+)
+EXCLUDED_PARTS = {
+    ".git",
+    "__pycache__",
+    ".cache",
+    "node_modules",
+    "dist",
+    "build",
+    "results",
+}
+
+
+def _root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _iter_source_files(root: Path) -> Iterable[Path]:
+    seen: set[Path] = set()
+    for raw in SOURCE_PATHS:
+        path = root / raw
+        candidates = path.rglob("*") if path.is_dir() else (path,)
+        for candidate in candidates:
+            if not candidate.is_file():
+                continue
+            relative = candidate.relative_to(root)
+            if any(part in EXCLUDED_PARTS for part in relative.parts):
+                continue
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            yield candidate
+
+
+def source_fingerprint(root: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(_iter_source_files(root), key=lambda item: item.as_posix()):
+        relative = path.relative_to(root).as_posix().encode("utf-8")
+        content_hash = sha256_file(path).encode("ascii")
+        digest.update(relative + b"\0" + content_hash + b"\n")
+    return digest.hexdigest()
+
+
+def _git_state(root: Path) -> dict[str, Any]:
+    def run(*args: str) -> str | None:
+        try:
+            result = subprocess.run(
+                ["git", *args],
+                cwd=root,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except (OSError, subprocess.CalledProcessError):
+            return None
+        return result.stdout.strip()
+
+    commit = run("rev-parse", "HEAD")
+    prefix = run("rev-parse", "--show-prefix")
+    status = run("status", "--porcelain", "--", ".")
+    tracked_raw = run("ls-files", "--full-name", "--", ".")
+    tracked = set((tracked_raw or "").splitlines())
+    source_files = list(_iter_source_files(root))
+    if prefix is not None:
+        normalized_prefix = prefix.replace("\\", "/")
+        expected_tracked = {
+            normalized_prefix + path.relative_to(root).as_posix()
+            for path in source_files
+        }
+    else:
+        expected_tracked = set()
+    tracked_source_count = len(expected_tracked & tracked)
+    all_sources_tracked = bool(expected_tracked) and expected_tracked <= tracked
+    clean = status == ""
+    commit_bound = bool(commit) and clean and all_sources_tracked
+    return {
+        "commit": commit or "ABSENT",
+        "clean": clean,
+        "commit_bound": commit_bound,
+        "source_file_count": len(expected_tracked),
+        "tracked_source_count": tracked_source_count,
+        "all_source_paths_tracked": all_sources_tracked,
+        "status_sha256": _sha256_bytes((status or "").encode("utf-8")),
+    }
+
+
+def _load_json(path: Path) -> dict[str, Any] | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _report_record(root: Path, relative: str) -> dict[str, Any]:
+    path = root / relative
+    record: dict[str, Any] = {
+        "path": relative,
+        "exists": path.is_file(),
+        "sha256": sha256_file(path) if path.is_file() else None,
+        "status": "ABSENT",
+        "passed": False,
+    }
+    if not path.is_file():
+        return record
+    payload = _load_json(path)
+    if payload is None:
+        record["status"] = "INVALID_JSON"
+        return record
+    record["status"] = str(payload.get("status", "completed"))
+    record["passed"] = payload.get("passed") is True
+    record["schema_version"] = payload.get("schema_version")
+    record["limitations"] = payload.get("limitations")
+    return record
+
+
+def _dataset_record(root: Path, relative: str) -> dict[str, Any]:
+    path = root / relative
+    return {
+        "path": relative,
+        "exists": path.is_file(),
+        "sha256": sha256_file(path) if path.is_file() else None,
+    }
+
+
+def _current_implementation_fingerprints(root: Path) -> dict[str, tuple[str, str]]:
+    from benchmarks.knowledge.compare import _comparison_fingerprint
+    from benchmarks.memory.outbox import _implementation_fingerprint as memory_fingerprint
+    from benchmarks.retrieval.compare import comparison_implementation_fingerprint
+    from benchmarks.security.web_boundary import source_fingerprint as web_fingerprint
+    from benchmarks.skills.runner import implementation_fingerprint as skills_fingerprint
+
+    retrieval = comparison_implementation_fingerprint()
+    web = web_fingerprint(root)
+    return {
+        "retrieval_comparison": ("comparison_implementation_sha256", retrieval),
+        "retrieval_verification": ("comparison_implementation_sha256", retrieval),
+        "knowledge_comparison": (
+            "comparison_implementation_sha256", _comparison_fingerprint(root)
+        ),
+        "knowledge_verification": (
+            "comparison_implementation_sha256", _comparison_fingerprint(root)
+        ),
+        "memory_outbox": ("implementation_sha256", memory_fingerprint()),
+        "skills_selection": ("implementation_sha256", skills_fingerprint()),
+        "web_boundary_security": ("source_fingerprint_sha256", web),
+        "web_boundary_verification": ("source_fingerprint_sha256", web),
+    }
+
+
+def _apply_report_freshness(
+    root: Path, reports: dict[str, dict[str, Any]]
+) -> None:
+    fingerprints = _current_implementation_fingerprints(root)
+    for name, (field, current) in fingerprints.items():
+        record = reports[name]
+        payload = _load_json(root / record["path"]) if record["exists"] else None
+        declared = payload.get(field) if payload is not None else None
+        fresh = declared == current
+        record["implementation_fingerprint_field"] = field
+        record["declared_implementation_sha256"] = declared
+        record["current_implementation_sha256"] = current
+        record["fresh"] = fresh
+        if record["passed"] and not fresh:
+            record["passed"] = False
+            record["status"] = "STALE_SOURCE"
+
+    verification_sources = {
+        "retrieval_verification": "retrieval_comparison",
+        "knowledge_verification": "knowledge_comparison",
+        "web_boundary_verification": "web_boundary_security",
+    }
+    for verifier_name, source_name in verification_sources.items():
+        record = reports[verifier_name]
+        payload = _load_json(root / record["path"]) if record["exists"] else None
+        declared_report_sha256 = (
+            payload.get("report_sha256") if payload is not None else None
+        )
+        current_report_sha256 = reports[source_name].get("sha256")
+        linked = (
+            isinstance(declared_report_sha256, str)
+            and declared_report_sha256 == current_report_sha256
+        )
+        record["verified_report"] = source_name
+        record["declared_report_sha256"] = declared_report_sha256
+        record["current_report_sha256"] = current_report_sha256
+        record["source_report_linked"] = linked
+        if record["passed"] and not linked:
+            record["passed"] = False
+            record["status"] = "STALE_SOURCE_REPORT"
+
+
+def generate_manifest(root: Path | None = None) -> dict[str, Any]:
+    root = (root or _root()).resolve()
+    reports = {name: _report_record(root, path) for name, path in REPORTS.items()}
+    _apply_report_freshness(root, reports)
+    datasets = {name: _dataset_record(root, path) for name, path in DATASETS.items()}
+    customer = reports["customer_acceptance"]
+    web_boundary_closed = (
+        reports["web_boundary_security"]["passed"]
+        and reports["web_boundary_verification"]["passed"]
+    )
+    git = _git_state(root)
+
+    hard_denials = {
+        "FDE_CASE_EVIDENCE": "ABSENT",
+        "TARGET_CUSTOMER_ACCEPTANCE": "YES" if customer["passed"] else "NO",
+        "CUSTOMER_ATTESTATION": "YES" if customer["passed"] else "ABSENT",
+        "CUSTOMER_TEST_EXECUTION": "YES" if customer["exists"] and customer["status"] == "completed" else "NOT_RUN",
+        "SKILLS_GOLD_DATASET_VALID": "YES" if reports["skills_selection"]["passed"] else "NO",
+        "SKILLS_PRODUCTION_GATE_ELIGIBLE": "YES" if reports["skills_selection"]["passed"] else "NO",
+        "GIT_COMMIT_BOUND_EVIDENCE": "YES" if git["commit_bound"] else "ABSENT",
+        "REMOTE_CI_REQUIRED_CHECKS": "NOT_RUN",
+        "BRANCH_PROTECTION": "ABSENT",
+        "SIGNED_RELEASE_ARTIFACT": "ABSENT",
+        "REPRODUCIBLE_BUILD": "NOT_RUN",
+        "DOCKER_BUILD": "NOT_RUN",
+        "INSTALLER_SMOKE_TEST": "NOT_RUN",
+        "MIGRATION_ROLLBACK_TEST": "NOT_RUN",
+        "72H_SOAK": "NOT_RUN",
+        "PRODUCTION_ALERT_FIRE_TEST": "NOT_RUN",
+        "SESSION_CITATION_UI_CLOSED_LOOP": (
+            "YES" if web_boundary_closed else "NO"
+        ),
+        # The in-repository verifier is valuable tamper detection, but it is
+        # not an independent trust domain because the same PR can modify the
+        # producer, verifier and workflow. Never label it independent evidence.
+        "KNOWLEDGE_LOCAL_RECOMPUTATION_VERIFIED": (
+            "YES" if reports["knowledge_verification"]["passed"] else "NO"
+        ),
+        "KNOWLEDGE_INDEPENDENT_VERIFICATION": "NO",
+        "EXTERNAL_VERIFIER_ATTESTATION": "ABSENT",
+        "SESSION_CITATION_PRODUCTION_VERIFIED": "NOT_RUN",
+    }
+    required_conditions = {
+        "all_formal_reports_present": all(item["exists"] for item in reports.values()),
+        "retrieval_formal_gate": reports["retrieval_comparison"]["passed"] and reports["retrieval_verification"]["passed"],
+        "knowledge_formal_gate": (
+            reports["knowledge_comparison"]["passed"]
+            and reports["knowledge_verification"]["passed"]
+        ),
+        "memory_formal_gate": reports["memory_outbox"]["passed"],
+        "skills_formal_gate": reports["skills_selection"]["passed"],
+        "customer_acceptance": customer["passed"],
+        "git_commit_bound_evidence": git["commit_bound"],
+        "clean_release_tree": git["clean"],
+        "reproducible_build": False,
+        "docker_build": False,
+        "installer_smoke_test": False,
+        "migration_rollback_test": False,
+        "soak_and_alert_test": False,
+        "session_citation_closed_loop": web_boundary_closed,
+        "external_verifier_attestation": False,
+    }
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "repository_root": str(root),
+        "source_fingerprint_sha256": source_fingerprint(root),
+        "git": git,
+        "reports": reports,
+        "datasets": datasets,
+        "hard_denials": hard_denials,
+        "required_conditions": required_conditions,
+        "passed": all(required_conditions.values()),
+    }
+
+
+def verify_manifest(manifest: dict[str, Any], root: Path | None = None) -> dict[str, Any]:
+    root = (root or _root()).resolve()
+    checks: list[dict[str, Any]] = []
+
+    def check(name: str, actual: Any, expected: Any, passed: bool) -> None:
+        checks.append({"name": name, "actual": actual, "expected": expected, "passed": bool(passed)})
+
+    check("schema_version", manifest.get("schema_version"), SCHEMA_VERSION, manifest.get("schema_version") == SCHEMA_VERSION)
+    check("source_fingerprint", manifest.get("source_fingerprint_sha256"), source_fingerprint(root), manifest.get("source_fingerprint_sha256") == source_fingerprint(root))
+    current_git = _git_state(root)
+    check("git.commit", manifest.get("git", {}).get("commit"), current_git["commit"], manifest.get("git", {}).get("commit") == current_git["commit"])
+    check("git.clean", manifest.get("git", {}).get("clean"), current_git["clean"], manifest.get("git", {}).get("clean") == current_git["clean"])
+    check("git.commit_bound", manifest.get("git", {}).get("commit_bound"), current_git["commit_bound"], manifest.get("git", {}).get("commit_bound") == current_git["commit_bound"])
+    check("git.tracked_source_count", manifest.get("git", {}).get("tracked_source_count"), current_git["tracked_source_count"], manifest.get("git", {}).get("tracked_source_count") == current_git["tracked_source_count"])
+
+    current_reports = {
+        name: _report_record(root, relative) for name, relative in REPORTS.items()
+    }
+    _apply_report_freshness(root, current_reports)
+    for name in REPORTS:
+        expected = manifest.get("reports", {}).get(name, {})
+        current = current_reports[name]
+        check(f"report.{name}.sha256", expected.get("sha256"), current.get("sha256"), expected.get("sha256") == current.get("sha256"))
+        check(f"report.{name}.status", expected.get("status"), current.get("status"), expected.get("status") == current.get("status"))
+        check(f"report.{name}.passed", expected.get("passed"), current.get("passed"), expected.get("passed") == current.get("passed"))
+        check(f"report.{name}.fresh", expected.get("fresh"), current.get("fresh"), expected.get("fresh") == current.get("fresh"))
+        for linkage_field in (
+            "verified_report",
+            "declared_report_sha256",
+            "current_report_sha256",
+            "source_report_linked",
+        ):
+            if linkage_field in current:
+                check(
+                    f"report.{name}.{linkage_field}",
+                    expected.get(linkage_field),
+                    current.get(linkage_field),
+                    expected.get(linkage_field) == current.get(linkage_field),
+                )
+
+    for name, relative in DATASETS.items():
+        expected = manifest.get("datasets", {}).get(name, {})
+        current = _dataset_record(root, relative)
+        check(f"dataset.{name}.sha256", expected.get("sha256"), current.get("sha256"), expected.get("sha256") == current.get("sha256"))
+
+    recomputed = generate_manifest(root)
+    required = manifest.get("required_conditions")
+    recomputed_required = recomputed["required_conditions"]
+    check("required_conditions", required, recomputed_required, required == recomputed_required)
+    declared_hard_denials = manifest.get("hard_denials")
+    recomputed_hard_denials = recomputed["hard_denials"]
+    check(
+        "hard_denials",
+        declared_hard_denials,
+        recomputed_hard_denials,
+        isinstance(declared_hard_denials, dict)
+        and declared_hard_denials == recomputed_hard_denials,
+    )
+    expected_passed = all(bool(value) for value in recomputed_required.values())
+    check("passed", manifest.get("passed"), expected_passed, manifest.get("passed") is expected_passed)
+    integrity_passed = all(item["passed"] for item in checks)
+    return {
+        "schema_version": 1,
+        "passed": integrity_passed and expected_passed,
+        "integrity_passed": integrity_passed,
+        "manifest_sha256": _sha256_bytes(json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")),
+        "checks": checks,
+    }
+
+
+def main(arguments: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Generate or verify release evidence")
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--verify", action="store_true")
+    args = parser.parse_args(arguments)
+    root = _root()
+    if args.verify:
+        manifest = _load_json(args.output)
+        if manifest is None:
+            print(json.dumps({"passed": False, "error": "invalid manifest"}, ensure_ascii=False, indent=2))
+            return 1
+        result = verify_manifest(manifest, root)
+    else:
+        manifest = generate_manifest(root)
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        result = {"schema_version": 1, "passed": manifest["passed"], "manifest": manifest}
+    print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0 if result["passed"] else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

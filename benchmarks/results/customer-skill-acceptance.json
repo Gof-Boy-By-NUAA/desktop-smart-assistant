@@ -1,0 +1,18 @@
+{
+  "missing_inputs": [
+    "executor_id",
+    "executor_json",
+    "executor_version",
+    "manifest_sha256",
+    "package_root",
+    "run_root",
+    "skill_content_sha256",
+    "skill_id",
+    "skill_version",
+    "skills_db",
+    "tenant_id"
+  ],
+  "passed": false,
+  "schema_version": 1,
+  "status": "pending_customer_inputs"
+}

@@ -1,0 +1,91 @@
+name: Retrieval Quality Gate
+
+on:
+  push:
+    paths:
+      - "agent/retrieval/**"
+      - "agent/chat/service.py"
+      - "agent/protocol/agent.py"
+      - "agent/protocol/agent_stream.py"
+      - "agent/prompt/builder.py"
+      - "agent/skills/manager.py"
+      - "agent/skills/retrieval/**"
+      - "benchmarks/skills/**"
+      - "benchmarks/retrieval/**"
+      - "bridge/agent_initializer.py"
+      - "config.py"
+      - "config-template.json"
+      - "tests/test_retrieval_benchmark.py"
+      - "tests/test_skill_selection_benchmark.py"
+      - "tests/test_skill_shadow_retrieval.py"
+      - "tests/test_tenant_aware_lexical_retrieval.py"
+      - ".github/workflows/test-retrieval.yml"
+  pull_request:
+    paths:
+      - "agent/retrieval/**"
+      - "agent/chat/service.py"
+      - "agent/protocol/agent.py"
+      - "agent/protocol/agent_stream.py"
+      - "agent/prompt/builder.py"
+      - "agent/skills/manager.py"
+      - "agent/skills/retrieval/**"
+      - "benchmarks/skills/**"
+      - "benchmarks/retrieval/**"
+      - "bridge/agent_initializer.py"
+      - "config.py"
+      - "config-template.json"
+      - "tests/test_retrieval_benchmark.py"
+      - "tests/test_skill_selection_benchmark.py"
+      - "tests/test_skill_shadow_retrieval.py"
+      - "tests/test_tenant_aware_lexical_retrieval.py"
+      - ".github/workflows/test-retrieval.yml"
+  workflow_dispatch:
+
+jobs:
+  retrieval-quality-gate:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install focused test dependencies
+        run: >-
+          python -m pip install
+          pytest regex requests PyYAML python-dotenv croniter cryptography
+
+      - name: Run retrieval unit tests
+        run: >-
+          python -m pytest
+          tests/test_retrieval_benchmark.py
+          tests/test_tenant_aware_lexical_retrieval.py
+          tests/test_skill_selection_benchmark.py
+          tests/test_skill_shadow_retrieval.py
+          -q
+
+      - name: Run full CMRC 2018 retrieval gate
+        run: >-
+          python -m benchmarks.retrieval.compare
+          --output benchmarks/results/cmrc2018-comparison.json
+
+      - name: Independently verify raw retrieval evidence
+        run: >-
+          python -m benchmarks.retrieval.verify
+          --report benchmarks/results/cmrc2018-comparison.json
+          --dataset benchmarks/.cache/cmrc2018-source/data/cmrc2018_dev.json
+          --output benchmarks/results/cmrc2018-comparison-verification.json
+
+      - name: Upload benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cmrc2018-retrieval-comparison
+          path: |
+            benchmarks/results/cmrc2018-comparison.json
+            benchmarks/results/cmrc2018-comparison-verification.json
+          if-no-files-found: error

@@ -1,0 +1,93 @@
+.DS_Store
+.idea
+.vscode
+.venv
+.vs
+__pycache__/
+venv*
+*.pyc
+python
+config.json
+QR.png
+nohup.out
+tmp
+plugins.json
+*.log
+logs/
+/workspace
+config.yaml
+user_datas.pkl
+chatgpt_tool_hub/
+plugins/**/
+!plugins/bdunit
+!plugins/dungeon
+!plugins/finish
+!plugins/godcmd
+!plugins/tool
+!plugins/banwords
+!plugins/banwords/**/
+plugins/banwords/__pycache__
+plugins/banwords/lib/__pycache__
+!plugins/hello
+!plugins/role
+!plugins/keyword
+!plugins/linkai
+!plugins/cow_cli
+client_config.json
+# Durable capability keys; generated per installation and never committed.
+.preview_secret
+/knowledge/.system/citation-capability.key
+ref/
+**/.dev.vars
+.cursor/
+local/
+node_modules/
+benchmarks/.cache/
+benchmarks/results/*.json
+# Superseded local benchmark snapshots are not release evidence. Keep only the
+# explicit current-result whitelist below; do not let a first commit bind old
+# reports as if they were authoritative.
+/benchmarks/results/archive/
+# Root-level exploratory audit exports are local working artifacts, not source
+# or signed evidence. They remain available locally but must not affect a
+# commit-bound release tree.
+/audit_*
+# Formal, machine-verifiable acceptance evidence must remain reviewable.
+!benchmarks/results/cmrc2018-comparison.json
+!benchmarks/results/cmrc2018-comparison-verification.json
+!benchmarks/results/cmrc2018-knowledge-comparison.json
+!benchmarks/results/cmrc2018-knowledge-comparison-verification.json
+!benchmarks/results/cmrc2018-memory-outbox.json
+!benchmarks/results/cmrc2018-skills-selection.json
+!benchmarks/results/customer-skill-acceptance.json
+!benchmarks/results/web-boundary-security.json
+!benchmarks/results/web-boundary-security-verification.json
+!benchmarks/results/release-evidence-manifest.json
+
+# cow cli
+dist/
+build/
+*.egg-info/
+.cow.pid
+
+# Desktop backend packaging: keep the source files (spec/requirements/script)
+# tracked even though the generic build/ rule above ignores them, but never
+# track the build outputs or local venv.
+!desktop/build/
+desktop/build/*
+!desktop/build/smart-assistant-backend.spec
+!desktop/build/requirements-desktop.txt
+!desktop/build/build-backend.sh
+!desktop/build/build-feishu-vendor.py
+!desktop/build/entitlements.mac.plist
+!desktop/build/notarize-dmg.sh
+
+# Icon authoring scratch dir: intermediate assets used to produce the final
+# icons. Only the finished icons under desktop/resources/ should be committed.
+desktop/resources/.icon-work/
+
+# Bundled ripgrep binary: downloaded by CI (release workflow) at build time,
+# never committed — it's a multi-MB platform-specific executable.
+desktop/resources/bin/
+
+.wrangler/

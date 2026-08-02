@@ -1,0 +1,389 @@
+{
+  "schema_version": 1,
+  "dataset_id": "smart_assistant_github_issue_skill_selection_v1",
+  "snapshot_generated_at": "2026-07-29T00:00:00Z",
+  "source": {
+    "repository": "https://github.com/zhayujie/SmartAssistant",
+    "api": "https://api.github.com/repos/zhayujie/SmartAssistant/issues/{number}",
+    "license": "public GitHub issue metadata",
+    "snapshot_fields": [
+      "number",
+      "node_id",
+      "title",
+      "html_url",
+      "state",
+      "created_at",
+      "updated_at",
+      "pull_request"
+    ],
+    "body_or_comments_included": false
+  },
+  "annotation_policy": {
+    "label_tier": "deterministic_silver",
+    "normalization": "NFKC casefold",
+    "multi_label_allowed": true,
+    "rules": [
+      {
+        "skill_name": "knowledge-wiki",
+        "markers": [
+          "知识库",
+          "rag",
+          "语料库",
+          "嵌入式搜索",
+          "引用",
+          "knowledge"
+        ]
+      },
+      {
+        "skill_name": "image-generation",
+        "markers": [
+          "图生图",
+          "绘图",
+          "画图",
+          "图片模型",
+          "dall-e",
+          "midjourney",
+          "p图",
+          "绘画",
+          "图片生成",
+          "文生图",
+          "image"
+        ]
+      }
+    ]
+  },
+  "design_cases": [
+    {
+      "number": 2812,
+      "node_id": "I_kwDOHx-ACM8AAAABCOT4WQ",
+      "title": "知识库这里，希望支持文档的分类，添加，删除，批量导入文档",
+      "html_url": "https://github.com/zhayujie/SmartAssistant/issues/2812",
+      "state": "open",
+      "created_at": "2026-05-14T07:50:00Z",
+      "updated_at": "2026-06-25T06:02:45Z",
+      "pull_request": false,
+      "expected_skill_names": ["knowledge-wiki"]
+    },
+    {
+      "number": 1181,
+      "node_id": "I_kwDOHx-ACM5nUOjt",
+      "title": "大佬新加的知识库功能怎么用",
+      "html_url": "https://github.com/zhayujie/SmartAssistant/issues/1181",
+      "state": "closed",
+      "created_at": "2023-05-31T04:12:21Z",
+      "updated_at": "2026-06-01T03:04:53Z",
+      "pull_request": false,
+      "expected_skill_names": ["knowledge-wiki"]
+    },
+    {
+      "number": 1177,
+      "node_id": "I_kwDOHx-ACM5nQiKX",
+      "title": "能否接入langchain实现本地知识库",
+      "html_url": "https://github.com/zhayujie/SmartAssistant/issues/1177",
+      "state": "closed",
+      "created_at": "2023-05-30T14:26:32Z",
+      "updated_at": "2026-06-01T03:04:33Z",
+      "pull_request": false,
+      "expected_skill_names": ["knowledge-wiki"]
+    },
+    {
+      "number": 2881,
+      "node_id": "I_kwDOHx-ACM8AAAABFB3-eg",
+      "title": "[Feature] 增加图生图模型配置通道",
+      "html_url": "https://github.com/zhayujie/SmartAssistant/issues/2881",
+      "state": "open",
+      "created_at": "2026-06-10T15:04:56Z",
+      "updated_at": "2026-06-11T14:40:22Z",
+      "pull_request": false,
+      "expected_skill_names": ["image-generation"]
+    },
+    {
+      "number": 2729,
+      "node_id": "I_kwDOHx-ACM74QORK",
+      "title": "绘图是否支持gpt-image-1.5",
+      "html_url": "https://github.com/zhayujie/SmartAssistant/issues/2729",
+      "state": "closed",
+      "created_at": "2026-03-29T16:32:39Z",
+      "updated_at": "2026-05-06T04:05:48Z",
+      "pull_request": false,
+      "expected_skill_names": ["image-generation"]
+    },
+    {
+      "number": 1848,
+      "node_id": "I_kwDOHx-ACM6DumNw",
+      "title": "azure的dall-e-3生成图片失败",
+      "html_url": "https://github.com/zhayujie/SmartAssistant/issues/1848",
+      "state": "closed",
+      "created_at": "2024-03-27T07:05:36Z",
+      "updated_at": "2024-07-18T14:04:12Z",
+      "pull_request": false,
+      "expected_skill_names": ["image-generation"]
+    }
+  ],
+  "evaluation_cases": [
+    {
+      "number": 2383,
+      "node_id": "I_kwDOHx-ACM6eqFOX",
+      "title": "不同群聊或用户组使用不同的apikey，方便实现不同模型或知识库的切换",
+      "html_url": "https://github.com/zhayujie/SmartAssistant/issues/2383",
+      "state": "closed",
+      "created_at": "2024-11-15T12:25:42Z",
+      "updated_at": "2026-06-01T03:27:14Z",
+      "pull_request": false,
+      "expected_skill_names": ["knowledge-wiki"]
+    },
+    {
+      "number": 2179,
+      "node_id": "I_kwDOHx-ACM6QpQAr",
+      "title": "使用 LinkAI 创建智能体，接入知识库、插件、工作流能力",
+      "html_url": "https://github.com/zhayujie/SmartAssistant/issues/2179",
+      "state": "closed",
+      "created_at": "2024-07-24T06:45:29Z",
+      "updated_at": "2026-06-01T04:07:06Z",
+      "pull_request": false,
+      "expected_skill_names": ["knowledge-wiki"]
+    },
+    {
+      "number": 2256,
+      "node_id": "I_kwDOHx-ACM6TpHcr",
+      "title": "增加支持RAG、免费文生图、免费语音合成功能（参考wechatgpt-agent）",
+      "html_url": "https://github.com/zhayujie/SmartAssistant/issues/2256",
+      "state": "closed",
+      "created_at": "2024-08-21T04:31:59Z",
+      "updated_at": "2026-06-01T03:26:06Z",
+      "pull_request": false,
+      "expected_skill_names": ["image-generation", "knowledge-wiki"]
+    },
+    {
+      "number": 830,
+      "node_id": "I_kwDOHx-ACM5jUg0_",
+      "title": "关于开源中文语料库的收集问题与建议",
+      "html_url": "https://github.com/zhayujie/SmartAssistant/issues/830",
+      "state": "closed",
+      "created_at": "2023-04-13T12:26:44Z",
+      "updated_at": "2026-06-01T04:05:12Z",
+      "pull_request": false,
+      "expected_skill_names": ["knowledge-wiki"]
+    },
+    {
+      "number": 1233,
+      "node_id": "I_kwDOHx-ACM5oITtM",
+      "title": "用嵌入式搜索增强微信机器人的回复",
+      "html_url": "https://github.com/zhayujie/SmartAssistant/issues/1233",
+      "state": "closed",
+      "created_at": "2023-06-08T03:15:16Z",
+      "updated_at": "2026-06-01T03:07:11Z",
+      "pull_request": false,
+      "expected_skill_names": ["knowledge-wiki"]
+    },
+    {
+      "number": 1138,
+      "node_id": "I_kwDOHx-ACM5mmVT7",
+      "title": "机器人能否对信息引用进行回复？",
+      "html_url": "https://github.com/zhayujie/SmartAssistant/issues/1138",
+      "state": "closed",
+      "created_at": "2023-05-23T06:41:25Z",
+      "updated_at": "2026-06-01T03:02:13Z",
+      "pull_request": false,
+      "expected_skill_names": ["knowledge-wiki"]
+    },
+    {
+      "number": 2786,
+      "node_id": "PR_kwDOHx-ACM7Vh1Ez",
+      "title": "feat: enhance RAG ingestion, citations, imports, and knowledge/memory…",
+      "html_url": "https://github.com/zhayujie/SmartAssistant/pull/2786",
+      "state": "open",
+      "created_at": "2026-04-25T02:30:37Z",
+      "updated_at": "2026-05-26T04:12:07Z",
+      "pull_request": true,
+      "expected_skill_names": ["knowledge-wiki"]
+    },
+    {
+      "number": 2621,
+      "node_id": "I_kwDOHx-ACM7CCI-x",
+      "title": "画图模型请问能支持最新的gpt-image-1么",
+      "html_url": "https://github.com/zhayujie/SmartAssistant/issues/2621",
+      "state": "closed",
+      "created_at": "2025-07-23T08:02:04Z",
+      "updated_at": "2026-05-06T04:09:34Z",
+      "pull_request": false,
+      "expected_skill_names": ["image-generation"]
+    },
+    {
+      "number": 2626,
+      "node_id": "I_kwDOHx-ACM7IXO3h",
+      "title": "图片模型能支持目前最火的Gemini-2.5-Flash-Image-Preview么",
+      "html_url": "https://github.com/zhayujie/SmartAssistant/issues/2626",
+      "state": "closed",
+      "created_at": "2025-08-28T02:40:18Z",
+      "updated_at": "2026-05-06T04:09:07Z",
+      "pull_request": false,
+      "expected_skill_names": ["image-generation"]
+    },
+    {
+      "number": 1276,
+      "node_id": "I_kwDOHx-ACM5pzYIC",
+      "title": "文字和角色play功能正常，画图和$tool报错",
+      "html_url": "https://github.com/zhayujie/SmartAssistant/issues/1276",
+      "state": "closed",
+      "created_at": "2023-06-26T15:40:36Z",
+      "updated_at": "2024-07-10T17:51:59Z",
+      "pull_request": false,
+      "expected_skill_names": ["image-generation"]
+    },
+    {
+      "number": 1496,
+      "node_id": "I_kwDOHx-ACM51bnZL",
+      "title": "midjourney接口，或者用linkai的midjourney能P图吗",
+      "html_url": "https://github.com/zhayujie/SmartAssistant/issues/1496",
+      "state": "closed",
+      "created_at": "2023-10-31T10:47:58Z",
+      "updated_at": "2026-06-01T03:15:54Z",
+      "pull_request": false,
+      "expected_skill_names": ["image-generation"]
+    },
+    {
+      "number": 1766,
+      "node_id": "I_kwDOHx-ACM6ADpa5",
+      "title": "绘画超时",
+      "html_url": "https://github.com/zhayujie/SmartAssistant/issues/1766",
+      "state": "closed",
+      "created_at": "2024-02-22T07:51:41Z",
+      "updated_at": "2026-06-01T03:21:15Z",
+      "pull_request": false,
+      "expected_skill_names": ["image-generation"]
+    },
+    {
+      "number": 2433,
+      "node_id": "I_kwDOHx-ACM6kVLHT",
+      "title": "各位大神好，出现【[ERROR] 图片生成失败，请稍后再试】，请问是哪里出现问题了？",
+      "html_url": "https://github.com/zhayujie/SmartAssistant/issues/2433",
+      "state": "closed",
+      "created_at": "2024-12-24T01:50:46Z",
+      "updated_at": "2026-06-01T03:28:57Z",
+      "pull_request": false,
+      "expected_skill_names": ["image-generation"]
+    },
+    {
+      "number": 899,
+      "node_id": "I_kwDOHx-ACM5j1pku",
+      "title": "无法画图",
+      "html_url": "https://github.com/zhayujie/SmartAssistant/issues/899",
+      "state": "closed",
+      "created_at": "2023-04-19T14:21:01Z",
+      "updated_at": "2023-04-22T04:27:38Z",
+      "pull_request": false,
+      "expected_skill_names": ["image-generation"]
+    },
+    {
+      "number": 2994,
+      "node_id": "I_kwDOHx-ACM8AAAABKi0j0w",
+      "title": "[Bug] SmartAssistant QQ Channel 连接开放平台失败",
+      "html_url": "https://github.com/zhayujie/SmartAssistant/issues/2994",
+      "state": "open",
+      "created_at": "2026-07-28T20:08:29Z",
+      "updated_at": "2026-07-29T01:50:59Z",
+      "pull_request": false,
+      "expected_skill_names": []
+    },
+    {
+      "number": 2993,
+      "node_id": "I_kwDOHx-ACM8AAAABKfWF5w",
+      "title": "[Bug] wechat接口版本低了，我扫码扫不上（微信）",
+      "html_url": "https://github.com/zhayujie/SmartAssistant/issues/2993",
+      "state": "open",
+      "created_at": "2026-07-28T13:12:16Z",
+      "updated_at": "2026-07-28T13:14:55Z",
+      "pull_request": false,
+      "expected_skill_names": []
+    },
+    {
+      "number": 2907,
+      "node_id": "I_kwDOHx-ACM8AAAABGA8E4A",
+      "title": "[Bug] 记忆读取memory_get工具在Windows环境不可用",
+      "html_url": "https://github.com/zhayujie/SmartAssistant/issues/2907",
+      "state": "closed",
+      "created_at": "2026-06-19T06:59:04Z",
+      "updated_at": "2026-06-19T06:59:31Z",
+      "pull_request": false,
+      "expected_skill_names": []
+    },
+    {
+      "number": 2839,
+      "node_id": "I_kwDOHx-ACM8AAAABDhGZWg",
+      "title": "无法通过 Web 端对话创建定时任务，向企业微信等平台的用户主动推送消息或文件",
+      "html_url": "https://github.com/zhayujie/SmartAssistant/issues/2839",
+      "state": "open",
+      "created_at": "2026-05-27T08:58:16Z",
+      "updated_at": "2026-06-13T18:29:33Z",
+      "pull_request": false,
+      "expected_skill_names": []
+    },
+    {
+      "number": 2847,
+      "node_id": "I_kwDOHx-ACM8AAAABDwCjCQ",
+      "title": "web端新建会话刷新页面后会话丢失",
+      "html_url": "https://github.com/zhayujie/SmartAssistant/issues/2847",
+      "state": "closed",
+      "created_at": "2026-05-29T07:42:38Z",
+      "updated_at": "2026-06-01T01:24:11Z",
+      "pull_request": false,
+      "expected_skill_names": []
+    },
+    {
+      "number": 2858,
+      "node_id": "I_kwDOHx-ACM8AAAABEOK2UA",
+      "title": "[Bug] 2.1.0最新版没有telegram等新增通道呀",
+      "html_url": "https://github.com/zhayujie/SmartAssistant/issues/2858",
+      "state": "closed",
+      "created_at": "2026-06-03T08:44:01Z",
+      "updated_at": "2026-06-05T09:56:21Z",
+      "pull_request": false,
+      "expected_skill_names": []
+    },
+    {
+      "number": 2890,
+      "node_id": "I_kwDOHx-ACM8AAAABFWzv7w",
+      "title": "需要网页授权的MCP怎么配置还是暂时不支持",
+      "html_url": "https://github.com/zhayujie/SmartAssistant/issues/2890",
+      "state": "closed",
+      "created_at": "2026-06-13T05:05:18Z",
+      "updated_at": "2026-07-25T09:07:30Z",
+      "pull_request": false,
+      "expected_skill_names": []
+    },
+    {
+      "number": 2938,
+      "node_id": "I_kwDOHx-ACM8AAAABH6RKXQ",
+      "title": "[Feature] 腾讯Agent Mail支持~",
+      "html_url": "https://github.com/zhayujie/SmartAssistant/issues/2938",
+      "state": "open",
+      "created_at": "2026-07-07T06:20:09Z",
+      "updated_at": "2026-07-22T01:47:03Z",
+      "pull_request": false,
+      "expected_skill_names": []
+    },
+    {
+      "number": 2916,
+      "node_id": "I_kwDOHx-ACM8AAAABGaDYuw",
+      "title": "[Feature] 支持多智能体协同功能的需求",
+      "html_url": "https://github.com/zhayujie/SmartAssistant/issues/2916",
+      "state": "open",
+      "created_at": "2026-06-23T10:31:41Z",
+      "updated_at": "2026-06-24T01:48:36Z",
+      "pull_request": false,
+      "expected_skill_names": []
+    },
+    {
+      "number": 2976,
+      "node_id": "I_kwDOHx-ACM8AAAABJVx2gg",
+      "title": "Native multi-Agent workspaces: merge order",
+      "html_url": "https://github.com/zhayujie/SmartAssistant/issues/2976",
+      "state": "open",
+      "created_at": "2026-07-19T07:26:08Z",
+      "updated_at": "2026-07-19T10:24:50Z",
+      "pull_request": false,
+      "expected_skill_names": []
+    }
+  ]
+}
