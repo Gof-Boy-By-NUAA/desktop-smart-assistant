@@ -41,6 +41,21 @@ _TOOL_RESULT_SSE_MAX_DEPTH = 32
 _TOOL_RESULT_SSE_MAX_PRESERVED_CITATIONS = 20
 _SSE_EVENT_JOURNAL_MAX_EVENTS = 4096
 _SSE_EVENT_JOURNAL_MAX_BYTES = 16 * 1024 * 1024
+_DURABLE_SSE_STORE_LOCK = threading.Lock()
+_DURABLE_SSE_STORE = None
+
+
+def _get_durable_sse_store():
+    """Return the data-root-bound append-only SSE journal store."""
+
+    from channel.web.sse_persistence import DurableSSEJournalStore
+
+    global _DURABLE_SSE_STORE
+    path = os.path.realpath(os.path.join(get_data_root(), "web_sse_journal.sqlite3"))
+    with _DURABLE_SSE_STORE_LOCK:
+        if _DURABLE_SSE_STORE is None or _DURABLE_SSE_STORE.path != path:
+            _DURABLE_SSE_STORE = DurableSSEJournalStore(path)
+        return _DURABLE_SSE_STORE
 
 
 class _SSEEventJournal:
@@ -53,12 +68,13 @@ class _SSEEventJournal:
     Overflow is explicit and terminal rather than silently dropping evidence.
     """
 
-    def __init__(self):
+    def __init__(self, append_callback=None):
         self._events = deque()
         self._next_event_id = 1
         self._bytes = 0
         self._overflowed = False
         self._condition = threading.Condition()
+        self._append_callback = append_callback
 
     @staticmethod
     def _encoded_size(item: dict) -> int:
@@ -68,6 +84,55 @@ class _SSEEventJournal:
             # The generator will emit a strict JSON error for malformed data;
             # reserve enough space here to fail closed before it can be hidden.
             return _SSE_EVENT_JOURNAL_MAX_BYTES + 1
+
+    def _append_locked(self, event_id: int, item: dict, size: int) -> None:
+        if self._append_callback is not None:
+            # Durable append happens before the live SSE consumer can observe
+            # this sequence. A crash therefore gives recovery the exact prefix
+            # it may replay, never a made-up successful suffix.
+            self._append_callback(event_id, item)
+        self._events.append((event_id, item))
+        self._next_event_id = event_id + 1
+        self._bytes += size
+        self._condition.notify_all()
+
+    def _append_unconfirmed_locked(self) -> None:
+        failure = {
+            "type": "error",
+            "message": "SSE durable journal write failed; task result is unconfirmed",
+        }
+        event_id = self._next_event_id
+        size = self._encoded_size(failure)
+        try:
+            if self._append_callback is not None:
+                self._append_callback(event_id, failure)
+        except Exception:
+            # The in-memory error is still deliberately terminal. The producer
+            # must not turn a failed durable write into a normal SSE success.
+            pass
+        self._events.append((event_id, failure))
+        self._next_event_id = event_id + 1
+        self._bytes += size
+        self._overflowed = True
+        self._condition.notify_all()
+
+    def restore(self, events) -> None:
+        """Hydrate a durable prefix without re-appending it to storage."""
+
+        with self._condition:
+            previous = 0
+            for event_id, item in events:
+                if (
+                    not isinstance(event_id, int)
+                    or event_id <= previous
+                    or not isinstance(item, dict)
+                ):
+                    raise ValueError("invalid durable SSE event sequence")
+                self._events.append((event_id, item))
+                self._bytes += self._encoded_size(item)
+                previous = event_id
+            self._next_event_id = previous + 1
+            self._condition.notify_all()
 
     def put(self, item: dict):
         """Append an event. Kept queue-like because producers only call put()."""
@@ -83,17 +148,18 @@ class _SSEEventJournal:
                     "type": "error",
                     "message": "SSE event journal capacity exhausted; task result is unconfirmed",
                 }
-                overflow_size = self._encoded_size(overflow)
-                self._events.append((self._next_event_id, overflow))
-                self._next_event_id += 1
-                self._bytes += overflow_size
+                try:
+                    self._append_locked(
+                        self._next_event_id, overflow, self._encoded_size(overflow)
+                    )
+                except Exception:
+                    self._append_unconfirmed_locked()
                 self._overflowed = True
-                self._condition.notify_all()
                 return
-            self._events.append((self._next_event_id, item))
-            self._next_event_id += 1
-            self._bytes += size
-            self._condition.notify_all()
+            try:
+                self._append_locked(self._next_event_id, item, size)
+            except Exception:
+                self._append_unconfirmed_locked()
 
     def read_after(self, event_id: int, timeout: float):
         """Return ``(event_id, payload)`` newer than cursor, or ``None`` on timeout."""
@@ -2257,7 +2323,18 @@ class WebChannel(ChatChannel):
                 self.session_queues[session_id] = Queue()
 
             if use_sse:
-                self.sse_queues[request_id] = _SSEEventJournal()
+                if not owner_id:
+                    # All HTTP entry points provide an authenticated principal.
+                    # Refuse a direct/legacy caller rather than start a stream
+                    # whose durable owner cannot be verified on recovery.
+                    raise PermissionError("SSE request owner is required")
+                durable_store = _get_durable_sse_store()
+                durable_store.begin(request_id, owner_id, session_id)
+                self.sse_queues[request_id] = _SSEEventJournal(
+                    lambda event_id, payload: durable_store.append(
+                        request_id, event_id, payload
+                    )
+                )
                 self.sse_last_active[request_id] = time.time()
 
             trigger_prefixs = conf().get("single_chat_prefix", [""])
@@ -2317,6 +2394,52 @@ class WebChannel(ChatChannel):
             with lock:
                 generations.pop(request_id, None)
 
+    def _recover_sse_request(
+        self, request_id: str, owner_id: Optional[str]
+    ) -> bool:
+        """Hydrate an owner-checked durable SSE prefix after a process loss.
+
+        A restarted process cannot honestly resume the old agent worker. For a
+        non-terminal durable run it therefore appends an in-memory terminal
+        `unconfirmed` error after the durable prefix. This preserves every
+        committed event while preventing a reconnect from displaying success.
+        """
+
+        if not request_id or not owner_id:
+            return False
+        try:
+            replay = _get_durable_sse_store().replay(request_id, owner_id)
+        except Exception as exc:
+            logger.warning(
+                f"[WebChannel] durable SSE recovery unavailable for {request_id}: {exc}"
+            )
+            return False
+        if replay is None:
+            return False
+        journal = _SSEEventJournal()
+        try:
+            journal.restore(replay["events"])
+        except ValueError as exc:
+            logger.warning(
+                f"[WebChannel] durable SSE recovery rejected for {request_id}: {exc}"
+            )
+            return False
+        if replay["state"] != "completed":
+            journal.put({
+                "type": "error",
+                "message": (
+                    "SSE worker was interrupted; persisted events were replayed "
+                    "but task result is unconfirmed"
+                ),
+                "request_id": request_id,
+                "recovered": True,
+            })
+        self.request_to_session[request_id] = str(replay["session_id"])
+        self.request_owners[request_id] = str(replay["owner_id"])
+        self.sse_queues[request_id] = journal
+        self.sse_last_active[request_id] = time.time()
+        return True
+
     def _start_sse_janitor(self):
         """Start a background thread that reclaims orphaned SSE queues.
 
@@ -2350,6 +2473,12 @@ class WebChannel(ChatChannel):
                     ]
                     for rid in stale:
                         self._drop_sse_request(rid)
+                    try:
+                        _get_durable_sse_store().reap(now=now)
+                    except Exception as durable_exc:
+                        logger.warning(
+                            f"[WebChannel] durable SSE journal reap failed: {durable_exc}"
+                        )
                     if stale:
                         logger.info(
                             f"[WebChannel] SSE janitor reclaimed {len(stale)} "
@@ -2375,10 +2504,12 @@ class WebChannel(ChatChannel):
         journal; a reconnect cannot steal queued events from another WSGI
         generator. Plain ``Queue`` remains supported for focused unit tests.
         """
-        if owner_id is not None and self.request_owners.get(request_id) != owner_id:
-            yield b"data: {\"type\": \"error\", \"message\": \"invalid request_id\"}\n\n"
-            return
         if request_id not in self.sse_queues:
+            recover = getattr(self, "_recover_sse_request", None)
+            if not callable(recover) or not recover(request_id, owner_id):
+                yield b"data: {\"type\": \"error\", \"message\": \"invalid request_id\"}\n\n"
+                return
+        if owner_id is not None and self.request_owners.get(request_id) != owner_id:
             yield b"data: {\"type\": \"error\", \"message\": \"invalid request_id\"}\n\n"
             return
 
@@ -3344,7 +3475,11 @@ class StreamTicketHandler:
         except Exception:
             return json.dumps({"status": "error", "message": "Invalid request"})
         channel = WebChannel()
-        if not request_id or channel.request_owners.get(request_id) != owner_id:
+        if not request_id:
+            raise web.notfound()
+        if channel.request_owners.get(request_id) != owner_id and not channel._recover_sse_request(
+            request_id, owner_id
+        ):
             raise web.notfound()
         return json.dumps({
             "status": "success",
