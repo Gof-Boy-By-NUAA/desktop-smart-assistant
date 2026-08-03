@@ -591,6 +591,11 @@ export interface SchedulerTask {
   schedule: TaskSchedule
   action: TaskAction
   next_run_at?: string
+  last_execution_id?: string
+  last_execution_mode?: 'scheduled' | 'manual'
+  last_execution_status?: 'running' | 'succeeded' | 'in_doubt'
+  last_execution_at?: string
+  last_execution_detail?: string | null
 }
 
 // ============================================================

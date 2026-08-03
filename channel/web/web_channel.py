@@ -6420,6 +6420,12 @@ class SchedulerRunHandler:
             task_id = body.get("task_id")
             if not task_id:
                 return json.dumps({"status": "error", "message": "task_id required"})
+            idempotency_key = body.get("idempotency_key")
+            if not isinstance(idempotency_key, str):
+                return json.dumps({
+                    "status": "error",
+                    "message": "idempotency_key required for manual task execution",
+                })
 
             from agent.tools.scheduler.integration import get_scheduler_service
             service = get_scheduler_service()
@@ -6429,10 +6435,15 @@ class SchedulerRunHandler:
                     "message": "Scheduler service is not running",
                 })
 
-            service.run_task_now(task_id, owner_id=owner_id)
+            result = service.run_task_now(
+                task_id,
+                owner_id=owner_id,
+                idempotency_key=idempotency_key,
+            )
             return json.dumps({
                 "status": "success",
                 "message": f"Task '{task_id}' queued for immediate execution",
+                "execution": result,
             }, ensure_ascii=False)
         except Exception as e:
             logger.error(f"[WebChannel] Scheduler manual run error: {e}")

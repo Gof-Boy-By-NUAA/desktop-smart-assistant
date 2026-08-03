@@ -64,18 +64,46 @@ def test_web_manual_run_is_authenticated_and_delegates_to_scheduler():
     assert hasattr(web_channel, "SchedulerRunHandler")
 
     service = Mock()
+    service.run_task_now.return_value = {
+        "status": "queued",
+        "execution_id": "manual:request-0001",
+    }
     with patch("channel.web.web_channel._require_auth", return_value=OWNER) as require_auth, \
+         patch("channel.web.web_channel.web.header"), \
+         patch(
+             "channel.web.web_channel.web.data",
+             return_value=b'{"task_id":"task-1","idempotency_key":"request-0001"}',
+         ), \
+         patch("agent.tools.scheduler.integration.get_scheduler_service", return_value=service):
+        response = json.loads(web_channel.SchedulerRunHandler().POST())
+
+    require_auth.assert_called_once_with()
+    service.run_task_now.assert_called_once_with(
+        "task-1", owner_id=OWNER, idempotency_key="request-0001"
+    )
+    assert response == {
+        "status": "success",
+        "message": "Task 'task-1' queued for immediate execution",
+        "execution": {
+            "status": "queued",
+            "execution_id": "manual:request-0001",
+        },
+    }
+
+
+def test_web_manual_run_rejects_missing_idempotency_key_before_side_effect():
+    service = Mock()
+    with patch("channel.web.web_channel._require_auth", return_value=OWNER), \
          patch("channel.web.web_channel.web.header"), \
          patch("channel.web.web_channel.web.data", return_value=b'{"task_id":"task-1"}'), \
          patch("agent.tools.scheduler.integration.get_scheduler_service", return_value=service):
         response = json.loads(web_channel.SchedulerRunHandler().POST())
 
-    require_auth.assert_called_once_with()
-    service.run_task_now.assert_called_once_with("task-1", owner_id=OWNER)
     assert response == {
-        "status": "success",
-        "message": "Task 'task-1' queued for immediate execution",
+        "status": "error",
+        "message": "idempotency_key required for manual task execution",
     }
+    service.run_task_now.assert_not_called()
 
 
 def test_web_manual_run_rejects_unavailable_scheduler():
@@ -83,7 +111,10 @@ def test_web_manual_run_rejects_unavailable_scheduler():
 
     with patch("channel.web.web_channel._require_auth"), \
          patch("channel.web.web_channel.web.header"), \
-         patch("channel.web.web_channel.web.data", return_value=b'{"task_id":"task-1"}'), \
+         patch(
+             "channel.web.web_channel.web.data",
+             return_value=b'{"task_id":"task-1","idempotency_key":"request-0001"}',
+         ), \
          patch("agent.tools.scheduler.integration.get_scheduler_service", return_value=None):
         response = json.loads(web_channel.SchedulerRunHandler().POST())
 
@@ -105,10 +136,16 @@ def test_manual_run_is_exposed_by_explicit_web_and_desktop_controls():
     assert "fetch('/api/scheduler/run'" in web_console
     web_run = web_console[web_console.index("function runTaskNow(task, button)"):]
     assert "showConfirmDialog({" in web_run[:2500]
-    assert "async runTask(taskId: string)" in desktop_client
+    assert "window.crypto.randomUUID" in web_run[:2500]
+    assert "idempotency_key: idempotencyKey" in web_run[:2500]
+    assert "task.last_execution_status === 'running'" in web_console
+    assert "task_execution_running" in desktop_page
+    assert "async runTask(taskId: string, idempotencyKey: string)" in desktop_client
+    assert "idempotency_key: idempotencyKey" in desktop_client
     assert "'/api/scheduler/run'" in desktop_client
     assert "const runNow = async ()" in desktop_page
     assert "window.confirm(t('task_run_confirm'))" in desktop_page
+    assert "newExecutionIdempotencyKey()" in desktop_page
 
 
 def test_web_edit_preserves_hidden_agent_action_fields(tmp_path):

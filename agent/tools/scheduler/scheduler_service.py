@@ -4,6 +4,7 @@ Background scheduler service for executing scheduled tasks
 
 import time
 import threading
+import uuid
 from datetime import datetime, timedelta
 from typing import Callable, Optional
 from croniter import croniter
@@ -45,6 +46,11 @@ class SchedulerService:
         self._generation = 0
         self._execution_lock = threading.Lock()
         self._active_task_ids = set()
+        # This value is intentionally process/service-local. A durable
+        # "running" ledger row from another process (or before restart) is
+        # uncertain, not proof that this instance is still executing it.
+        self._runner_id = uuid.uuid4().hex
+        self._active_execution_ids = set()
     
     def start(self):
         """Start the scheduler service"""
@@ -127,7 +133,7 @@ class SchedulerService:
                         self._stop_event = None
     
     def _check_and_execute_tasks(self):
-        """Check for due tasks and execute them"""
+        """Claim due occurrences durably before executing external side effects."""
         now = datetime.now()
         tasks = self.task_store.list_tasks(enabled_only=True)
         
@@ -135,39 +141,107 @@ class SchedulerService:
             try:
                 if self._is_task_due(task, now):
                     logger.info(f"[Scheduler] Executing task: {task['id']} - {task['name']}")
-                    if not self._claim_task(task['id']):
-                        logger.info(
-                            f"[Scheduler] Task {task['id']} is already running; skipping this tick"
+                    scheduled_for = task.get("next_run_at")
+                    if not scheduled_for:
+                        # _is_task_due normally initializes this before it
+                        # returns True. Do not invent an idempotency key if a
+                        # concurrent task edit has invalidated that invariant.
+                        logger.error(
+                            f"[Scheduler] Task {task['id']} is due without a persisted occurrence"
                         )
                         continue
-                    try:
-                        ok = self._execute_task(task)
-                    finally:
-                        self._release_task(task['id'])
-                    if not ok:
-                        # Leave next_run_at as-is so the next loop retries.
-                        # Cron tasks within the catch-up window will keep
-                        # firing; beyond it _is_task_due will reschedule.
-                        logger.warning(
-                            f"[Scheduler] Task {task['id']} delivery failed, will retry next tick"
+                    claim = self.task_store.claim_scheduled_execution(
+                        task["id"], scheduled_for, self._runner_id
+                    )
+                    claim_status = claim.get("status")
+                    if claim_status == "succeeded":
+                        # A prior worker delivered the side effect and crashed
+                        # before moving tasks.json. Advance the exact durable
+                        # occurrence without running the callback again.
+                        next_run = self._calculate_next_run(task, now)
+                        self.task_store.advance_scheduled_execution(
+                            task["id"],
+                            scheduled_for,
+                            claim["execution_id"],
+                            next_run.isoformat() if next_run else None,
+                        )
+                        logger.info(
+                            f"[Scheduler] Reconciled completed occurrence for {task['id']}"
+                        )
+                        continue
+                    if claim_status != "claimed":
+                        logger.info(
+                            f"[Scheduler] Task {task['id']} occurrence is "
+                            f"{claim_status}; refusing duplicate execution"
                         )
                         continue
 
+                    try:
+                        ok, detail = self._execute_task(task)
+                    except BaseException:
+                        # Do not release/retry a claim after an unexpected
+                        # BaseException. The durable 'running' state is safer
+                        # than pretending an external action did not happen.
+                        logger.exception(
+                            f"[Scheduler] Task {task['id']} interrupted after durable claim"
+                        )
+                        raise
+                    if not ok:
+                        # A callback may fail after an outbound service accepts
+                        # the message. Retry would turn this uncertainty into a
+                        # duplicate customer-visible side effect, so retain an
+                        # explicit in_doubt record for operator review.
+                        self.task_store.finish_execution(
+                            task["id"],
+                            claim["execution_id"],
+                            claim["lease_token"],
+                            succeeded=False,
+                            detail=detail,
+                        )
+                        self.task_store.record_scheduled_execution_uncertain(
+                            task["id"],
+                            scheduled_for,
+                            claim["execution_id"],
+                            detail,
+                        )
+                        logger.warning(
+                            f"[Scheduler] Task {task['id']} execution is in_doubt; "
+                            "automatic retry is blocked"
+                        )
+                        continue
+
+                    # Record success before changing the JSON schedule. If the
+                    # second write crashes, the next scanner reconciles this
+                    # successful occurrence without executing it again.
+                    self.task_store.finish_execution(
+                        task["id"],
+                        claim["execution_id"],
+                        claim["lease_token"],
+                        succeeded=True,
+                    )
                     next_run = self._calculate_next_run(task, now)
-                    if next_run:
-                        self.task_store.update_task(task['id'], {
-                            "next_run_at": next_run.isoformat(),
-                            "last_run_at": now.isoformat()
-                        })
-                    else:
-                        self.task_store.delete_task(task['id'])
+                    advanced = self.task_store.advance_scheduled_execution(
+                        task["id"],
+                        scheduled_for,
+                        claim["execution_id"],
+                        next_run.isoformat() if next_run else None,
+                    )
+                    if next_run and not advanced:
+                        logger.warning(
+                            f"[Scheduler] Task {task['id']} succeeded but schedule "
+                            "changed before advancement; not overwriting user state"
+                        )
+                    elif not next_run and advanced:
                         logger.info(f"[Scheduler] One-time task completed and removed: {task['id']}")
             except Exception as e:
                 logger.error(f"[Scheduler] Error processing task {task.get('id')}: {e}")
 
     def run_task_now(
-        self, task_id: str, owner_id: Optional[str] = None
-    ) -> None:
+        self,
+        task_id: str,
+        owner_id: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> dict:
         """Queue one immediate execution without changing the task schedule.
 
         Disabled and one-time tasks may be run manually for testing. The
@@ -181,30 +255,88 @@ class SchedulerService:
         task = self.task_store.get_task(task_id, owner_id=owner_id)
         if not task:
             raise ValueError(f"Task '{task_id}' not found")
-        if not self._claim_task(task_id):
+        claim = self.task_store.claim_manual_execution(
+            task_id,
+            owner_id=owner_id,
+            idempotency_key=idempotency_key,
+            runner_id=self._runner_id,
+        )
+        claim_status = claim.get("status")
+        if claim_status == "succeeded":
+            return {
+                "status": "already_completed",
+                "execution_id": claim.get("execution_id"),
+            }
+        if (
+            claim_status == "running"
+            and claim.get("runner_id") == self._runner_id
+            and self._is_execution_active(claim.get("execution_id"))
+        ):
+            return {
+                "status": "already_queued",
+                "execution_id": claim.get("execution_id"),
+            }
+        if (
+            claim_status == "blocked"
+            and claim.get("runner_id") == self._runner_id
+            and self._is_execution_active(claim.get("execution_id"))
+        ):
             raise RuntimeError(f"Task '{task_id}' is already running")
+        if claim_status != "claimed":
+            raise RuntimeError(
+                f"Task '{task_id}' has an uncertain execution; operator review is required"
+            )
+        if not self._register_execution(claim["execution_id"]):
+            raise RuntimeError(
+                f"Task '{task_id}' has an uncertain execution; operator review is required"
+            )
 
         def _run():
-            now = datetime.now()
             try:
                 logger.info(f"[Scheduler] Manually executing task: {task_id} - {task.get('name', '')}")
-                ok = self._execute_task(task)
+                ok, detail = self._execute_task(task)
+                self.task_store.finish_execution(
+                    task_id,
+                    claim["execution_id"],
+                    claim["lease_token"],
+                    succeeded=ok,
+                    detail=detail,
+                )
+                self.task_store.record_manual_execution(
+                    task_id,
+                    claim["execution_id"],
+                    succeeded=ok,
+                    detail=detail,
+                )
                 if ok:
-                    self.task_store.update_task(task_id, {
-                        "last_run_at": now.isoformat(),
-                        "last_manual_run_at": now.isoformat(),
-                    })
                     logger.info(f"[Scheduler] Manual execution completed: {task_id}")
                 else:
-                    logger.warning(f"[Scheduler] Manual execution failed: {task_id}")
+                    logger.warning(
+                        f"[Scheduler] Manual execution is in_doubt: {task_id}; "
+                        "automatic retry is blocked"
+                    )
+            except BaseException:
+                # The persisted 'running' claim must survive process/thread
+                # interruption. A later click cannot silently rerun it.
+                logger.exception(
+                    f"[Scheduler] Manual task {task_id} interrupted after durable claim"
+                )
             finally:
-                self._release_task(task_id)
+                self._unregister_execution(claim["execution_id"])
 
-        threading.Thread(
+        worker = threading.Thread(
             target=_run,
             daemon=True,
             name=f"scheduler-manual-{task_id}",
-        ).start()
+        )
+        try:
+            worker.start()
+        except BaseException:
+            self._unregister_execution(claim["execution_id"])
+            # The ledger remains running/in_doubt instead of accepting a
+            # second request when thread creation itself is uncertain.
+            raise
+        return {"status": "queued", "execution_id": claim["execution_id"]}
 
     def _claim_task(self, task_id: str) -> bool:
         """Prevent scheduled and manual runs of the same task from overlapping."""
@@ -217,6 +349,21 @@ class SchedulerService:
     def _release_task(self, task_id: str) -> None:
         with self._execution_lock:
             self._active_task_ids.discard(task_id)
+
+    def _register_execution(self, execution_id: str) -> bool:
+        with self._execution_lock:
+            if not execution_id or execution_id in self._active_execution_ids:
+                return False
+            self._active_execution_ids.add(execution_id)
+            return True
+
+    def _unregister_execution(self, execution_id: str) -> None:
+        with self._execution_lock:
+            self._active_execution_ids.discard(execution_id)
+
+    def _is_execution_active(self, execution_id: Optional[str]) -> bool:
+        with self._execution_lock:
+            return bool(execution_id and execution_id in self._active_execution_ids)
     
     def _is_task_due(self, task: dict, now: datetime) -> bool:
         """
@@ -333,22 +480,27 @@ class SchedulerService:
         
         return None
     
-    def _execute_task(self, task: dict) -> bool:
+    def _execute_task(self, task: dict) -> tuple[bool, Optional[str]]:
         """
         Execute a task.
 
-        Returns True if delivery succeeded (caller should advance state),
-        False if it failed (caller should keep next_run_at so the next
-        loop iteration retries). Callback may return None for legacy
-        behaviour, treated as success.
+        Returns a success flag and diagnostic. Callback False means the
+        side-effect result is unknown, rather than permission to retry; an
+        external service may have accepted the request immediately before the
+        client observed an error. Callback None retains legacy success
+        behavior.
         """
         try:
             result = self.execute_callback(task)
-            return False if result is False else True
+            if result is False:
+                return False, (
+                    "Execution callback reported failure; external side effect "
+                    "status is unconfirmed"
+                )
+            return True, None
         except Exception as e:
             logger.error(f"[Scheduler] Error executing task {task['id']}: {e}")
-            self.task_store.update_task(task['id'], {
-                "last_error": str(e),
-                "last_error_at": datetime.now().isoformat()
-            })
-            return False
+            return False, (
+                f"Execution callback raised {type(e).__name__}; external side "
+                "effect status is unconfirmed"
+            )

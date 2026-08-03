@@ -25,6 +25,10 @@
 interface ApiResult {
   status: string
   message?: string
+  execution?: {
+    status?: string
+    execution_id?: string
+  }
 }
 
 const AUTH_TOKEN_KEY = 'cow_auth_token'
@@ -425,10 +429,10 @@ class ApiClient {
     return data.tasks
   }
 
-  async runTask(taskId: string): Promise<ApiResult> {
+  async runTask(taskId: string, idempotencyKey: string): Promise<ApiResult> {
     return this.request('/api/scheduler/run', {
       method: 'POST',
-      body: JSON.stringify({ task_id: taskId }),
+      body: JSON.stringify({ task_id: taskId, idempotency_key: idempotencyKey }),
     })
   }
 

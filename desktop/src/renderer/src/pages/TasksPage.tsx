@@ -33,6 +33,13 @@ const formatNextRun = (iso?: string): string => {
   return isNaN(d.getTime()) ? '--' : d.toLocaleString()
 }
 
+const newExecutionIdempotencyKey = (): string => {
+  if (typeof globalThis.crypto?.randomUUID !== 'function') {
+    throw new Error('Secure idempotency-key generation is unavailable')
+  }
+  return globalThis.crypto.randomUUID()
+}
+
 const TasksPage: React.FC<TasksPageProps> = ({ baseUrl }) => {
   const navigate = useNavigate()
   const [tasks, setTasks] = useState<SchedulerTask[]>([])
@@ -113,6 +120,16 @@ const TasksPage: React.FC<TasksPageProps> = ({ baseUrl }) => {
                       <span className="text-xs font-mono text-content-tertiary">{scheduleSummary(task.schedule)}</span>
                     </div>
                     {content && <p className="text-xs text-content-secondary mb-2 line-clamp-2">{content}</p>}
+                    {task.last_execution_status === 'in_doubt' && (
+                      <p className="text-xs text-red-600 dark:text-red-400 mb-2">
+                        {t('task_execution_unconfirmed')}
+                      </p>
+                    )}
+                    {task.last_execution_status === 'running' && (
+                      <p className="text-xs text-amber-700 dark:text-amber-300 mb-2">
+                        {t('task_execution_running')}
+                      </p>
+                    )}
                     <div
                       className="flex items-center gap-2 text-xs text-content-tertiary"
                       onClick={(e) => e.stopPropagation()}
@@ -219,9 +236,15 @@ const TaskEditModal: React.FC<{
     setRunStatus('')
     setError('')
     try {
-      const result = await apiClient.runTask(task.id)
+      const result = await apiClient.runTask(task.id, newExecutionIdempotencyKey())
       if (result.status !== 'success') throw new Error(result.message || t('task_run_error'))
-      setRunStatus(t('task_run_started'))
+      setRunStatus(
+        result.execution?.status === 'already_completed'
+          ? t('task_run_already_completed')
+          : result.execution?.status === 'already_queued'
+            ? t('task_run_already_queued')
+            : t('task_run_started'),
+      )
     } catch (e) {
       setError(e instanceof Error ? e.message : t('task_run_error'))
     } finally {

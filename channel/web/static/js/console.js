@@ -8521,10 +8521,22 @@ function runTaskNow(task, button) {
             const originalHtml = button.innerHTML;
             button.disabled = true;
             button.innerHTML = `<i class="fas fa-spinner fa-spin mr-1"></i>${t('task_run_now')}`;
+            if (!window.crypto || typeof window.crypto.randomUUID !== 'function') {
+                button.innerHTML = `<i class="fas fa-triangle-exclamation mr-1"></i>${t('task_run_failed')}`;
+                setTimeout(() => {
+                    button.innerHTML = originalHtml;
+                    button.disabled = false;
+                }, 2000);
+                return;
+            }
+            const idempotencyKey = window.crypto.randomUUID();
             fetch('/api/scheduler/run', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({task_id: task.id})
+                body: JSON.stringify({
+                    task_id: task.id,
+                    idempotency_key: idempotencyKey
+                })
             }).then(r => r.json()).then(res => {
                 if (res.status !== 'success') throw new Error(res.message || t('task_run_failed'));
                 button.innerHTML = `<i class="fas fa-check mr-1"></i>${t('task_run_started')}`;
@@ -8592,6 +8604,19 @@ function loadTasksView() {
             }
             const action = task.action || {};
             const taskContent = action.content || action.task_description || '';
+            const executionWarning = task.last_execution_status === 'in_doubt'
+                ? `<p class="text-xs text-red-600 dark:text-red-400 mb-2">${
+                    currentLang === 'zh'
+                        ? '上一次执行结果尚未确认；系统已阻止自动重试。'
+                        : 'Previous execution is unconfirmed; automatic retry is blocked.'
+                }</p>`
+                : task.last_execution_status === 'running'
+                    ? `<p class="text-xs text-amber-700 dark:text-amber-300 mb-2">${
+                        currentLang === 'zh'
+                            ? '任务正在执行，或曾在中断时未完成确认；系统已阻止重复执行。'
+                            : 'Task is running or was interrupted before confirmation; duplicate execution is blocked.'
+                    }</p>`
+                    : '';
             const toggleId = 'toggle-' + task.id;
             card.innerHTML = `
                 <div class="flex items-center gap-2 mb-2">
@@ -8601,6 +8626,7 @@ function loadTasksView() {
                     ${typeLabel}
                 </div>
                 <p class="text-xs text-slate-500 dark:text-slate-400 mb-2 line-clamp-2">${escapeHtml(taskContent)}</p>
+                ${executionWarning}
                 <div class="flex items-center gap-4 text-xs text-slate-400 dark:text-slate-500">
                     <span><i class="fas fa-clock mr-1"></i>${currentLang === 'zh' ? '下次执行' : 'Next run'}: ${nextRun}</span>
                     <div class="flex-1"></div>
