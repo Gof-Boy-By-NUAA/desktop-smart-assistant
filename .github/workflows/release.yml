@@ -1,18 +1,10 @@
 name: Release Desktop
 
 # STAGE 1 of the decoupled release pipeline: BUILD ONLY.
-# Builds the desktop client for macOS (arm64 + x64) and Windows (x64), mirrors
-# the installers to R2, and registers them in D1 as UNPUBLISHED (is_latest=0)
-# so the website keeps serving the previous release. It does NOT notarize
-# (Apple's notary service stalls this large bundle for hours) and does NOT
-# create a GitHub Release.
-#
-# Full flow:
-#   1. (this workflow) build + upload to R2 + D1 as unpublished.
-#   2. (local) download the mac dmgs, run desktop/build/notarize-dmg.sh to
-#      notarize + staple + re-upload the stapled dmgs to R2.
-#   3. (Publish Desktop workflow) flip D1 is_latest=1 and attach GitHub
-#      Release assets — makes the version live on the site.
+# Builds audit artifacts only. It must not write installers or release rows to
+# R2/D1 until a separately protected promotion path has real customer,
+# deployment, signing, and branch-protection evidence. A local/self-generated
+# manifest is deliberately not sufficient authority to publish.
 #
 # Manual only: run stage 1 via workflow_dispatch. Tag pushes do NOT trigger a
 # build, so cutting a release tag never rebuilds installers or overwrites R2.
@@ -24,12 +16,12 @@ on:
         type: string
         default: "0.0.0-dev"
       publish_r2:
-        description: "Upload installers to R2 + register in D1 (needs Cloudflare secrets)"
+        description: "Reserved; publication is disabled pending protected release promotion."
         type: boolean
         default: false
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   release-preflight:
@@ -309,21 +301,20 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  # Mirror the release installers to R2 (CDN-backed) and register them in D1 so
-  # smart_assistant.ai/download/{platform}/latest can resolve and count downloads.
-  # Runs only on tag pushes, and is a no-op (skips) until the Cloudflare secrets
-  # are configured, so it never blocks unsigned/dry builds.
+  # This legacy external-publication job is intentionally disabled.
+  # Retain it only as an auditable implementation reference until it is
+  # replaced by a protected promotion workflow with external evidence.
   publish-r2:
-    name: Publish to R2 + D1
+    name: Publication disabled pending protected release gate
     # Require every platform in the build matrix to succeed before publishing,
     # so a release on R2/D1 is always complete (all installers present) rather
     # than partial. needs: build already gates on all matrix jobs succeeding.
     needs: build
     runs-on: ubuntu-latest
-    # Run on a tag push, or on a manual dispatch when publish_r2 is checked.
-    if: >-
-      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_r2 == 'true')
+    # Publication remains disabled until a protected promotion workflow binds
+    # verified CI, signed artifacts, deployment verification, and customer
+    # acceptance. A local manifest is not publication authority.
+    if: ${{ false }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4

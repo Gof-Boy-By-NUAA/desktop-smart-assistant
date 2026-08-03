@@ -181,10 +181,9 @@ jobs:
       # build-overlay.mjs stages overlay resources, merges build.config.json
       # over the core build config, runs the core build, then electron-builder.
       #
-      # --publish always (not never): with a generic provider, electron-builder
-      # only WRITES the update metadata (latest*.yml) locally and never uploads
-      # (generic is a read-only feed you fill yourself). With --publish never it
-      # skips writing latest*.yml entirely, which the steps below need.
+      # Publication is disabled until the protected promotion gate exists.
+      # Keeping electron-builder on --publish never prevents a changed provider
+      # configuration from turning a supposedly local build into a side effect.
       - name: Build overlay
         working-directory: overlay
         shell: bash
@@ -192,7 +191,9 @@ jobs:
           COW_CORE_DIR: ${{ github.workspace }}/desktop
           # Trusted-client SMS secret (matches client.sms.secret on the server).
           CLIENT_SMS_SECRET: ${{ secrets.CLIENT_SMS_SECRET }}
-        run: node build-overlay.mjs ${{ matrix.eb_flags }} --publish always
+        # Do not rely on a generic-provider assumption: a changed build config
+        # could turn a supposedly local build into an external side effect.
+        run: node build-overlay.mjs ${{ matrix.eb_flags }} --publish never
 
       # Prefix update paths with v<ver>/ so the root feed resolves installers
       # from the versioned folder.

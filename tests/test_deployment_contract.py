@@ -85,6 +85,23 @@ def test_release_workflow_cannot_build_without_verified_release_manifest():
 
 
 def test_alternate_publication_workflows_are_fail_closed_without_protected_gate():
+    release = (ROOT / ".github/workflows/release.yml").read_text(
+        encoding="utf-8"
+    )
+    release_publish_start = release.index("  publish-r2:")
+    release_publish_steps = release.index(
+        "    steps:",
+        release_publish_start,
+    )
+    release_publish_preamble = release[
+        release_publish_start:release_publish_steps
+    ]
+    assert any(
+        line.strip() == "if: ${{ false }}"
+        for line in release_publish_preamble.splitlines()
+    )
+    assert "contents: write" not in release
+
     for filename in ("deploy-image.yml", "deploy-image-arm.yml"):
         workflow = (ROOT / ".github/workflows" / filename).read_text(
             encoding="utf-8"
@@ -98,6 +115,14 @@ def test_alternate_publication_workflows_are_fail_closed_without_protected_gate(
         encoding="utf-8"
     )
     assert overlay.count("if: ${{ false }}") >= 3
+    overlay_build_start = overlay.index("      - name: Build overlay")
+    overlay_build_end = overlay.index(
+        "      # Prefix update paths",
+        overlay_build_start,
+    )
+    overlay_build = overlay[overlay_build_start:overlay_build_end]
+    assert "run: node build-overlay.mjs ${{ matrix.eb_flags }} --publish never" in overlay_build
+    assert "--publish always" not in overlay_build
     win7 = (ROOT / ".github/workflows/release-win7.yml").read_text(
         encoding="utf-8"
     )
