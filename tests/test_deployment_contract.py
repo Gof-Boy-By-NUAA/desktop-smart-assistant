@@ -84,6 +84,28 @@ def test_release_workflow_cannot_build_without_verified_release_manifest():
     assert "needs: release-preflight" in workflow
 
 
+def test_alternate_publication_workflows_are_fail_closed_without_protected_gate():
+    for filename in ("deploy-image.yml", "deploy-image-arm.yml"):
+        workflow = (ROOT / ".github/workflows" / filename).read_text(
+            encoding="utf-8"
+        )
+        assert "push: true" not in workflow
+        assert "push: false" in workflow
+        assert "packages: write" not in workflow
+        assert "type=raw,value=latest" not in workflow
+
+    overlay = (ROOT / ".github/workflows/release-overlay.yml").read_text(
+        encoding="utf-8"
+    )
+    assert overlay.count("if: ${{ false }}") >= 3
+    win7 = (ROOT / ".github/workflows/release-win7.yml").read_text(
+        encoding="utf-8"
+    )
+    publish_start = win7.index("  publish:")
+    publish = win7[publish_start:]
+    assert "if: ${{ false }}" in publish
+
+
 def test_desktop_multipart_requests_share_bearer_authenticated_transport():
     client = (
         ROOT / "desktop/src/renderer/src/api/client.ts"

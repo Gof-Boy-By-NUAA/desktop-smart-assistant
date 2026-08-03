@@ -7,7 +7,7 @@
 # To get a newer version, you will need to update the SHA.
 # You can also reference a tag or branch, but the action may change without warning.
 
-name: Create and publish a Docker image
+name: Build ARM Docker image (publication disabled pending protected release gate)
 
 on:
   push:
@@ -18,12 +18,11 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  build-and-push-image:
+  build-image:
     if: github.repository == 'zhayujie/SmartAssistant'
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
 
     steps:
       - name: Checkout repository
@@ -40,13 +39,14 @@ jobs:
         run: echo ${{ steps.buildx.outputs.platforms }}
 
       - name: Log in to the Container registry
+        if: ${{ false }}
         uses: docker/login-action@v2
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata (tags, labels) for Docker
+      - name: Extract build metadata for Docker
         id: meta
         uses: docker/metadata-action@v4
         with:
@@ -54,21 +54,20 @@ jobs:
             ${{ env.REGISTRY }}/zhayujie/chatgpt-on-wechat
             ${{ env.REGISTRY }}/zhayujie/smart_assistant
           tags: |
-            type=raw,value=latest-arm64,enable={{is_default_branch}}
-            type=ref,event=branch,suffix=-arm64
-            type=ref,event=tag,suffix=-arm64
+            type=sha,suffix=-arm64
 
-      - name: Build and push Docker image
+      - name: Build ARM Docker image without publishing
         uses: docker/build-push-action@v3
         with:
           context: .
-          push: true
+          push: false
           file: ./docker/Dockerfile.latest
           platforms: linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
-      - uses: actions/delete-package-versions@v4
+      - if: ${{ false }}
+        uses: actions/delete-package-versions@v4
         with:
           package-name: 'chatgpt-on-wechat'
           package-type: 'container'

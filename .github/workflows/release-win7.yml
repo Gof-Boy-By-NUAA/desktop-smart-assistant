@@ -173,6 +173,7 @@ jobs:
   publish:
     name: Publish to R2 + D1
     needs: build
+    if: ${{ false }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
