@@ -374,6 +374,11 @@ def generate_manifest(
     precomputed_git_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     root = (root or _root()).resolve()
+    current_source_fingerprint = (
+        precomputed_source_fingerprint
+        if precomputed_source_fingerprint is not None
+        else source_fingerprint(root)
+    )
     reports = {name: _report_record(root, path) for name, path in REPORTS.items()}
     _apply_report_freshness(root, reports)
     datasets = {name: _dataset_record(root, path) for name, path in DATASETS.items()}
@@ -383,12 +388,37 @@ def generate_manifest(
         and reports["web_boundary_verification"]["passed"]
     )
     git = precomputed_git_state or _git_state(root)
+    from benchmarks.evidence.fde_case import (
+        verify_configured_fde_case_evidence,
+    )
+
+    fde_case = verify_configured_fde_case_evidence(
+        root,
+        expected_source_fingerprint=current_source_fingerprint,
+        expected_git_commit=str(git["commit"]),
+    )
+    # A customer signature over an uncommitted checkout is still evidence
+    # about those bytes, but it is not release evidence.  Keep the raw
+    # verifier result visible while refusing to lift the FDE hard denial
+    # until the full source tree is clean and commit-bound.
+    fde_case = {
+        **fde_case,
+        "release_checkout_bound": bool(git["commit_bound"]),
+        "release_passed": bool(fde_case["passed"] and git["commit_bound"]),
+    }
+    customer_accepted = customer["passed"] and fde_case["release_passed"]
 
     hard_denials = {
-        "FDE_CASE_EVIDENCE": "ABSENT",
-        "TARGET_CUSTOMER_ACCEPTANCE": "YES" if customer["passed"] else "NO",
-        "CUSTOMER_ATTESTATION": "YES" if customer["passed"] else "ABSENT",
-        "CUSTOMER_TEST_EXECUTION": "YES" if customer["exists"] and customer["status"] == "completed" else "NOT_RUN",
+        "FDE_CASE_EVIDENCE": "YES" if fde_case["release_passed"] else "ABSENT",
+        "TARGET_CUSTOMER_ACCEPTANCE": "YES" if customer_accepted else "NO",
+        "CUSTOMER_ATTESTATION": "YES" if customer_accepted else "ABSENT",
+        "CUSTOMER_TEST_EXECUTION": (
+            "YES"
+            if customer["exists"]
+            and customer["status"] == "completed"
+            and fde_case["release_passed"]
+            else "NOT_RUN"
+        ),
         "SKILLS_GOLD_DATASET_VALID": "YES" if reports["skills_selection"]["passed"] else "NO",
         "SKILLS_PRODUCTION_GATE_ELIGIBLE": "YES" if reports["skills_selection"]["passed"] else "NO",
         "GIT_COMMIT_BOUND_EVIDENCE": "YES" if git["commit_bound"] else "ABSENT",
@@ -423,7 +453,8 @@ def generate_manifest(
         ),
         "memory_formal_gate": reports["memory_outbox"]["passed"],
         "skills_formal_gate": reports["skills_selection"]["passed"],
-        "customer_acceptance": customer["passed"],
+        "fde_case_evidence": fde_case["release_passed"],
+        "customer_acceptance": customer_accepted,
         "git_commit_bound_evidence": git["commit_bound"],
         "clean_release_tree": git["clean"],
         "reproducible_build": False,
@@ -438,14 +469,11 @@ def generate_manifest(
         "schema_version": SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "repository_root": str(root),
-        "source_fingerprint_sha256": (
-            precomputed_source_fingerprint
-            if precomputed_source_fingerprint is not None
-            else source_fingerprint(root)
-        ),
+        "source_fingerprint_sha256": current_source_fingerprint,
         "git": git,
         "reports": reports,
         "datasets": datasets,
+        "fde_case": fde_case,
         "hard_denials": hard_denials,
         "required_conditions": required_conditions,
         "passed": all(required_conditions.values()),
@@ -502,6 +530,28 @@ def verify_manifest(manifest: dict[str, Any], root: Path | None = None) -> dict[
                     current.get(linkage_field),
                     expected.get(linkage_field) == current.get(linkage_field),
                 )
+
+    from benchmarks.evidence.fde_case import (
+        verify_configured_fde_case_evidence,
+    )
+    current_fde_case = verify_configured_fde_case_evidence(
+        root,
+        expected_source_fingerprint=current_source_fingerprint,
+        expected_git_commit=str(current_git["commit"]),
+    )
+    current_fde_case = {
+        **current_fde_case,
+        "release_checkout_bound": bool(current_git["commit_bound"]),
+        "release_passed": bool(
+            current_fde_case["passed"] and current_git["commit_bound"]
+        ),
+    }
+    check(
+        "fde_case",
+        manifest.get("fde_case"),
+        current_fde_case,
+        manifest.get("fde_case") == current_fde_case,
+    )
 
     for name, relative in DATASETS.items():
         expected = manifest.get("datasets", {}).get(name, {})

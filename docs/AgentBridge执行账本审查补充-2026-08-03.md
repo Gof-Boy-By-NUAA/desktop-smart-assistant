@@ -9,6 +9,7 @@
   - 本轮定向回归为 `86 passed in 15.48s`。
   - `benchmarks/results/web-boundary-security.json` 与其 verification 已按当前源码生成，均为 `passed=true`；限制条件仍是 local-only、非生产、非客户执行、非受保护 CI。
   - `benchmarks/evidence/release_manifest.py` 当前退出 1、manifest 为 `passed=false`；这是 fail-closed 结果。
+  - `benchmarks/evidence/fde_case.py` 现可验证外部签名、外部路径且由外部 SHA pin 的 FDE case；当前未配置任何外部输入，故 `FDE_CASE_EVIDENCE=ABSENT`。
 - **不得外推**：以上不能证明外部工具 exactly-once、active-active 可用性、生产部署或客户验收。
 
 ## 第一轮独立发现
@@ -21,7 +22,7 @@
 | --- | --- | --- | --- |
 | FDE-EB-01 / P0 | `channel/web/web_channel.py:76-125,2636-2744`；`console.js:3049-3091`；`chatStore.ts:566-588` | `in_doubt` 不再伪造成功，但员工没有 owner-bound 状态/结果查询和受控处置，重新发送可能产生新业务操作。 | 交付只读 run-status/result、双人确认的人工处置和审计记录；未知状态禁止自动重发。 |
 | FDE-EB-02 / P0 | `web_channel.py:2636-2744`；`sse_persistence.py:488-529` | 路由到没有 live queue 的实例会把合法运行请求围栏为 `in_doubt`；安全失败不等于客户可用。 | 发布前验证单活粘性路由，或实现共享 queue、lease、handoff 与结果查询。 |
-| FDE-EB-03 / P0 | `benchmarks/results/customer-skill-acceptance.json`；实际 Desktop/Web 客户环境 | 没有客户在签名制品上完成登录、发送/重试、附件、引用、取消、重连、重启和结果核验。 | 客户提供 case、环境、期望/实际结果、操作人、artifact SHA、日志和签署；UI 只能展示/校验。 |
+| FDE-EB-03 / P0 | `benchmarks/results/customer-skill-acceptance.json`；`benchmarks/evidence/fde_case.py`；实际 Desktop/Web 客户环境 | 外部签名 FDE case 的解析/commit/tree binding 已具备，但当前没有客户在签名制品上完成登录、发送/重试、附件、引用、取消、重连、重启和结果核验。 | 客户在受保护 runner 提供外部 case、信任根 pin、环境、期望/实际结果、artifact SHA、日志和签署；UI 只能展示/校验。 |
 | FDE-EB-04 / P1 | `web_channel.py:1690-1848`；`console.js:2747-2776` | `error`、`cancelled`、`in_doubt`、网络及鉴权失败没有统一恢复操作，用户可把“新请求”误认为“安全重试”。 | 设计稳定错误码和 UI 操作矩阵：重连、查询、取消、联系管理员、显式新建。 |
 
 ### 执行可靠性架构师
@@ -38,7 +39,7 @@
 | ID / 严重度 | 文件或设计引用 | 问题描述 | 建议修改方案 |
 | --- | --- | --- | --- |
 | GOV-EB-01 / P0 | `benchmarks/security/web_boundary.py:32-91,994-1175`；`verify.py` | 被测代码、攻击、验证器和报告在同一工作树；同一 PR 可修改它们后自签 PASS。 | 外部受保护 runner 固定 verifier digest/公钥，验证 checkout、命令、报告 SHA、制品 SHA 与签名。 |
-| GOV-EB-02 / P0 | `release_manifest.py`；`git remote -v` 无输出；当前 manifest `commit_bound=false` | 无 remote、branch protection、required checks、签名制品或外部 attestation；本地 Git 不构成发布门禁。 | 组织控制远程仓库配置保护和 required checks，签名 commit/tag/artifact，由独立身份写入证据。 |
+| GOV-EB-02 / P0 | `release_manifest.py`；`git remote -v` 无输出；当前 manifest 无 protected remote evidence | 无 remote、branch protection、required checks、签名制品或外部 attestation；本地 Git 不构成发布门禁。 | 组织控制远程仓库配置保护和 required checks，签名 commit/tag/artifact，由独立身份写入证据。 |
 | GOV-EB-03 / P1 | `sse_persistence.py:177-189,284-426`；`web_channel.py:2429-2609` | 幂等键来自客户端；若代理身份映射或日志脱敏回归，键可用于跨请求关联或拒绝服务。 | 在真实代理/多租户环境攻击身份边界；限制键的保留/脱敏，增加 owner-only 冲突速率限制与监控。 |
 | GOV-EB-04 / P1 | Sol Advisor `install-agents.sh:149` | 独立 Sol 审查预检失败：`dirname: command not found`、`cd: null directory`；普通 worker 不能替代该独立结论。 | 修复工具链并记录 read-only 独立审查输入、输出、身份和版本；此前保持 `EXTERNAL_VERIFIER_ATTESTATION=ABSENT`。 |
 
@@ -114,5 +115,5 @@
 - **第一轮**：20 条当前发现（P0 11 条、P1 9 条）。
 - **第二轮**：6 个争议点均有唯一推荐方案。
 - **第三轮**：5 个可验证 VETO，无遗留“可接受风险”。
-- **局部修复**：重试复用幂等键；claim/lease/digest 围栏；运行中/未知状态禁止 `done`；旧成功型 SSE 恢复为 `phase + error`；空回复、持久化失败和工具后异常进入 `in_doubt`；Web steering 强制 bool 和 run-scoped idempotency key；新增攻击已写入正式 Web boundary report。
+- **局部修复**：重试复用幂等键；claim/lease/digest 围栏；运行中/未知状态禁止 `done`；旧成功型 SSE 恢复为 `phase + error`；空回复、持久化失败和工具后异常进入 `in_doubt`；Web steering 强制 bool 和 run-scoped idempotency key；新增攻击已写入正式 Web boundary report；新增只接受外部路径、信任根 pin 与签名的 FDE case verifier，但尚无客户输入。
 - **遗留阻断**：外部副作用结果、active-active 所有权、历史/账本原子性、人工处置、受保护独立证据、可重现发布、真实运维演练与目标客户验收。

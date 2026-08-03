@@ -75,6 +75,7 @@ def test_release_manifest_is_explicitly_fail_closed_on_missing_external_gates():
     assert manifest["passed"] is False
     assert manifest["hard_denials"]["TARGET_CUSTOMER_ACCEPTANCE"] == "NO"
     assert manifest["hard_denials"]["CUSTOMER_ATTESTATION"] == "ABSENT"
+    assert manifest["hard_denials"]["FDE_CASE_EVIDENCE"] == "ABSENT"
     assert manifest["hard_denials"]["DOCKER_BUILD"] == "NOT_RUN"
     assert manifest["hard_denials"]["SESSION_CITATION_UI_CLOSED_LOOP"] == "YES"
     assert manifest["required_conditions"]["session_citation_closed_loop"] is True
@@ -84,6 +85,7 @@ def test_release_manifest_is_explicitly_fail_closed_on_missing_external_gates():
     assert manifest["hard_denials"]["KNOWLEDGE_INDEPENDENT_VERIFICATION"] == "NO"
     assert manifest["hard_denials"]["EXTERNAL_VERIFIER_ATTESTATION"] == "ABSENT"
     assert manifest["required_conditions"]["external_verifier_attestation"] is False
+    assert manifest["required_conditions"]["fde_case_evidence"] is False
     assert manifest["required_conditions"]["skills_formal_gate"] is False
 
 
