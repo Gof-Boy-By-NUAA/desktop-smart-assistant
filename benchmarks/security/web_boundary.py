@@ -26,6 +26,7 @@ from agent.knowledge.contracts import (
 )
 from agent.memory.conversation_store import ConversationStore
 from agent.memory.governance import IdentityContext, MemoryScope, Sensitivity
+from channel.web.sse_persistence import DurableSSEJournalStore
 
 
 SCHEMA_VERSION = 1
@@ -58,6 +59,8 @@ REQUIRED_CHECKS = (
     "filesystem_root_serve_denied",
     "single_file_capability_tamper_and_expiry_rejected",
     "legacy_bearer_file_and_log_url_bypasses_rejected",
+    "durable_web_execution_replay_and_terminal_fence",
+    "web_steer_idempotency_and_type_fence",
 )
 SOURCE_PATHS = (
     "agent/knowledge/runtime.py",
@@ -65,6 +68,7 @@ SOURCE_PATHS = (
     "agent/knowledge/repository.py",
     "agent/memory/conversation_store.py",
     "agent/protocol/cancel.py",
+    "agent/protocol/steer.py",
     "agent/tools/scheduler/integration.py",
     "agent/tools/scheduler/scheduler_service.py",
     "agent/tools/scheduler/scheduler_tool.py",
@@ -72,6 +76,7 @@ SOURCE_PATHS = (
     "agent/retrieval/lexical.py",
     "bridge/agent_bridge.py",
     "bridge/agent_initializer.py",
+    "channel/web/sse_persistence.py",
     "channel/web/web_channel.py",
     "channel/web/static/js/console.js",
     "desktop/src/renderer/src/api/client.ts",
@@ -990,6 +995,311 @@ def run_checks(root: Path | None = None) -> List[Dict[str, Any]]:
             }
 
         _record(checks, REQUIRED_CHECKS[27], legacy_bearer_file_and_log_url_bypasses)
+
+        def durable_web_execution_replay_and_terminal_fence():
+            """Attack the request ledger rather than trusting a transport ``done``.
+
+            This deliberately combines request-retry, forged-writer, terminal
+            delivery, old-journal, restart, and retention paths. A Web user
+            must never see a success solely because a stale process committed
+            an SSE ``done``; the authenticated execution outcome is controlling.
+            """
+
+            ledger = DurableSSEJournalStore(str(tmp / "web-execution-ledger.db"))
+            ledger_owner = "web:" + "f" * 32
+            ledger_attacker = "web:" + "g" * 32
+            ledger_session = "web-execution-security-session"
+            ledger_key = "web-execution-security-key-0001"
+            ledger_runner = "web-execution-security-runner"
+            digest = "a" * 64
+
+            claim = ledger.claim_execution(
+                "web-execution-first",
+                ledger_owner,
+                ledger_session,
+                ledger_key,
+                digest,
+                ledger_runner,
+            )
+            duplicate = ledger.claim_execution(
+                "web-execution-retry",
+                ledger_owner,
+                ledger_session,
+                ledger_key,
+                digest,
+                ledger_runner,
+            )
+            if (
+                claim["claim_status"] != "claimed"
+                or duplicate["claim_status"] != "duplicate"
+                or duplicate["request_id"] != claim["request_id"]
+                or "lease_token" in duplicate
+            ):
+                raise AssertionError("same authenticated retry could create or seize a worker")
+
+            try:
+                ledger.claim_execution(
+                    "web-execution-mutated-retry",
+                    ledger_owner,
+                    ledger_session,
+                    ledger_key,
+                    "b" * 64,
+                    ledger_runner,
+                )
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("mutated idempotency retry was accepted")
+
+            try:
+                ledger.finish_execution(
+                    claim["request_id"],
+                    ledger_owner,
+                    ledger_session,
+                    "forged-lease",
+                    ledger_runner,
+                    outcome="completed",
+                )
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("forged execution lease settled a request")
+
+            try:
+                ledger.append(
+                    claim["request_id"],
+                    1,
+                    {"type": "done", "content": "false success"},
+                )
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("running authenticated request emitted done")
+
+            ledger.append(
+                claim["request_id"],
+                1,
+                {"type": "phase", "content": "still running"},
+            )
+            if (
+                ledger.mark_interrupted_execution(
+                    claim["request_id"], ledger_attacker
+                )
+                is not None
+            ):
+                raise AssertionError("foreign principal fenced another owner's request")
+            if (
+                ledger.replay(claim["request_id"], ledger_owner)["execution_state"]
+                != "running"
+            ):
+                raise AssertionError("foreign fence changed request state")
+            fenced = ledger.mark_interrupted_execution(claim["request_id"], ledger_owner)
+            if fenced is None or fenced["execution_state"] != "in_doubt":
+                raise AssertionError("interrupted worker was not fail-closed")
+            try:
+                ledger.append(
+                    claim["request_id"],
+                    2,
+                    {"type": "done", "content": "false success after interruption"},
+                )
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("in-doubt request emitted done")
+            if ledger.reap(now=time.time() + ledger._RETENTION_SECONDS + 1) != 0:
+                raise AssertionError("in-doubt execution evidence was reaped")
+
+            # Simulate an old server that had persisted transport completion
+            # before the execution fence existed. Recovery must rewrite it to
+            # a non-terminal phase and append an explicit uncertainty error.
+            old_request_id = "web-execution-old-transport-done"
+            ledger.begin(old_request_id, ledger_owner, ledger_session)
+            ledger.append(
+                old_request_id, 1, {"type": "done", "content": "stale success"}
+            )
+            raw_web_channel = dict(
+                zip(
+                    web_channel.WebChannel.__code__.co_freevars,
+                    (
+                        cell.cell_contents
+                        for cell in web_channel.WebChannel.__closure__
+                    ),
+                )
+            )["cls"]
+            recovery = SimpleNamespace(
+                request_to_session={},
+                request_owners={},
+                sse_queues={},
+                sse_last_active={},
+            )
+            with patch.object(
+                web_channel, "_get_durable_sse_store", lambda: ledger
+            ):
+                recovered = raw_web_channel._recover_sse_request(
+                    recovery, old_request_id, ledger_owner
+                )
+            if not recovered:
+                raise AssertionError("old durable request was not recoverable")
+            journal = recovery.sse_queues[old_request_id]
+            first = journal.read_after(0, timeout=0)
+            terminal = journal.read_after(1, timeout=0)
+            if (
+                first is None
+                or first[0] != 1
+                or first[1].get("type") != "phase"
+                or terminal is None
+                or terminal[0] != 2
+                or terminal[1].get("type") != "error"
+                or "unconfirmed" not in str(terminal[1].get("message") or "")
+            ):
+                raise AssertionError("old terminal success replay was not scrubbed")
+            old_replay = ledger.replay(old_request_id, ledger_owner)
+            if old_replay is None or old_replay["execution_state"] != "in_doubt":
+                raise AssertionError("old terminal event was trusted after recovery")
+            return {
+                "retry_single_worker": True,
+                "mutated_retry_rejected": True,
+                "forged_lease_rejected": True,
+                "terminal_delivery_fenced": True,
+                "foreign_fence_rejected": True,
+                "old_done_scrubbed": True,
+                "in_doubt_retained": True,
+            }
+
+        _record(
+            checks,
+            REQUIRED_CHECKS[28],
+            durable_web_execution_replay_and_terminal_fence,
+        )
+
+        def web_steer_idempotency_and_type_fence():
+            """Reject malformed Web control and deduplicate accepted retries."""
+
+            from agent.protocol.steer import (
+                SteerInbox,
+                SteerResult,
+                SteerStatus,
+            )
+
+            key = "steer-security-request-0001"
+            inbox = SteerInbox(max_pending=1, max_idempotency_keys=2)
+            accepted = inbox.submit("change target", idempotency_key=key)
+            retry = inbox.submit("change target", idempotency_key=key)
+            if (
+                accepted != SteerResult(SteerStatus.ACCEPTED)
+                or retry != SteerResult(SteerStatus.ACCEPTED, duplicate=True)
+                or inbox.drain() != ["change target"]
+                or not inbox.submit("change target", idempotency_key=key).duplicate
+            ):
+                raise AssertionError("accepted Web steer retry was injected twice")
+            if inbox.submit(
+                "new target", idempotency_key="steer-security-request-0002"
+            ).status != SteerStatus.ACCEPTED:
+                raise AssertionError("distinct steering instruction was rejected")
+            if inbox.submit(
+                "memory pressure", idempotency_key="steer-security-request-0003"
+            ).status != SteerStatus.FULL:
+                raise AssertionError("steer idempotency retention was unbounded")
+
+            raw_web_channel = dict(
+                zip(
+                    web_channel.WebChannel.__code__.co_freevars,
+                    (
+                        cell.cell_contents
+                        for cell in web_channel.WebChannel.__closure__
+                    ),
+                )
+            )["cls"]
+            calls: list[tuple[str, str, str]] = []
+            fake_agent_bridge = SimpleNamespace(
+                steer_session=lambda session, instruction, *, idempotency_key: (
+                    calls.append((session, instruction, idempotency_key))
+                    or SteerResult(SteerStatus.ACCEPTED)
+                )
+            )
+            fake_bridge = SimpleNamespace(
+                get_agent_bridge=lambda: fake_agent_bridge
+            )
+            control_owner = "web:" + "h" * 32
+
+            with patch.object(
+                web_channel.web,
+                "data",
+                return_value=json.dumps(
+                    {
+                        "session_id": "steer-security-session",
+                        "message": "malformed type must not inject",
+                        "steer": "false",
+                    }
+                ).encode(),
+            ):
+                malformed = json.loads(
+                    raw_web_channel.post_message(
+                        SimpleNamespace(), owner_id=control_owner
+                    )
+                )
+            if malformed.get("status") != "error" or calls:
+                raise AssertionError("non-boolean steer flag reached Agent control")
+
+            with patch.object(
+                web_channel.web,
+                "data",
+                return_value=json.dumps(
+                    {
+                        "session_id": "steer-security-session",
+                        "message": "missing key must not inject",
+                        "steer": True,
+                        "stream": False,
+                    }
+                ).encode(),
+            ):
+                missing_key = json.loads(
+                    raw_web_channel.post_message(
+                        SimpleNamespace(), owner_id=control_owner
+                    )
+                )
+            if missing_key.get("status") != "error" or calls:
+                raise AssertionError("authenticated steer without key reached Agent control")
+
+            with patch.object(
+                web_channel, "_require_web_session", lambda *_args: None
+            ), patch.object(
+                web_channel.web,
+                "data",
+                return_value=json.dumps(
+                    {
+                        "session_id": "steer-security-session",
+                        "message": "change target",
+                        "steer": True,
+                        "stream": False,
+                        "idempotency_key": key,
+                        "lang": "en",
+                    }
+                ).encode(),
+            ), patch("bridge.bridge.Bridge", lambda: fake_bridge):
+                delivered = json.loads(
+                    raw_web_channel.post_message(
+                        SimpleNamespace(), owner_id=control_owner
+                    )
+                )
+            if (
+                delivered.get("steered") is not True
+                or calls != [("steer-security-session", "change target", key)]
+            ):
+                raise AssertionError("authenticated steer lost idempotency binding")
+            return {
+                "non_boolean_rejected": True,
+                "missing_key_rejected": True,
+                "retry_deduplicated": True,
+                "retention_bounded": True,
+                "server_binding_forwarded": True,
+            }
+
+        _record(
+            checks,
+            REQUIRED_CHECKS[29],
+            web_steer_idempotency_and_type_fence,
+        )
 
     return checks
 

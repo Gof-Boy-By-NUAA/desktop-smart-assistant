@@ -105,7 +105,13 @@ class ApiClient {
   async sendMessage(
     sessionId: string,
     message: string,
-    opts?: { stream?: boolean; attachments?: Attachment[]; isVoice?: boolean; lang?: string }
+    opts?: {
+      stream?: boolean
+      attachments?: Attachment[]
+      isVoice?: boolean
+      lang?: string
+      idempotencyKey?: string
+    }
   ): Promise<{ status: string; request_id: string; stream: boolean; inline_reply?: string }> {
     return this.request('/message', {
       method: 'POST',
@@ -116,6 +122,7 @@ class ApiClient {
         attachments: opts?.attachments,
         is_voice: opts?.isVoice ?? false,
         lang: opts?.lang,
+        idempotency_key: opts?.idempotencyKey,
       }),
     })
   }

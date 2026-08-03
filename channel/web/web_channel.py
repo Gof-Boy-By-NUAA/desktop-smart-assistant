@@ -41,21 +41,94 @@ _TOOL_RESULT_SSE_MAX_DEPTH = 32
 _TOOL_RESULT_SSE_MAX_PRESERVED_CITATIONS = 20
 _SSE_EVENT_JOURNAL_MAX_EVENTS = 4096
 _SSE_EVENT_JOURNAL_MAX_BYTES = 16 * 1024 * 1024
-_DURABLE_SSE_STORE_LOCK = threading.Lock()
-_DURABLE_SSE_STORE = None
+_WEB_EXECUTION_RUNNER_ID = uuid.uuid4().hex
 
 
 def _get_durable_sse_store():
-    """Return the data-root-bound append-only SSE journal store."""
+    """Return the shared durable Web request and SSE journal store."""
 
-    from channel.web.sse_persistence import DurableSSEJournalStore
+    from channel.web.sse_persistence import get_durable_web_request_store
 
-    global _DURABLE_SSE_STORE
-    path = os.path.realpath(os.path.join(get_data_root(), "web_sse_journal.sqlite3"))
-    with _DURABLE_SSE_STORE_LOCK:
-        if _DURABLE_SSE_STORE is None or _DURABLE_SSE_STORE.path != path:
-            _DURABLE_SSE_STORE = DurableSSEJournalStore(path)
-        return _DURABLE_SSE_STORE
+    return get_durable_web_request_store()
+
+
+def _web_request_digest(prompt: str, is_voice_input: bool) -> str:
+    """Hash the semantic Web request without retaining user content in the key.
+
+    The prompt already includes normalized attachment references. Timestamp,
+    locale, and SSE reconnect mechanics are deliberately excluded: they must
+    not turn a transport retry into a different Agent/tool operation.
+    """
+
+    payload = json.dumps(
+        {
+            "prompt": prompt,
+            "is_voice_input": bool(is_voice_input),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _web_execution_state_for_terminal_delivery(
+    context: Context, request_id: str
+) -> str | None:
+    """Read (and, if necessary, fence) an authenticated Web execution claim.
+
+    `send()` is the sole normal producer of the user-visible SSE `done`
+    payload.  A reply reaching that point while its execution claim is still
+    `running` means a plugin or an exceptional channel path bypassed
+    AgentBridge's durable settlement.  There is no safe way to prove that no
+    external side effect occurred, so fence the request as `in_doubt` rather
+    than displaying the reply as a success.
+    """
+
+    owner_id = context.get("session_owner_id") if context else None
+    if not owner_id:
+        return None
+    try:
+        store = _get_durable_sse_store()
+        replay = store.replay(request_id, str(owner_id))
+        if replay is None:
+            return "in_doubt"
+        state = str(replay["execution_state"])
+        if state != "running":
+            return state
+        lease_token = context.get("_web_execution_lease")
+        runner_id = context.get("_web_execution_runner_id")
+        session_id = context.get("session_id")
+        if not all((lease_token, runner_id, session_id)):
+            return "in_doubt"
+        try:
+            store.finish_execution(
+                request_id,
+                str(owner_id),
+                str(session_id),
+                str(lease_token),
+                str(runner_id),
+                outcome="in_doubt",
+                detail=(
+                    "reply reached Web terminal delivery without a durable "
+                    "Agent execution settlement"
+                ),
+            )
+        except Exception as exc:
+            logger.error(
+                "[WebChannel] failed to fence unsettled Web execution %s: %s",
+                request_id,
+                exc,
+            )
+        return "in_doubt"
+    except Exception as exc:
+        logger.error(
+            "[WebChannel] durable execution lookup failed for %s: %s",
+            request_id,
+            exc,
+        )
+        return "in_doubt"
 
 
 class _SSEEventJournal:
@@ -1636,6 +1709,60 @@ class WebChannel(ChatChannel):
             # SSE mode: push events to SSE queue
             if request_id in self.sse_queues:
                 content = reply.content if reply.content is not None else ""
+                execution_state = _web_execution_state_for_terminal_delivery(
+                    context, request_id
+                )
+
+                # The delivery state must never outrun the separately durable
+                # Agent/tool execution state.  In particular, do not turn a
+                # failed persistence path or a plugin-bypassed AgentBridge path
+                # into a visually successful `done` event.
+                if execution_state == "in_doubt":
+                    self.sse_queues[request_id].put({
+                        "type": "error",
+                        "message": (
+                            "Agent/tool execution outcome is unconfirmed; "
+                            "the request will not be retried automatically."
+                        ),
+                        "request_id": request_id,
+                        "timestamp": time.time(),
+                    })
+                    return
+                if execution_state == "failed_safe":
+                    self.sse_queues[request_id].put({
+                        "type": "error",
+                        "message": (
+                            "Agent execution was rejected before it could "
+                            "complete safely."
+                        ),
+                        "request_id": request_id,
+                        "timestamp": time.time(),
+                    })
+                    return
+                if execution_state == "cancelled":
+                    # A cancel may happen before the Agent event callback
+                    # reaches the stream.  Emit the UI marker again (the
+                    # frontend de-duplicates it) so the trailing partial
+                    # response cannot be mistaken for a normal success.
+                    self.sse_queues[request_id].put({
+                        "type": "cancelled",
+                        "content": "",
+                        "request_id": request_id,
+                        "timestamp": time.time(),
+                    })
+                    if reply.type == ReplyType.ERROR:
+                        content = ""
+                elif reply.type == ReplyType.ERROR:
+                    self.sse_queues[request_id].put({
+                        "type": "error",
+                        "message": (
+                            "Agent reply delivery failed after execution; "
+                            "reload conversation history before retrying."
+                        ),
+                        "request_id": request_id,
+                        "timestamp": time.time(),
+                    })
+                    return
 
                 # Intermediate status lines (e.g. /install-browser phases) must NOT use "done",
                 # or the frontend closes EventSource and drops subsequent events.
@@ -1825,20 +1952,25 @@ class WebChannel(ChatChannel):
                     q.put({"type": "message_end", "has_tool_calls": True})
 
             elif event_type == "error":
-                # Agent raised an exception (LLM 401/timeout/etc). Surface the
-                # real message instead of letting the empty-response fallback
-                # below hide it as "(模型未返回任何内容)".
+                # Agent raised an exception (LLM 401/timeout/etc).  This is
+                # *not* a durable terminal outcome yet: AgentBridge still has
+                # to determine whether a tool crossed its side-effect boundary
+                # and whether the conversation record can be persisted.  Keep
+                # the stream non-terminal until that fence is settled.
                 err_msg = data.get("error") or "unknown error"
                 logger.warning(
                     f"[WebChannel] agent_stream emitted error for "
                     f"request {request_id}: {err_msg}"
                 )
-                # Remember it so the agent_end handler below knows not to
-                # rewrite the message into a generic empty-response notice.
+                # Remember it so the agent_end handler below does not add an
+                # unrelated empty-response status.
                 streamed_error.append(err_msg)
                 q.put({
-                    "type": "done",
-                    "content": f"❌ {err_msg}",
+                    "type": "phase",
+                    "content": i18n.t(
+                        "Agent 报告错误；正在确认可恢复的最终状态。",
+                        "Agent reported an error; confirming final durable state.",
+                    ),
                     "request_id": request_id,
                     "timestamp": time.time(),
                 })
@@ -1856,27 +1988,28 @@ class WebChannel(ChatChannel):
                 })
 
             elif event_type == "agent_end":
-                # Safety net: if the agent finishes with an empty final_response,
-                # chat_channel skips _send_reply (because reply.content is empty),
-                # which means no "done" event is ever emitted and the SSE stream
-                # would hang until the 10-min idle timeout. Push a fallback "done"
-                # here so the frontend always gets closure.
+                # Do not synthesize a terminal `done` here.  This callback
+                # fires before AgentBridge has persisted generated messages and
+                # settled the durable execution record; a crash in that gap
+                # would otherwise display a false success.  AgentBridge
+                # converts an empty final response into an `in_doubt` terminal
+                # error, while normal replies flow through send() only after
+                # durable settlement.
                 final_response = data.get("final_response", "")
                 if not final_response or not str(final_response).strip():
                     if streamed_error:
-                        # Error was already surfaced via the `error` event
-                        # handler above; nothing more to do here.
+                        # The non-terminal status was already emitted above.
                         pass
                     else:
                         logger.warning(
                             f"[WebChannel] agent_end with empty final_response for "
-                            f"request {request_id}, sending fallback done"
+                            f"request {request_id}; waiting for durable settlement"
                         )
                         q.put({
-                            "type": "done",
+                            "type": "phase",
                             "content": i18n.t(
-                                "(模型未返回任何内容，请重试或换一种方式描述你的需求)",
-                                "(The model returned no content. Please retry or rephrase your request.)",
+                                "Agent 未返回最终内容；正在确认执行状态。",
+                                "Agent returned no final content; confirming execution state.",
                             ),
                             "request_id": request_id,
                             "timestamp": time.time(),
@@ -2195,6 +2328,9 @@ class WebChannel(ChatChannel):
         Supports optional attachments (file paths from /upload).
         """
         request_id = None
+        durable_store = None
+        execution_claim = None
+        execution_worker_started = False
         try:
             data = web.data() or b"{}"
             if len(data) > 1024 * 1024:
@@ -2220,7 +2356,9 @@ class WebChannel(ChatChannel):
             # Tag the message as originating from voice input so the post-reply
             # TTS hook can honour the `voice_if_voice` policy (mirrors the
             # desire_rtype concept used by other channels).
-            is_voice_input = bool(json_data.get('is_voice', False))
+            is_voice_input = json_data.get("is_voice", False)
+            if not isinstance(is_voice_input, bool):
+                raise ValueError("is_voice must be a boolean")
 
             # Fast path for /cancel: bypass the session queue and SSE setup.
             # Web frontend (stream=true) only listens to SSE, so we return an
@@ -2246,12 +2384,28 @@ class WebChannel(ChatChannel):
             # Explicit steering also bypasses the normal session queue. The
             # Web button sends ``steer: true`` with raw input; typed /steer
             # commands use the same endpoint and semantics as IM channels.
-            steer_requested = bool(json_data.get("steer", False))
+            steer_requested = json_data.get("steer", False)
+            if not isinstance(steer_requested, bool):
+                raise ValueError("steer must be a boolean")
             is_steer_command = (
                 re.match(r"^/steer(?:\s|$)", stripped_prompt) is not None
             )
             if steer_requested or is_steer_command:
+                steering_idempotency_key = None
                 if owner_id is not None:
+                    # Steering changes the currently executing Agent's future
+                    # tool/model path. A lost HTTP response must not enqueue
+                    # the same instruction twice, so authenticated Web
+                    # control messages require the same stable client key as
+                    # normal Agent requests. The key remains run-scoped in
+                    # the active steering inbox; a process loss fences the
+                    # run rather than claiming durable steer recovery.
+                    from channel.web.sse_persistence import DurableSSEJournalStore
+
+                    steering_idempotency_key = json_data.get("idempotency_key")
+                    DurableSSEJournalStore.validate_idempotency_key(
+                        steering_idempotency_key
+                    )
                     _require_web_session(session_id, owner_id)
                 instruction = (
                     (prompt or "").strip()[len("/steer"):].strip()
@@ -2259,25 +2413,49 @@ class WebChannel(ChatChannel):
                     else (prompt or "").strip()
                 )
                 from bridge.bridge import Bridge
-                result = Bridge().get_agent_bridge().steer_session(
-                    session_id, instruction
-                )
+                agent_bridge = Bridge().get_agent_bridge()
+                if steering_idempotency_key is None:
+                    # Preserve legacy non-HTTP channel adapters, which do not
+                    # participate in the authenticated Web control contract.
+                    result = agent_bridge.steer_session(session_id, instruction)
+                else:
+                    result = agent_bridge.steer_session(
+                        session_id,
+                        instruction,
+                        idempotency_key=steering_idempotency_key,
+                    )
                 lang = (json_data.get("lang") or "zh").lower()
                 msg_text = _steer_reply_text(result.status, lang)
                 logger.info(
                     f"[WebChannel] steer fast-path: session={session_id}, "
                     f"status={result.status.value}, lang={lang}"
                 )
-                return json.dumps({
+                response = {
                     "status": "success",
                     "request_id": "",
                     "stream": False,
                     "steered": result.accepted,
                     "inline_reply": msg_text,
-                }, ensure_ascii=False)
+                }
+                if getattr(result, "duplicate", False):
+                    response["duplicate"] = True
+                return json.dumps(response, ensure_ascii=False)
 
             if owner_id is not None:
-                _claim_web_session(session_id, owner_id)
+                # Authenticated Web requests are the only path that exposes
+                # Agent/tool work over HTTP. A client-stable key is mandatory
+                # before claiming a session or enqueueing a worker, otherwise
+                # the frontend's POST retry can execute the same side effect
+                # multiple times under fresh server request ids.
+                if not use_sse:
+                    raise ValueError(
+                        "authenticated Web messages require stream=true"
+                    )
+                from channel.web.sse_persistence import DurableSSEJournalStore
+
+                DurableSSEJournalStore.validate_idempotency_key(
+                    json_data.get("idempotency_key")
+                )
 
             # Append file references to the prompt (same format as QQ channel)
             if attachments:
@@ -2314,11 +2492,91 @@ class WebChannel(ChatChannel):
                     prompt = prompt + "\n" + "\n".join(file_refs)
                     logger.info(f"[WebChannel] Attached {len(file_refs)} file(s) to message")
 
+            trigger_prefixs = conf().get("single_chat_prefix", [""])
+            if check_prefix(prompt, trigger_prefixs) is None:
+                if trigger_prefixs:
+                    prompt = trigger_prefixs[0] + prompt
+                    logger.debug(f"[WebChannel] Added prefix to message: {prompt}")
+
             request_id = self._generate_request_id()
+            if owner_id is not None:
+                durable_store = _get_durable_sse_store()
+                execution_claim = durable_store.claim_execution(
+                    request_id,
+                    owner_id,
+                    session_id,
+                    json_data.get("idempotency_key"),
+                    _web_request_digest(prompt, is_voice_input),
+                    _WEB_EXECUTION_RUNNER_ID,
+                )
+                if execution_claim["claim_status"] != "claimed":
+                    # A network retry reconnects to the original request. It
+                    # never creates a replacement worker, even if a previous
+                    # process left the durable claim unresolved.
+                    execution_state = execution_claim["execution_state"]
+                    if execution_state in {"failed_safe", "in_doubt"}:
+                        return json.dumps(
+                            {
+                                "status": "error",
+                                "request_id": execution_claim["request_id"],
+                                "stream": False,
+                                "duplicate": True,
+                                "execution_state": execution_state,
+                                "message": (
+                                    "prior request did not reach a safely "
+                                    "retryable terminal outcome"
+                                ),
+                            },
+                            ensure_ascii=False,
+                        )
+                    return json.dumps(
+                        {
+                            "status": "success",
+                            "request_id": execution_claim["request_id"],
+                            "stream": True,
+                            "duplicate": True,
+                            "execution_state": execution_state,
+                        },
+                        ensure_ascii=False,
+                    )
+
+                # Conversation ownership is itself persistent state.  Record
+                # the Web execution claim first so malformed attachments,
+                # prefix/config failures, or a session-store failure cannot
+                # create an untracked state mutation before the request has a
+                # durable fail-closed identity.
+                _claim_web_session(session_id, owner_id)
+
+            # Plugins run inside _compose_context. The durable claim must
+            # already exist before that hook, because a plugin is extension
+            # code and must not be allowed to perform an untracked side effect
+            # before the request's fail-closed execution fence.
+            msg = WebMessage(self._generate_msg_id(), prompt)
+            msg.from_user_id = session_id
+            context = self._compose_context(
+                ContextType.TEXT, prompt, msg=msg, isgroup=False
+            )
+
+            if context is None:
+                if execution_claim is not None and durable_store is not None:
+                    durable_store.finish_execution(
+                        request_id,
+                        execution_claim["owner_id"],
+                        execution_claim["session_id"],
+                        execution_claim["lease_token"],
+                        execution_claim["runner_id"],
+                        outcome="failed_safe",
+                        detail="Web message was filtered before Agent execution",
+                    )
+                logger.warning(
+                    f"[WebChannel] Context is None for session {session_id}, "
+                    "message may be filtered"
+                )
+                return json.dumps({"status": "error", "message": "Message was filtered"})
+
             self.request_to_session[request_id] = session_id
             if owner_id is not None:
                 self.request_owners[request_id] = owner_id
-
             if session_id not in self.session_queues:
                 self.session_queues[session_id] = Queue()
 
@@ -2328,8 +2586,6 @@ class WebChannel(ChatChannel):
                     # Refuse a direct/legacy caller rather than start a stream
                     # whose durable owner cannot be verified on recovery.
                     raise PermissionError("SSE request owner is required")
-                durable_store = _get_durable_sse_store()
-                durable_store.begin(request_id, owner_id, session_id)
                 self.sse_queues[request_id] = _SSEEventJournal(
                     lambda event_id, payload: durable_store.append(
                         request_id, event_id, payload
@@ -2337,27 +2593,16 @@ class WebChannel(ChatChannel):
                 )
                 self.sse_last_active[request_id] = time.time()
 
-            trigger_prefixs = conf().get("single_chat_prefix", [""])
-            if check_prefix(prompt, trigger_prefixs) is None:
-                if trigger_prefixs:
-                    prompt = trigger_prefixs[0] + prompt
-                    logger.debug(f"[WebChannel] Added prefix to message: {prompt}")
-
-            msg = WebMessage(self._generate_msg_id(), prompt)
-            msg.from_user_id = session_id
-
-            context = self._compose_context(ContextType.TEXT, prompt, msg=msg, isgroup=False)
-
-            if context is None:
-                logger.warning(f"[WebChannel] Context is None for session {session_id}, message may be filtered")
-                self._drop_sse_request(request_id)
-                return json.dumps({"status": "error", "message": "Message was filtered"})
-
             context["session_id"] = session_id
             context["receiver"] = session_id
             if owner_id is not None:
+                # Do not rely on channel-factory mutation for the security
+                # boundary: this HTTP handler is Web by construction.
+                context["channel_type"] = "web"
                 context["session_owner_id"] = owner_id
                 context["trusted_identity"] = _web_identity(owner_id)
+                context["_web_execution_lease"] = execution_claim["lease_token"]
+                context["_web_execution_runner_id"] = execution_claim["runner_id"]
             context["request_id"] = request_id
             if is_voice_input:
                 # Web channel runs its own TTS post-pipeline via
@@ -2369,10 +2614,31 @@ class WebChannel(ChatChannel):
                 context["on_event"] = self._make_sse_callback(request_id)
 
             threading.Thread(target=self.produce, args=(context,)).start()
+            execution_worker_started = True
 
             return json.dumps({"status": "success", "request_id": request_id, "stream": use_sse})
 
         except Exception as e:
+            if (
+                execution_claim is not None
+                and durable_store is not None
+                and not execution_worker_started
+            ):
+                try:
+                    durable_store.finish_execution(
+                        request_id,
+                        execution_claim["owner_id"],
+                        execution_claim["session_id"],
+                        execution_claim["lease_token"],
+                        execution_claim["runner_id"],
+                        outcome="failed_safe",
+                        detail="Web dispatch failed before Agent execution",
+                    )
+                except Exception as finish_exc:
+                    logger.error(
+                        "[WebChannel] failed to durably settle rejected request "
+                        f"{request_id}: {finish_exc}"
+                    )
             if request_id:
                 self._drop_sse_request(request_id)
             logger.error(f"Error processing message: {e}")
@@ -2408,7 +2674,13 @@ class WebChannel(ChatChannel):
         if not request_id or not owner_id:
             return False
         try:
-            replay = _get_durable_sse_store().replay(request_id, owner_id)
+            durable_store = _get_durable_sse_store()
+            # This process has no live queue for the request. A durable
+            # ``running`` claim may have crossed a process crash, a proxy route
+            # change, or a second-instance handover. Fence it as uncertain
+            # before replay rather than starting another Agent/tool worker.
+            durable_store.mark_interrupted_execution(request_id, owner_id)
+            replay = durable_store.replay(request_id, owner_id)
         except Exception as exc:
             logger.warning(
                 f"[WebChannel] durable SSE recovery unavailable for {request_id}: {exc}"
@@ -2416,21 +2688,80 @@ class WebChannel(ChatChannel):
             return False
         if replay is None:
             return False
+        execution_state = replay["execution_state"]
+        replay_events = replay["events"]
+        if execution_state in {"in_doubt", "failed_safe"}:
+            # A stale worker could have written a transport `done` before its
+            # execution claim was fenced.  Preserve its sequence numbers for
+            # Last-Event-ID correctness, but rewrite all renderer-terminal
+            # payloads into non-terminal status lines so a reconnect can never
+            # display a false completed answer and stop before our explicit
+            # uncertainty error arrives.
+            replay_events = []
+            for event_id, payload in replay["events"]:
+                if str(payload.get("type") or "") in {
+                    "done",
+                    "error",
+                    "voice_attach",
+                }:
+                    replay_events.append((
+                        event_id,
+                        {
+                            "type": "phase",
+                            "content": (
+                                "A terminal stream payload was withheld until "
+                                "the durable execution outcome could be verified."
+                            ),
+                            "request_id": request_id,
+                            "recovered": True,
+                        },
+                    ))
+                else:
+                    replay_events.append((event_id, payload))
         journal = _SSEEventJournal()
         try:
-            journal.restore(replay["events"])
+            journal.restore(replay_events)
         except ValueError as exc:
             logger.warning(
                 f"[WebChannel] durable SSE recovery rejected for {request_id}: {exc}"
             )
             return False
-        if replay["state"] != "completed":
+        terminal_seen = any(
+            str(payload.get("type") or "") in {"done", "error"}
+            for _event_id, payload in replay_events
+        )
+        if execution_state == "in_doubt":
             journal.put({
                 "type": "error",
                 "message": (
-                    "SSE worker was interrupted; persisted events were replayed "
-                    "but task result is unconfirmed"
+                    "Agent worker was interrupted; persisted events were replayed "
+                    "but Agent/tool result is unconfirmed"
                 ),
+                "request_id": request_id,
+                "recovered": True,
+            })
+        elif not terminal_seen:
+            # A durable execution state can settle before the channel sends its
+            # final SSE payload. Do not manufacture a successful ``done`` with
+            # missing content; direct the user to the durably stored history.
+            if execution_state == "completed":
+                message = (
+                    "Agent execution completed, but its final stream payload "
+                    "was interrupted. Reload conversation history to verify it."
+                )
+            elif execution_state == "cancelled":
+                message = (
+                    "Agent execution was cancelled before the final stream "
+                    "payload was delivered."
+                )
+            else:
+                message = (
+                    "Agent execution failed before the final stream payload "
+                    "was delivered."
+                )
+            journal.put({
+                "type": "error",
+                "message": message,
                 "request_id": request_id,
                 "recovered": True,
             })

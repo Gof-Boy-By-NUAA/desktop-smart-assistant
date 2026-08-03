@@ -563,11 +563,29 @@ export const useChatStore = create<ChatState>((set, get) => {
       patchMessages(sid, (msgs) => [...msgs, userMsg, botMsg])
       patchSession(sid, { isStreaming: true })
       useWorkspaceStore.getState().resetTurnArtifacts()
+      const idempotencyKey = (
+        typeof globalThis.crypto?.randomUUID === 'function'
+          ? globalThis.crypto.randomUUID()
+          : ''
+      )
+      if (!idempotencyKey) {
+        // Never substitute a weak/random-looking fallback. Without a
+        // cryptographically strong stable key a transport retry can duplicate
+        // Agent/tool side effects.
+        updateMsg(sid, botId, (m) => ({
+          ...m,
+          error: 'secure idempotency key unavailable; request was not sent',
+          isStreaming: false,
+        }))
+        patchSession(sid, { isStreaming: false })
+        return
+      }
 
       try {
         const res = await apiClient.sendMessage(sid, text, {
           stream: true,
           attachments: attachments.length ? attachments : undefined,
+          idempotencyKey,
         })
         if (res.status === 'success' && res.stream && res.request_id) {
           patchSession(sid, { requestId: res.request_id })

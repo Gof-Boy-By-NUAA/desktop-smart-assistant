@@ -35,7 +35,9 @@
         "login_bruteforce_rate_limited",
         "filesystem_root_serve_denied",
         "single_file_capability_tamper_and_expiry_rejected",
-        "legacy_bearer_file_and_log_url_bypasses_rejected"
+        "legacy_bearer_file_and_log_url_bypasses_rejected",
+        "durable_web_execution_replay_and_terminal_fence",
+        "web_steer_idempotency_and_type_fence"
       ],
       "expected": [
         "conversation_cross_owner_zero_side_effect",
@@ -65,20 +67,22 @@
         "login_bruteforce_rate_limited",
         "filesystem_root_serve_denied",
         "single_file_capability_tamper_and_expiry_rejected",
-        "legacy_bearer_file_and_log_url_bypasses_rejected"
+        "legacy_bearer_file_and_log_url_bypasses_rejected",
+        "durable_web_execution_replay_and_terminal_fence",
+        "web_steer_idempotency_and_type_fence"
       ],
       "name": "required_checks_exact",
       "passed": true
     },
     {
-      "actual": "a8eab51e6f102b8957c9b2194c82f72eabe1348bd5eed414fe1bfb7cfd20e905",
-      "expected": "a8eab51e6f102b8957c9b2194c82f72eabe1348bd5eed414fe1bfb7cfd20e905",
+      "actual": "0aa43d8d4a9e75cce33ef18871e4412d9874da34da3f2e369e4ab8417ad9aa15",
+      "expected": "0aa43d8d4a9e75cce33ef18871e4412d9874da34da3f2e369e4ab8417ad9aa15",
       "name": "source_fingerprint",
       "passed": true
     },
     {
-      "actual": 28,
-      "expected": 28,
+      "actual": 30,
+      "expected": 30,
       "name": "reported_check_names_unique",
       "passed": true
     },
@@ -331,11 +335,35 @@
       },
       "name": "legacy_bearer_file_and_log_url_bypasses_rejected",
       "passed": true
+    },
+    {
+      "details": {
+        "foreign_fence_rejected": true,
+        "forged_lease_rejected": true,
+        "in_doubt_retained": true,
+        "mutated_retry_rejected": true,
+        "old_done_scrubbed": true,
+        "retry_single_worker": true,
+        "terminal_delivery_fenced": true
+      },
+      "name": "durable_web_execution_replay_and_terminal_fence",
+      "passed": true
+    },
+    {
+      "details": {
+        "missing_key_rejected": true,
+        "non_boolean_rejected": true,
+        "retention_bounded": true,
+        "retry_deduplicated": true,
+        "server_binding_forwarded": true
+      },
+      "name": "web_steer_idempotency_and_type_fence",
+      "passed": true
     }
   ],
   "report_path": "benchmarks\\results\\web-boundary-security.json",
-  "report_sha256": "c7f7629c544fe3081850164d0508777c9d8c550f1a67c716f9194f067a3e0a35",
+  "report_sha256": "8254e1e5e1bf4ebf433a6149041fdb6674dc01e0e7175cf2b148716506376444",
   "schema_version": 1,
-  "source_fingerprint_sha256": "a8eab51e6f102b8957c9b2194c82f72eabe1348bd5eed414fe1bfb7cfd20e905",
+  "source_fingerprint_sha256": "0aa43d8d4a9e75cce33ef18871e4412d9874da34da3f2e369e4ab8417ad9aa15",
   "status": "completed"
 }

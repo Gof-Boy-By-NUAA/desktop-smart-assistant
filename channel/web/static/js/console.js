@@ -1472,6 +1472,16 @@ let streamBuffers = {};   // request_id -> { items: [event...], timestamp } for 
 let isComposing = false;
 let appConfig = { use_agent: false, title: 'SmartAssistant', subtitle: '', providers: {}, api_bases: {} };
 
+function createMessageIdempotencyKey() {
+    // A transport retry must carry the same cryptographically strong key. Do
+    // not fall back to Math.random(): a weak key reopens duplicate tool
+    // execution through collision or key forgery.
+    if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+        return window.crypto.randomUUID();
+    }
+    throw new Error('Secure idempotency key generation is unavailable');
+}
+
 const SESSION_ID_KEY = 'cow_session_id';
 
 function generateSessionId() {
@@ -2053,6 +2063,15 @@ function steerActiveTask() {
     const instruction = chatInput.value.trim();
     if (!instruction || sendBtnMode !== 'cancel' || !activeRequestId) return;
 
+    let idempotencyKey;
+    try {
+        idempotencyKey = createMessageIdempotencyKey();
+    } catch (err) {
+        console.error('[steer] secure idempotency key unavailable', err);
+        addBotMessage(t('error_send'), new Date());
+        return;
+    }
+
     inputHistory.push(instruction);
     historyIdx = -1;
     historySavedDraft = '';
@@ -2070,6 +2089,7 @@ function steerActiveTask() {
             session_id: sessionId,
             message: instruction,
             steer: true,
+            idempotency_key: idempotencyKey,
             stream: false,
             lang: currentLang,
         }),
@@ -2734,6 +2754,14 @@ document.querySelectorAll('.example-card').forEach(card => {
 function sendVoiceMessage(text, audioUrl) {
     text = (text || '').trim();
     if (!text) return;
+    let idempotencyKey;
+    try {
+        idempotencyKey = createMessageIdempotencyKey();
+    } catch (err) {
+        console.error('[sendVoiceMessage] secure idempotency key unavailable', err);
+        addBotMessage(t('error_send'), new Date());
+        return;
+    }
 
     inputHistory.push(text);
     historyIdx = -1;
@@ -2755,6 +2783,7 @@ function sendVoiceMessage(text, audioUrl) {
         timestamp: timestamp.toISOString(),
         is_voice: true,
         lang: currentLang,
+        idempotency_key: idempotencyKey,
     };
 
     const MAX_RETRIES = 2;
@@ -2953,7 +2982,24 @@ async function regenerateResponse(botMsgEl) {
 
     // Resend the message
     const timestamp = new Date();
-    const body = { session_id: sessionId, message: userContent, stream: true, timestamp: timestamp.toISOString(), lang: currentLang };
+    let idempotencyKey;
+    try {
+        idempotencyKey = createMessageIdempotencyKey();
+    } catch (err) {
+        console.error('[regenerateResponse] secure idempotency key unavailable', err);
+        loadingEl.remove();
+        addBotMessage(t('error_send'), new Date());
+        resetSendBtnSendMode();
+        return;
+    }
+    const body = {
+        session_id: sessionId,
+        message: userContent,
+        stream: true,
+        timestamp: timestamp.toISOString(),
+        lang: currentLang,
+        idempotency_key: idempotencyKey,
+    };
 
     const MAX_RETRIES = 2;
     const RETRY_DELAY_MS = 1000;
@@ -3010,6 +3056,15 @@ function sendMessage() {
 
     const text = chatInput.value.trim();
     if (!text && pendingAttachments.length === 0) return;
+    let idempotencyKey;
+    try {
+        idempotencyKey = createMessageIdempotencyKey();
+    } catch (err) {
+        console.error('[sendMessage] secure idempotency key unavailable', err);
+        addBotMessage(t('error_send'), new Date());
+        resetSendBtnSendMode();
+        return;
+    }
 
     if (text) {
         inputHistory.push(text);
@@ -3037,7 +3092,14 @@ function sendMessage() {
     sendBtn.disabled = true;
     if (typeof resetTurnArtifacts === 'function') resetTurnArtifacts();
 
-    const body = { session_id: sessionId, message: text, stream: true, timestamp: timestamp.toISOString(), lang: currentLang };
+    const body = {
+        session_id: sessionId,
+        message: text,
+        stream: true,
+        timestamp: timestamp.toISOString(),
+        lang: currentLang,
+        idempotency_key: idempotencyKey,
+    };
     if (attachments.length > 0) {
         body.attachments = attachments.map(a => ({
             file_path: a.file_path,
@@ -3521,7 +3583,10 @@ function startSSE(requestId, loadingEl, timestamp, titleInfo, replayItems) {
                 if (loadingEl) { loadingEl.remove(); loadingEl = null; }
                 // After a stop the stream is expected to end; the bubble is
                 // already tagged "已中止", so don't stack a failure on top.
-                if (!cancelled) addBotMessage(t('error_send'), new Date());
+                const errorText = (
+                    typeof item.message === 'string' && item.message.trim()
+                ) ? item.message : t('error_send');
+                if (!cancelled) addBotMessage(errorText, new Date());
                 resetSendBtnSendMode();
             }
     }

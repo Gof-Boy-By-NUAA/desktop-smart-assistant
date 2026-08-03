@@ -106,6 +106,28 @@ def test_inbox_bounds_and_atomic_close_gate():
     assert inbox.submit("late").status == SteerStatus.CLOSING
 
 
+def test_inbox_deduplicates_accepted_steer_retries_for_the_active_run():
+    inbox = SteerInbox(max_pending=1, max_idempotency_keys=2)
+    key = "steer-request-0001"
+
+    first = inbox.submit("redirect safely", idempotency_key=key)
+    duplicate = inbox.submit("redirect safely", idempotency_key=key)
+
+    assert first == SteerResult(SteerStatus.ACCEPTED)
+    assert duplicate == SteerResult(SteerStatus.ACCEPTED, duplicate=True)
+    assert inbox.drain() == ["redirect safely"]
+
+    # A delayed HTTP retry must remain deduplicated even after the Agent has
+    # consumed the queue entry at a model/tool checkpoint.
+    assert inbox.submit("redirect safely", idempotency_key=key).duplicate
+    assert inbox.submit(
+        "second redirect", idempotency_key="steer-request-0002"
+    ).accepted
+    assert inbox.submit(
+        "memory exhaustion", idempotency_key="steer-request-0003"
+    ).status == SteerStatus.FULL
+
+
 def test_steer_arriving_during_model_skips_all_proposed_tools():
     inbox = SteerInbox()
     executor = _ScriptedExecutor([
@@ -206,6 +228,55 @@ def test_web_steer_button_payload_is_handled_inline(monkeypatch):
         "inline_reply": "↪️ Active task redirected.",
     }
     bridge.steer_session.assert_called_once_with("session", "focus on tests")
+
+
+def test_authenticated_web_steer_requires_bool_and_stable_idempotency_key(
+    monkeypatch,
+):
+    from channel.web import web_channel
+
+    owner = "web:" + "a" * 32
+    raw_class = web_channel.WebChannel.__closure__[0].cell_contents
+    instance = object.__new__(raw_class)
+    bridge, factory = _fake_agent_bridge(SteerResult(SteerStatus.ACCEPTED))
+    monkeypatch.setattr("bridge.bridge.Bridge", lambda: factory)
+
+    monkeypatch.setattr(web_channel.web, "data", lambda: json.dumps({
+        "session_id": "session",
+        "message": "must not steer",
+        "steer": "false",
+    }).encode())
+    malformed = json.loads(raw_class.post_message(instance, owner_id=owner))
+    assert malformed["status"] == "error"
+    assert bridge.steer_session.call_count == 0
+
+    monkeypatch.setattr(web_channel.web, "data", lambda: json.dumps({
+        "session_id": "session",
+        "message": "must have stable key",
+        "steer": True,
+        "stream": False,
+    }).encode())
+    missing_key = json.loads(raw_class.post_message(instance, owner_id=owner))
+    assert missing_key["status"] == "error"
+    assert bridge.steer_session.call_count == 0
+
+    monkeypatch.setattr(web_channel, "_require_web_session", lambda *_args: None)
+    monkeypatch.setattr(web_channel.web, "data", lambda: json.dumps({
+        "session_id": "session",
+        "message": "redirect once",
+        "steer": True,
+        "stream": False,
+        "idempotency_key": "steer-request-0001",
+        "lang": "en",
+    }).encode())
+    accepted = json.loads(raw_class.post_message(instance, owner_id=owner))
+
+    assert accepted["steered"] is True
+    bridge.steer_session.assert_called_once_with(
+        "session",
+        "redirect once",
+        idempotency_key="steer-request-0001",
+    )
 
 
 def test_web_steer_does_not_start_a_run_when_session_is_idle(monkeypatch):

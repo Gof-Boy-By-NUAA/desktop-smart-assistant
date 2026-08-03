@@ -384,6 +384,57 @@ class AgentBridge:
         self._release_session_run_lock(session_id, entry)
         return True
 
+    @staticmethod
+    def _web_execution_from_context(
+        context: Optional[Context],
+        session_id: Optional[str],
+        request_id: Optional[str],
+    ) -> Optional[dict]:
+        """Extract only a complete server-issued Web execution claim.
+
+        The browser never supplies these fields. They are placed on the
+        internal Context after WebChannel atomically records its owner/session
+        idempotency claim. Partial or mismatched fields are rejected instead of
+        silently downgrading an authenticated request to an untracked run.
+        """
+
+        if context is None:
+            return None
+        owner_id = context.get("session_owner_id") or None
+        lease_token = context.get("_web_execution_lease") or None
+        runner_id = context.get("_web_execution_runner_id") or None
+        # Ordinary IM and scheduler contexts often have a session id (and may
+        # have a request id) without ever entering the authenticated Web HTTP
+        # execution boundary. The server-only lease fields are the unambiguous
+        # marker. An authenticated Web context without them is rejected below.
+        if lease_token is None and runner_id is None:
+            if (
+                owner_id is not None
+                and request_id is not None
+                and context.get("channel_type") == "web"
+            ):
+                raise PermissionError("incomplete Web execution claim")
+            return None
+        if not all((owner_id, request_id, session_id, lease_token, runner_id)):
+            raise PermissionError("incomplete Web execution claim")
+        if context.get("channel_type") != "web":
+            raise PermissionError("Web execution claim used by a non-Web channel")
+        return {
+            "request_id": str(request_id),
+            "owner_id": str(owner_id),
+            "session_id": str(session_id),
+            "lease_token": str(lease_token),
+            "runner_id": str(runner_id),
+        }
+
+    @staticmethod
+    def _get_durable_web_execution_store():
+        """Load the dependency-light Web request ledger only when needed."""
+
+        from channel.web.sse_persistence import get_durable_web_request_store
+
+        return get_durable_web_request_store()
+
     def create_agent(self, system_prompt: str, tools: List = None, **kwargs) -> Agent:
         """
         Create the super agent with COW integration
@@ -441,14 +492,22 @@ class AgentBridge:
 
         return agent
     
-    def steer_session(self, session_id: str, instruction: str):
-        """Inject an explicit instruction into one active session."""
+    def steer_session(
+        self,
+        session_id: str,
+        instruction: str,
+        *,
+        idempotency_key: Optional[str] = None,
+    ):
+        """Inject one deduplicated explicit instruction into an active session."""
         logger.info(
-            "[AgentBridge] steer new instruction: session_present=%s, instruction_chars=%d",
+            "[AgentBridge] steer instruction: session_present=%s, instruction_chars=%d",
             bool(session_id),
             len(instruction or ""),
         )
-        return get_steer_registry().submit(session_id, instruction)
+        return get_steer_registry().submit(
+            session_id, instruction, idempotency_key=idempotency_key
+        )
 
     def get_agent(
         self,
@@ -611,11 +670,53 @@ class AgentBridge:
         token_key = None
         steer_inbox = None
         session_run_lock = None
+        web_execution = None
+        web_execution_store = None
+        web_execution_settled = False
+        web_execution_settlement_attempted = False
+        agent_run_entered = False
+
+        def settle_web_execution(outcome: str, detail: str) -> None:
+            """Persist one terminal outcome for the exact server lease."""
+
+            nonlocal web_execution_settled
+            nonlocal web_execution_settlement_attempted
+            if (
+                web_execution is None
+                or web_execution_store is None
+                or web_execution_settled
+            ):
+                return
+            web_execution_settlement_attempted = True
+            web_execution_store.finish_execution(
+                web_execution["request_id"],
+                web_execution["owner_id"],
+                web_execution["session_id"],
+                web_execution["lease_token"],
+                web_execution["runner_id"],
+                outcome=outcome,
+                detail=detail,
+            )
+            web_execution_settled = True
+
         try:
             # Extract session_id from context for user isolation
             if context:
                 session_id = context.kwargs.get("session_id") or context.get("session_id")
                 request_id = context.kwargs.get("request_id") or context.get("request_id")
+            web_execution = self._web_execution_from_context(
+                context, session_id, request_id
+            )
+            if web_execution is not None:
+                candidate_store = self._get_durable_web_execution_store()
+                candidate_store.verify_execution_claim(
+                    web_execution["request_id"],
+                    web_execution["owner_id"],
+                    web_execution["session_id"],
+                    web_execution["lease_token"],
+                    web_execution["runner_id"],
+                )
+                web_execution_store = candidate_store
 
             # Register a cancel token. Prefer per-turn request_id (web),
             # fall back to session_id (IM channels). The Event is polled by
@@ -642,6 +743,9 @@ class AgentBridge:
             # request must not persist a user message or execute a tool.
             session_run_lock = self._acquire_session_run_lock(session_id)
             if cancel_event is not None and cancel_event.is_set():
+                settle_web_execution(
+                    "cancelled", "cancelled before Agent execution"
+                )
                 if token_key:
                     registry.unregister(token_key)
                 return Reply(ReplyType.ERROR, "Request cancelled before execution")
@@ -661,6 +765,9 @@ class AgentBridge:
                 conversation_owner_id=conversation_owner_id,
             )
             if not agent:
+                settle_web_execution(
+                    "failed_safe", "Agent initialization returned no agent"
+                )
                 return Reply(ReplyType.ERROR, "Failed to initialize super agent")
             
             # Create event handler for logging and channel communication
@@ -708,6 +815,9 @@ class AgentBridge:
                 self._trim_in_memory_to_turns(agent, scheduler_keep_turns)
 
             if cancel_event is not None and cancel_event.is_set():
+                settle_web_execution(
+                    "cancelled", "cancelled before Agent execution"
+                )
                 if token_key:
                     registry.unregister(token_key)
                 return Reply(ReplyType.ERROR, "Request cancelled before execution")
@@ -742,6 +852,11 @@ class AgentBridge:
                 if session_id:
                     steer_inbox = get_steer_registry().register(session_id)
                 # Use agent's run_stream method with event handler
+                # The durable Web claim is already in ``running`` state. Set
+                # this marker immediately before entering the Agent executor so
+                # every crash/exception after this instruction is treated as
+                # an externally observable outcome that must not be retried.
+                agent_run_entered = True
                 response = agent.run_stream(
                     user_message=query,
                     on_event=event_handler.handle_event,
@@ -749,6 +864,30 @@ class AgentBridge:
                     cancel_event=cancel_event,
                     steer_inbox=steer_inbox,
                 )
+                if not isinstance(response, str) or not response.strip():
+                    # A blank return after Agent execution may follow a tool
+                    # side effect, but it cannot be represented as a completed
+                    # user journey or a terminal SSE success.  Keep the
+                    # idempotency key fenced until an operator can inspect the
+                    # durable record.
+                    raise RuntimeError(
+                        "Agent returned no final response after execution"
+                    )
+            except BaseException:
+                # Exception is intentionally not narrow: SystemExit or another
+                # process-loss injection after a tool boundary must leave a
+                # durable ``in_doubt`` record, never a silently reusable key.
+                try:
+                    settle_web_execution(
+                        "in_doubt",
+                        "Agent execution interrupted before durable completion",
+                    )
+                except Exception as settle_exc:
+                    logger.error(
+                        "[AgentBridge] failed to mark interrupted Web execution "
+                        f"as in_doubt: {settle_exc}"
+                    )
+                raise
             finally:
                 # Clear the mid-run flag so idle scans can review this session.
                 try:
@@ -781,10 +920,24 @@ class AgentBridge:
                 # drop it here so it isn't stored twice.
                 if pre_persisted and new_messages and new_messages[0].get("role") == "user":
                     new_messages = new_messages[1:]
-                if new_messages:
-                    owner_id = (
-                        (context.get("session_owner_id") or None) if context else None
+                owner_id = (
+                    (context.get("session_owner_id") or None) if context else None
+                )
+                if owner_id is not None and not any(
+                    isinstance(message, dict)
+                    and message.get("role") == "assistant"
+                    for message in new_messages
+                ):
+                    # A completed HTTP/SSE response is not a durable user
+                    # journey unless the corresponding assistant turn exists
+                    # in the owner-scoped conversation history.  This covers
+                    # direct tool-return and custom-agent paths that can
+                    # produce text without adding an assistant message.
+                    self.clear_session(session_id)
+                    raise RuntimeError(
+                        "authenticated Web response has no durable assistant message"
                     )
+                if new_messages:
                     persisted = self._persist_messages(
                         session_id, list(new_messages), channel_type, owner_id=owner_id
                     )
@@ -817,6 +970,20 @@ class AgentBridge:
             # changes take effect on the user's next message.
             self._schedule_mcp_hot_reload(agent)
 
+            # Only after the Agent returns and every user-visible generated
+            # message has been durably appended may this Web request cease to
+            # be uncertain. A cancellation can still be a known terminal
+            # outcome, but never authorizes automatic replay of the request.
+            settle_web_execution(
+                "cancelled" if cancel_event is not None and cancel_event.is_set()
+                else "completed",
+                (
+                    "Agent execution cancelled after durable persistence"
+                    if cancel_event is not None and cancel_event.is_set()
+                    else "Agent execution completed with durable persistence"
+                ),
+            )
+
             # Check if there are files to send (from send/read tool)
             if hasattr(agent, 'stream_executor') and hasattr(agent.stream_executor, 'files_to_send'):
                 files_to_send = agent.stream_executor.files_to_send
@@ -832,8 +999,27 @@ class AgentBridge:
                     return self._create_file_reply(file_info, response, context)
             
             return Reply(ReplyType.TEXT, response)
-            
+
         except Exception as e:
+            if (
+                web_execution is not None
+                and web_execution_store is not None
+                and not web_execution_settlement_attempted
+            ):
+                try:
+                    settle_web_execution(
+                        "in_doubt" if agent_run_entered else "failed_safe",
+                        (
+                            "Agent execution failed after it began"
+                            if agent_run_entered
+                            else "Web request failed before Agent execution"
+                        ),
+                    )
+                except Exception as settle_exc:
+                    logger.error(
+                        "[AgentBridge] failed to durably settle failed Web "
+                        f"execution: {settle_exc}"
+                    )
             logger.error(f"Agent reply error: {e}")
             # The in-memory context may have been reset to recover from a format
             # error or overflow, but the stored history is deliberately left
