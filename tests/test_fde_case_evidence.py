@@ -27,6 +27,7 @@ from benchmarks.evidence.release_manifest import (
     source_fingerprint,
     verify_manifest,
 )
+from benchmarks.evidence import release_manifest as release_manifest_module
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -174,6 +175,18 @@ def test_release_manifest_recomputes_fde_case_and_keeps_customer_gate_closed(
     monkeypatch.setenv(EVIDENCE_ENV, str(evidence_path))
     monkeypatch.setenv(TRUST_ROOT_ENV, str(trust_path))
     monkeypatch.setenv(TRUST_ROOT_SHA256_ENV, trust_sha256)
+    # The test must model a release checkout with staged/working-tree changes.
+    # A clean local checkout has no way to distinguish a test-owned external
+    # trust root from a real customer root; protected CI remains the required
+    # trust boundary for that distinction.
+    simulated_git = {
+        **_git_state(ROOT),
+        "clean": False,
+        "commit_bound": False,
+    }
+    monkeypatch.setattr(
+        release_manifest_module, "_git_state", lambda root: simulated_git
+    )
 
     manifest = generate_manifest(ROOT)
     assert manifest["fde_case"]["passed"] is True

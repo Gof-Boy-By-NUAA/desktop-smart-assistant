@@ -81,6 +81,9 @@ class FixtureCustomerExecutor(CustomerCaseExecutor):
             if request.skill is not None
             else {"answer": "wrong"}
         )
+        latency_ms = 0.8 if request.skill is not None else 1.0
+        cpu_time_ms = 0.6 if request.skill is not None else 1.0
+        peak_rss_bytes = 800 if request.skill is not None else 1000
         snapshot_sha256 = execution_snapshot_sha256(request)
         request_sha256 = execution_request_sha256(request)
         attestation = execution_attestation_payload(
@@ -90,14 +93,18 @@ class FixtureCustomerExecutor(CustomerCaseExecutor):
             request_sha256=request_sha256,
             execution_snapshot_sha256=snapshot_sha256,
             output_sha256=sha256_json(output),
-            latency_ms=1.0,
+            latency_ms=latency_ms,
+            cpu_time_ms=cpu_time_ms,
+            peak_rss_bytes=peak_rss_bytes,
             input_tokens=10,
             output_tokens=2,
             executor_artifact_sha256=_EXECUTOR_ARTIFACT_SHA256,
         )
         return CustomerExecutionResult(
             output=output,
-            latency_ms=1.0,
+            latency_ms=latency_ms,
+            cpu_time_ms=cpu_time_ms,
+            peak_rss_bytes=peak_rss_bytes,
             input_tokens=10,
             output_tokens=2,
             execution_snapshot_sha256=snapshot_sha256,
@@ -117,6 +124,8 @@ class MismatchedSnapshotExecutor(FixtureCustomerExecutor):
         return CustomerExecutionResult(
             output=result.output,
             latency_ms=result.latency_ms,
+            cpu_time_ms=result.cpu_time_ms,
+            peak_rss_bytes=result.peak_rss_bytes,
             input_tokens=result.input_tokens,
             output_tokens=result.output_tokens,
             execution_snapshot_sha256="0" * 64,
@@ -225,7 +234,10 @@ def _package(tmp_path: Path, record, case_count: int = 30):
         "thresholds": {
             "minimum_success_rate_delta": 0.50,
             "maximum_regressions": 0,
-            "maximum_latency_ratio": 10.0,
+            "maximum_latency_ratio": 1.0,
+            "minimum_throughput_ratio": 1.1,
+            "maximum_cpu_time_ratio": 1.0,
+            "maximum_peak_rss_ratio": 1.0,
             "maximum_total_tokens": case_count * 30,
         },
     }
@@ -301,12 +313,14 @@ def test_customer_package_rejects_infinite_threshold(tmp_path):
         root, _ = _package(tmp_path, record)
         manifest_path = root / "manifest.json"
         payload = manifest_path.read_bytes().replace(
-            b'"maximum_latency_ratio":10.0',
+            b'"maximum_latency_ratio":1.0',
             b'"maximum_latency_ratio":1e309',
         )
         manifest_path.write_bytes(payload)
 
-        with pytest.raises(CustomerPackageError, match="正有限值"):
+        with pytest.raises(
+            CustomerPackageError, match="maximum_latency_ratio"
+        ):
             load_customer_package(root, _sha(payload))
     finally:
         repository.close()
@@ -335,6 +349,17 @@ def test_controlled_candidate_arm_passes_and_does_not_mutate_skill_store(tmp_pat
         assert report["metrics"]["baseline_passed"] == 0
         assert report["metrics"]["candidate_passed"] == 30
         assert report["metrics"]["paired_delta_ci95_lower"] > 0
+        assert report["metrics"]["latency_ratio"] == pytest.approx(0.8)
+        assert report["metrics"]["throughput_ratio"] == pytest.approx(1.25)
+        assert report["metrics"]["cpu_time_ratio"] == pytest.approx(0.6)
+        assert report["metrics"]["peak_rss_ratio"] == pytest.approx(0.8)
+        assert {
+            gate["name"] for gate in report["gates"]
+        } >= {
+            "performance.minimum_serial_throughput_ratio",
+            "resource.maximum_cpu_time_ratio",
+            "resource.maximum_peak_rss_ratio",
+        }
         assert verify_customer_report(report, package) == ()
         round_tripped = json.loads(
             json.dumps(report, ensure_ascii=False, allow_nan=False)
@@ -440,6 +465,54 @@ def test_independent_verifier_requires_external_executor_signature(tmp_path):
         failures = verify_customer_report(forged, package)
 
         assert any("执行器签名无效" in failure for failure in failures)
+    finally:
+        repository.close()
+
+
+def test_independent_verifier_rejects_tampered_resource_measurement(tmp_path):
+    repository, _, record = _candidate(tmp_path)
+    try:
+        root, manifest_sha256 = _package(tmp_path, record)
+        package = load_customer_package(root, manifest_sha256)
+        report = ControlledCustomerAcceptanceRunner(
+            repository, _TENANT_ID, FixtureCustomerExecutor()
+        ).run(
+            package,
+            skill_id=record.skill_id,
+            skill_version=record.version,
+            expected_skill_content_sha256=record.content_hash,
+        )
+        forged = copy.deepcopy(report)
+        executed = next(
+            event
+            for event in forged["events"]
+            if event["event_type"] == "case.executed"
+        )
+        executed["payload"]["cpu_time_ms"] = 0.0001
+        _rehash_events(forged)
+
+        failures = verify_customer_report(forged, package)
+
+        assert any("执行器签名无效" in failure for failure in failures)
+    finally:
+        repository.close()
+
+
+def test_customer_package_rejects_non_improving_performance_thresholds(tmp_path):
+    repository, _, record = _candidate(tmp_path)
+    try:
+        root, _ = _package(tmp_path, record)
+        manifest_path = root / "manifest.json"
+        payload = manifest_path.read_bytes().replace(
+            b'"minimum_throughput_ratio":1.1',
+            b'"minimum_throughput_ratio":1.0',
+        )
+        manifest_path.write_bytes(payload)
+
+        with pytest.raises(
+            CustomerPackageError, match="minimum_throughput_ratio"
+        ):
+            load_customer_package(root, _sha(payload))
     finally:
         repository.close()
 
@@ -611,6 +684,9 @@ def test_subprocess_executor_uses_strict_protocol_and_isolated_workspace(tmp_pat
     result = executor.execute(request)
 
     assert result.output == {"answer": "expected"}
+    assert result.latency_ms == 0.8
+    assert result.cpu_time_ms == 0.6
+    assert result.peak_rss_bytes == 800
     assert result.input_tokens == 10
     assert result.output_tokens == 2
     assert list((tmp_path / "runs").iterdir()) == []

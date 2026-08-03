@@ -26,6 +26,9 @@ def main() -> int:
     request = json.loads(sys.stdin.buffer.read().decode("utf-8"))
     expected = request["input"].get("candidate_output", {"answer": "expected"})
     output = expected if request["skill"] is not None else {"answer": "wrong"}
+    latency_ms = 0.8 if request["skill"] is not None else 1.0
+    cpu_time_ms = 0.6 if request["skill"] is not None else 1.0
+    peak_rss_bytes = 800 if request["skill"] is not None else 1000
     snapshot = {
         "tenant_id": request["tenant_id"],
         "model_id": request["model"]["id"],
@@ -46,7 +49,9 @@ def main() -> int:
         "request_sha256": request_hash,
         "execution_snapshot_sha256": snapshot_hash,
         "output_sha256": output_hash,
-        "latency_ms": 1.0,
+        "latency_ms": latency_ms,
+        "cpu_time_ms": cpu_time_ms,
+        "peak_rss_bytes": peak_rss_bytes,
         "input_tokens": 10,
         "output_tokens": 2,
         "executor_artifact_sha256": _EXECUTOR_ARTIFACT_SHA256,
@@ -64,7 +69,11 @@ def main() -> int:
         "request_sha256": request_hash,
         "executor_artifact_sha256": _EXECUTOR_ARTIFACT_SHA256,
         "attestation_signature": signature,
-        "latency_ms": 1.0,
+        "latency_ms": latency_ms,
+        "resource_usage": {
+            "cpu_time_ms": cpu_time_ms,
+            "peak_rss_bytes": peak_rss_bytes,
+        },
         "output": output,
         "usage": {"input_tokens": 10, "output_tokens": 2},
     }

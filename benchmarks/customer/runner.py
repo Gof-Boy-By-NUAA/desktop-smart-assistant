@@ -186,6 +186,8 @@ class ControlledCustomerAcceptanceRunner:
                         "arm_label": blind_labels[arm],
                         "success": judgment.success,
                         "latency_ms": result.latency_ms,
+                        "cpu_time_ms": result.cpu_time_ms,
+                        "peak_rss_bytes": result.peak_rss_bytes,
                         "input_tokens": result.input_tokens,
                         "output_tokens": result.output_tokens,
                         "execution_snapshot_sha256": (
@@ -403,9 +405,22 @@ def _validate_execution_result(
         not isinstance(result.latency_ms, (int, float))
         or isinstance(result.latency_ms, bool)
         or not math.isfinite(float(result.latency_ms))
-        or result.latency_ms < 0
+        or result.latency_ms <= 0
     ):
-        raise CustomerPackageError("执行适配器延迟字段无效")
+        raise CustomerPackageError("执行适配器延迟必须是正有限值")
+    if (
+        not isinstance(result.cpu_time_ms, (int, float))
+        or isinstance(result.cpu_time_ms, bool)
+        or not math.isfinite(float(result.cpu_time_ms))
+        or result.cpu_time_ms <= 0
+    ):
+        raise CustomerPackageError("执行适配器 CPU 时间必须是正有限值")
+    if (
+        not isinstance(result.peak_rss_bytes, int)
+        or isinstance(result.peak_rss_bytes, bool)
+        or result.peak_rss_bytes <= 0
+    ):
+        raise CustomerPackageError("执行适配器峰值 RSS 必须是正整数")
     canonical_json_bytes(result.output)
     attestation = execution_attestation_payload(
         run_id=request.run_id,
@@ -415,6 +430,8 @@ def _validate_execution_result(
         execution_snapshot_sha256=result.execution_snapshot_sha256,
         output_sha256=sha256_json(result.output),
         latency_ms=float(result.latency_ms),
+        cpu_time_ms=float(result.cpu_time_ms),
+        peak_rss_bytes=result.peak_rss_bytes,
         input_tokens=result.input_tokens,
         output_tokens=result.output_tokens,
         executor_artifact_sha256=result.executor_artifact_sha256,
@@ -515,6 +532,10 @@ def _metrics_from_events(
     )
     baseline_latencies = [float(pair[0]["latency_ms"]) for pair in pairs]
     candidate_latencies = [float(pair[1]["latency_ms"]) for pair in pairs]
+    baseline_cpu_times = [float(pair[0]["cpu_time_ms"]) for pair in pairs]
+    candidate_cpu_times = [float(pair[1]["cpu_time_ms"]) for pair in pairs]
+    baseline_peak_rss = [int(pair[0]["peak_rss_bytes"]) for pair in pairs]
+    candidate_peak_rss = [int(pair[1]["peak_rss_bytes"]) for pair in pairs]
     deltas = [
         int(pair[1]["success"]) - int(pair[0]["success"])
         for pair in pairs
@@ -525,6 +546,12 @@ def _metrics_from_events(
         ).hexdigest()[:16],
         16,
     )
+    baseline_total_latency_ms = sum(baseline_latencies)
+    candidate_total_latency_ms = sum(candidate_latencies)
+    baseline_total_cpu_time_ms = sum(baseline_cpu_times)
+    candidate_total_cpu_time_ms = sum(candidate_cpu_times)
+    baseline_p95_peak_rss_bytes = _percentile(baseline_peak_rss, 95)
+    candidate_p95_peak_rss_bytes = _percentile(candidate_peak_rss, 95)
     return {
         "sample_count": len(pairs),
         "baseline_passed": baseline_passed,
@@ -541,6 +568,25 @@ def _metrics_from_events(
         "candidate_p95_latency_ms": _percentile(candidate_latencies, 95),
         "latency_ratio": _percentile(candidate_latencies, 95)
         / max(_percentile(baseline_latencies, 95), 0.000001),
+        "baseline_serial_throughput_rps": (
+            len(pairs) * 1000.0 / baseline_total_latency_ms
+        ),
+        "candidate_serial_throughput_rps": (
+            len(pairs) * 1000.0 / candidate_total_latency_ms
+        ),
+        "throughput_ratio": (
+            baseline_total_latency_ms / candidate_total_latency_ms
+        ),
+        "baseline_total_cpu_time_ms": baseline_total_cpu_time_ms,
+        "candidate_total_cpu_time_ms": candidate_total_cpu_time_ms,
+        "cpu_time_ratio": (
+            candidate_total_cpu_time_ms / baseline_total_cpu_time_ms
+        ),
+        "baseline_p95_peak_rss_bytes": baseline_p95_peak_rss_bytes,
+        "candidate_p95_peak_rss_bytes": candidate_p95_peak_rss_bytes,
+        "peak_rss_ratio": (
+            candidate_p95_peak_rss_bytes / baseline_p95_peak_rss_bytes
+        ),
         "total_tokens": sum(
             int(arm["input_tokens"]) + int(arm["output_tokens"])
             for pair in pairs
@@ -592,6 +638,25 @@ def _build_gates(
             metrics["latency_ratio"] <= thresholds.maximum_latency_ratio,
         ),
         (
+            "performance.minimum_serial_throughput_ratio",
+            metrics["throughput_ratio"],
+            thresholds.minimum_throughput_ratio,
+            metrics["throughput_ratio"]
+            >= thresholds.minimum_throughput_ratio,
+        ),
+        (
+            "resource.maximum_cpu_time_ratio",
+            metrics["cpu_time_ratio"],
+            thresholds.maximum_cpu_time_ratio,
+            metrics["cpu_time_ratio"] <= thresholds.maximum_cpu_time_ratio,
+        ),
+        (
+            "resource.maximum_peak_rss_ratio",
+            metrics["peak_rss_ratio"],
+            thresholds.maximum_peak_rss_ratio,
+            metrics["peak_rss_ratio"] <= thresholds.maximum_peak_rss_ratio,
+        ),
+        (
             "cost.maximum_total_tokens",
             metrics["total_tokens"],
             thresholds.maximum_total_tokens,
@@ -637,29 +702,8 @@ def _percentile(values: Sequence[float], percentile: float) -> float:
 
 
 def _implementation_fingerprint() -> str:
-    module_root = Path(__file__).resolve().parent
-    names = (
-        "__init__.py",
-        "__main__.py",
-        "attestation.py",
-        "contracts.py",
-        "json_utils.py",
-        "package.py",
-        "executor.py",
-        "judge.py",
-        "evidence.py",
-        "runner.py",
-        "verify.py",
-    )
-    digest = hashlib.sha256()
-    for name in names:
-        path = module_root / name
-        digest.update(("benchmarks/customer/" + name).encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(path.read_bytes())
-        digest.update(b"\0")
-    shared_path = module_root.parents[1] / "common" / "path_safety.py"
-    digest.update(b"common/path_safety.py\0")
-    digest.update(shared_path.read_bytes())
-    digest.update(b"\0")
-    return digest.hexdigest()
+    """Bind every release source, including governed-skill dependencies."""
+
+    from benchmarks.evidence.release_manifest import source_fingerprint
+
+    return source_fingerprint(Path(__file__).resolve().parents[2])

@@ -251,12 +251,18 @@ def _parse_thresholds(value: Any) -> CustomerThresholds:
             "minimum_success_rate_delta",
             "maximum_regressions",
             "maximum_latency_ratio",
+            "minimum_throughput_ratio",
+            "maximum_cpu_time_ratio",
+            "maximum_peak_rss_ratio",
             "maximum_total_tokens",
         },
         "thresholds",
     )
     delta = raw["minimum_success_rate_delta"]
     latency = raw["maximum_latency_ratio"]
+    throughput = raw["minimum_throughput_ratio"]
+    cpu_time = raw["maximum_cpu_time_ratio"]
+    peak_rss = raw["maximum_peak_rss_ratio"]
     regressions = raw["maximum_regressions"]
     tokens = raw["maximum_total_tokens"]
     if (
@@ -274,13 +280,47 @@ def _parse_thresholds(value: Any) -> CustomerThresholds:
         or isinstance(latency, bool)
         or not math.isfinite(float(latency))
         or latency <= 0
+        or latency > 1
     ):
-        raise CustomerPackageError("maximum_latency_ratio 必须是正有限值")
+        raise CustomerPackageError(
+            "maximum_latency_ratio 必须是 (0, 1] 内有限值"
+        )
+    if (
+        not isinstance(throughput, (int, float))
+        or isinstance(throughput, bool)
+        or not math.isfinite(float(throughput))
+        or throughput <= 1
+    ):
+        raise CustomerPackageError(
+            "minimum_throughput_ratio 必须严格大于 1"
+        )
+    for name, value in (
+        ("maximum_cpu_time_ratio", cpu_time),
+        ("maximum_peak_rss_ratio", peak_rss),
+    ):
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(float(value))
+            or value <= 0
+            or value > 1
+        ):
+            raise CustomerPackageError(
+                "%s 必须是 (0, 1] 内有限值" % name
+            )
     if not isinstance(regressions, int) or isinstance(regressions, bool) or regressions < 0:
         raise CustomerPackageError("maximum_regressions 必须是非负整数")
     if not isinstance(tokens, int) or isinstance(tokens, bool) or tokens <= 0:
         raise CustomerPackageError("maximum_total_tokens 必须大于零")
-    return CustomerThresholds(float(delta), regressions, float(latency), tokens)
+    return CustomerThresholds(
+        float(delta),
+        regressions,
+        float(latency),
+        float(throughput),
+        float(cpu_time),
+        float(peak_rss),
+        tokens,
+    )
 
 
 def _resolve_root(root: Path) -> Path:

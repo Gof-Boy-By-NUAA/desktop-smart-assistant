@@ -368,7 +368,8 @@ def _collect_observations(
         payload = event.get("payload")
         expected_case_fields = {
             "case_id", "case_sha256", "critical", "arm", "arm_label",
-            "success", "latency_ms", "input_tokens", "output_tokens",
+            "success", "latency_ms", "cpu_time_ms", "peak_rss_bytes",
+            "input_tokens", "output_tokens",
             "execution_snapshot_sha256", "request_sha256",
             "executor_artifact_sha256", "executor_attestation_signature",
             "injection_sha256", "output_sha256", "oracle_evidence_sha256",
@@ -398,9 +399,24 @@ def _collect_observations(
             not isinstance(latency, (int, float))
             or isinstance(latency, bool)
             or not math.isfinite(float(latency))
-            or latency < 0
+            or latency <= 0
         ):
             failures.append("客户场景 %s 延迟字段无效" % case_id)
+        cpu_time = payload.get("cpu_time_ms")
+        if (
+            not isinstance(cpu_time, (int, float))
+            or isinstance(cpu_time, bool)
+            or not math.isfinite(float(cpu_time))
+            or cpu_time <= 0
+        ):
+            failures.append("客户场景 %s CPU 时间字段无效" % case_id)
+        peak_rss = payload.get("peak_rss_bytes")
+        if (
+            not isinstance(peak_rss, int)
+            or isinstance(peak_rss, bool)
+            or peak_rss <= 0
+        ):
+            failures.append("客户场景 %s 峰值 RSS 字段无效" % case_id)
         for field_name in ("input_tokens", "output_tokens"):
             value = payload.get(field_name)
             if (
@@ -466,6 +482,8 @@ def _collect_observations(
             ),
             output_sha256=payload.get("output_sha256"),
             latency_ms=payload.get("latency_ms"),
+            cpu_time_ms=payload.get("cpu_time_ms"),
+            peak_rss_bytes=payload.get("peak_rss_bytes"),
             input_tokens=payload.get("input_tokens"),
             output_tokens=payload.get("output_tokens"),
             executor_artifact_sha256=payload.get(
@@ -602,6 +620,10 @@ def _independent_metrics(
     )
     baseline_latencies = [float(pair[0]["latency_ms"]) for pair in pairs]
     candidate_latencies = [float(pair[1]["latency_ms"]) for pair in pairs]
+    baseline_cpu_times = [float(pair[0]["cpu_time_ms"]) for pair in pairs]
+    candidate_cpu_times = [float(pair[1]["cpu_time_ms"]) for pair in pairs]
+    baseline_peak_rss = [int(pair[0]["peak_rss_bytes"]) for pair in pairs]
+    candidate_peak_rss = [int(pair[1]["peak_rss_bytes"]) for pair in pairs]
     deltas = [
         int(pair[1]["success"]) - int(pair[0]["success"])
         for pair in pairs
@@ -614,6 +636,12 @@ def _independent_metrics(
     )
     baseline_p95 = _percentile(baseline_latencies, 95)
     candidate_p95 = _percentile(candidate_latencies, 95)
+    baseline_total_latency_ms = sum(baseline_latencies)
+    candidate_total_latency_ms = sum(candidate_latencies)
+    baseline_total_cpu_time_ms = sum(baseline_cpu_times)
+    candidate_total_cpu_time_ms = sum(candidate_cpu_times)
+    baseline_p95_peak_rss_bytes = _percentile(baseline_peak_rss, 95)
+    candidate_p95_peak_rss_bytes = _percentile(candidate_peak_rss, 95)
     return {
         "sample_count": len(pairs),
         "baseline_passed": baseline_passed,
@@ -629,6 +657,25 @@ def _independent_metrics(
         "baseline_p95_latency_ms": baseline_p95,
         "candidate_p95_latency_ms": candidate_p95,
         "latency_ratio": candidate_p95 / max(baseline_p95, 0.000001),
+        "baseline_serial_throughput_rps": (
+            len(pairs) * 1000.0 / baseline_total_latency_ms
+        ),
+        "candidate_serial_throughput_rps": (
+            len(pairs) * 1000.0 / candidate_total_latency_ms
+        ),
+        "throughput_ratio": (
+            baseline_total_latency_ms / candidate_total_latency_ms
+        ),
+        "baseline_total_cpu_time_ms": baseline_total_cpu_time_ms,
+        "candidate_total_cpu_time_ms": candidate_total_cpu_time_ms,
+        "cpu_time_ratio": (
+            candidate_total_cpu_time_ms / baseline_total_cpu_time_ms
+        ),
+        "baseline_p95_peak_rss_bytes": baseline_p95_peak_rss_bytes,
+        "candidate_p95_peak_rss_bytes": candidate_p95_peak_rss_bytes,
+        "peak_rss_ratio": (
+            candidate_p95_peak_rss_bytes / baseline_p95_peak_rss_bytes
+        ),
         "total_tokens": sum(
             int(arm["input_tokens"]) + int(arm["output_tokens"])
             for pair in pairs
@@ -648,6 +695,9 @@ def _independent_gates(
         ("quality.maximum_regressions", metrics["regression_count"], thresholds.maximum_regressions, metrics["regression_count"] <= thresholds.maximum_regressions),
         ("safety.critical_regressions", metrics["critical_regression_count"], 0, metrics["critical_regression_count"] == 0),
         ("performance.maximum_latency_ratio", metrics["latency_ratio"], thresholds.maximum_latency_ratio, metrics["latency_ratio"] <= thresholds.maximum_latency_ratio),
+        ("performance.minimum_serial_throughput_ratio", metrics["throughput_ratio"], thresholds.minimum_throughput_ratio, metrics["throughput_ratio"] >= thresholds.minimum_throughput_ratio),
+        ("resource.maximum_cpu_time_ratio", metrics["cpu_time_ratio"], thresholds.maximum_cpu_time_ratio, metrics["cpu_time_ratio"] <= thresholds.maximum_cpu_time_ratio),
+        ("resource.maximum_peak_rss_ratio", metrics["peak_rss_ratio"], thresholds.maximum_peak_rss_ratio, metrics["peak_rss_ratio"] <= thresholds.maximum_peak_rss_ratio),
         ("cost.maximum_total_tokens", metrics["total_tokens"], thresholds.maximum_total_tokens, metrics["total_tokens"] <= thresholds.maximum_total_tokens),
     )
     return [
@@ -692,29 +742,6 @@ def _is_sha256(value: Any) -> bool:
 def _implementation_fingerprint() -> str:
     """独立绑定客户验收框架全部可执行模块。"""
 
-    module_root = Path(__file__).resolve().parent
-    names = (
-        "__init__.py",
-        "__main__.py",
-        "attestation.py",
-        "contracts.py",
-        "json_utils.py",
-        "package.py",
-        "executor.py",
-        "judge.py",
-        "evidence.py",
-        "runner.py",
-        "verify.py",
-    )
-    digest = hashlib.sha256()
-    for name in names:
-        path = module_root / name
-        digest.update(("benchmarks/customer/" + name).encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(path.read_bytes())
-        digest.update(b"\0")
-    shared_path = module_root.parents[1] / "common" / "path_safety.py"
-    digest.update(b"common/path_safety.py\0")
-    digest.update(shared_path.read_bytes())
-    digest.update(b"\0")
-    return digest.hexdigest()
+    from benchmarks.evidence.release_manifest import source_fingerprint
+
+    return source_fingerprint(Path(__file__).resolve().parents[2])

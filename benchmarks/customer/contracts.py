@@ -26,6 +26,9 @@ class CustomerThresholds:
     minimum_success_rate_delta: float
     maximum_regressions: int
     maximum_latency_ratio: float
+    minimum_throughput_ratio: float
+    maximum_cpu_time_ratio: float
+    maximum_peak_rss_ratio: float
     maximum_total_tokens: int
 
 
@@ -96,6 +99,8 @@ class CustomerExecutionResult:
 
     output: Any
     latency_ms: float
+    cpu_time_ms: float
+    peak_rss_bytes: int
     input_tokens: int
     output_tokens: int
     execution_snapshot_sha256: str

@@ -171,6 +171,7 @@ def _parse_response(
         "executor_artifact_sha256",
         "attestation_signature",
         "latency_ms",
+        "resource_usage",
         "output",
         "usage",
     }
@@ -205,9 +206,29 @@ def _parse_response(
         not isinstance(latency_ms, (int, float))
         or isinstance(latency_ms, bool)
         or not math.isfinite(float(latency_ms))
-        or latency_ms < 0
+        or latency_ms <= 0
     ):
-        raise CustomerExecutionError("执行适配器延迟字段无效")
+        raise CustomerExecutionError("执行适配器延迟必须是正有限值")
+    resource_usage = response["resource_usage"]
+    if not isinstance(resource_usage, dict) or set(resource_usage) != {
+        "cpu_time_ms", "peak_rss_bytes"
+    }:
+        raise CustomerExecutionError("执行适配器资源字段无效")
+    cpu_time_ms = resource_usage["cpu_time_ms"]
+    if (
+        not isinstance(cpu_time_ms, (int, float))
+        or isinstance(cpu_time_ms, bool)
+        or not math.isfinite(float(cpu_time_ms))
+        or cpu_time_ms <= 0
+    ):
+        raise CustomerExecutionError("执行适配器 CPU 时间必须是正有限值")
+    peak_rss_bytes = resource_usage["peak_rss_bytes"]
+    if (
+        not isinstance(peak_rss_bytes, int)
+        or isinstance(peak_rss_bytes, bool)
+        or peak_rss_bytes <= 0
+    ):
+        raise CustomerExecutionError("执行适配器峰值 RSS 必须是正整数")
     usage = response["usage"]
     if not isinstance(usage, dict) or set(usage) != {
         "input_tokens", "output_tokens"
@@ -224,6 +245,8 @@ def _parse_response(
     return CustomerExecutionResult(
         output=response["output"],
         latency_ms=float(latency_ms),
+        cpu_time_ms=float(cpu_time_ms),
+        peak_rss_bytes=peak_rss_bytes,
         input_tokens=usage["input_tokens"],
         output_tokens=usage["output_tokens"],
         execution_snapshot_sha256=expected_snapshot,

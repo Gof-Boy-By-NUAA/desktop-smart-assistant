@@ -406,21 +406,43 @@ def generate_manifest(
         "release_checkout_bound": bool(git["commit_bound"]),
         "release_passed": bool(fde_case["passed"] and git["commit_bound"]),
     }
-    customer_accepted = customer["passed"] and fde_case["release_passed"]
+    from benchmarks.evidence.customer_acceptance_case import (
+        verify_configured_customer_acceptance_evidence,
+    )
+
+    customer_acceptance_case = (
+        verify_configured_customer_acceptance_evidence(
+            root,
+            expected_source_fingerprint=current_source_fingerprint,
+            expected_git_commit=str(git["commit"]),
+        )
+    )
+    # The raw report is a diagnostic artifact inside the checkout.  It cannot
+    # lift a release/customer gate unless an external customer signature also
+    # binds its exact bytes, package, source tree, and commit.
+    customer_acceptance_case = {
+        **customer_acceptance_case,
+        "release_checkout_bound": bool(git["commit_bound"]),
+        "release_passed": bool(
+            customer_acceptance_case["passed"] and git["commit_bound"]
+        ),
+    }
+    customer_accepted = customer_acceptance_case["release_passed"]
 
     hard_denials = {
         "FDE_CASE_EVIDENCE": "YES" if fde_case["release_passed"] else "ABSENT",
         "TARGET_CUSTOMER_ACCEPTANCE": "YES" if customer_accepted else "NO",
         "CUSTOMER_ATTESTATION": "YES" if customer_accepted else "ABSENT",
         "CUSTOMER_TEST_EXECUTION": (
-            "YES"
-            if customer["exists"]
-            and customer["status"] == "completed"
-            and fde_case["release_passed"]
-            else "NOT_RUN"
+            "YES" if customer_acceptance_case["release_passed"] else "NOT_RUN"
         ),
-        "SKILLS_GOLD_DATASET_VALID": "YES" if reports["skills_selection"]["passed"] else "NO",
-        "SKILLS_PRODUCTION_GATE_ELIGIBLE": "YES" if reports["skills_selection"]["passed"] else "NO",
+        # The legacy GitHub-title selector report is silver-label local
+        # diagnostics, not customer gold data.  Only a verified external
+        # customer package/report can establish the skills production gate.
+        "SKILLS_GOLD_DATASET_VALID": "YES" if customer_accepted else "NO",
+        "SKILLS_PRODUCTION_GATE_ELIGIBLE": (
+            "YES" if customer_accepted else "NO"
+        ),
         "GIT_COMMIT_BOUND_EVIDENCE": "YES" if git["commit_bound"] else "ABSENT",
         "REMOTE_CI_REQUIRED_CHECKS": "NOT_RUN",
         "BRANCH_PROTECTION": "ABSENT",
@@ -452,7 +474,7 @@ def generate_manifest(
             and reports["knowledge_verification"]["passed"]
         ),
         "memory_formal_gate": reports["memory_outbox"]["passed"],
-        "skills_formal_gate": reports["skills_selection"]["passed"],
+        "skills_formal_gate": customer_accepted,
         "fde_case_evidence": fde_case["release_passed"],
         "customer_acceptance": customer_accepted,
         "git_commit_bound_evidence": git["commit_bound"],
@@ -474,6 +496,7 @@ def generate_manifest(
         "reports": reports,
         "datasets": datasets,
         "fde_case": fde_case,
+        "customer_acceptance_case": customer_acceptance_case,
         "hard_denials": hard_denials,
         "required_conditions": required_conditions,
         "passed": all(required_conditions.values()),
@@ -551,6 +574,31 @@ def verify_manifest(manifest: dict[str, Any], root: Path | None = None) -> dict[
         manifest.get("fde_case"),
         current_fde_case,
         manifest.get("fde_case") == current_fde_case,
+    )
+    from benchmarks.evidence.customer_acceptance_case import (
+        verify_configured_customer_acceptance_evidence,
+    )
+    current_customer_acceptance_case = (
+        verify_configured_customer_acceptance_evidence(
+            root,
+            expected_source_fingerprint=current_source_fingerprint,
+            expected_git_commit=str(current_git["commit"]),
+        )
+    )
+    current_customer_acceptance_case = {
+        **current_customer_acceptance_case,
+        "release_checkout_bound": bool(current_git["commit_bound"]),
+        "release_passed": bool(
+            current_customer_acceptance_case["passed"]
+            and current_git["commit_bound"]
+        ),
+    }
+    check(
+        "customer_acceptance_case",
+        manifest.get("customer_acceptance_case"),
+        current_customer_acceptance_case,
+        manifest.get("customer_acceptance_case")
+        == current_customer_acceptance_case,
     )
 
     for name, relative in DATASETS.items():
