@@ -11,6 +11,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from .attestation import (
     execution_attestation_payload,
     judgment_attestation_payload,
+    release_identity_sha256,
+    release_record,
     verify_ed25519_signature,
 )
 from .contracts import CustomerPackage
@@ -311,7 +313,9 @@ def _collect_observations(
             "model_id", "model_parameters_sha256", "endpoint_sha256",
             "prompt_sha256", "tools_sha256", "skill_id", "skill_version",
             "skill_content_sha256", "executor_id", "executor_version",
-            "executor_artifact_sha256", "judge_id", "judge_version",
+            "executor_artifact_sha256", "comparison_environment_sha256",
+            "baseline_release", "candidate_release", "judge_id",
+            "judge_version",
             "judge_artifact_sha256", "implementation_sha256",
         }
         if not isinstance(payload, dict) or set(payload) != expected_started_fields:
@@ -330,6 +334,15 @@ def _collect_observations(
             "endpoint_sha256": customer_package.endpoint_sha256,
             "prompt_sha256": customer_package.prompt_sha256,
             "tools_sha256": customer_package.tools_sha256,
+            "comparison_environment_sha256": (
+                customer_package.comparison_environment_sha256
+            ),
+            "baseline_release": release_record(
+                customer_package.baseline_release
+            ),
+            "candidate_release": release_record(
+                customer_package.candidate_release
+            ),
             "skill_id": skill_summary.get("skill_id"),
             "skill_version": skill_summary.get("version"),
             "skill_content_sha256": skill_summary.get("content_sha256"),
@@ -371,6 +384,8 @@ def _collect_observations(
             "success", "latency_ms", "cpu_time_ms", "peak_rss_bytes",
             "input_tokens", "output_tokens",
             "execution_snapshot_sha256", "request_sha256",
+            "requested_release_identity_sha256",
+            "observed_release_identity_sha256",
             "executor_artifact_sha256", "executor_attestation_signature",
             "injection_sha256", "output_sha256", "oracle_evidence_sha256",
             "judge_artifact_sha256", "judge_attestation_signature",
@@ -430,6 +445,8 @@ def _collect_observations(
         for field_name in (
             "execution_snapshot_sha256", "request_sha256", "injection_sha256",
             "output_sha256", "oracle_evidence_sha256",
+            "requested_release_identity_sha256",
+            "observed_release_identity_sha256",
         ):
             if not _is_sha256(payload.get(field_name)):
                 failures.append(
@@ -447,6 +464,11 @@ def _collect_observations(
             if arm == "candidate"
             else None
         )
+        expected_release_identity_sha256 = release_identity_sha256(
+            customer_package.candidate_release
+            if arm == "candidate"
+            else customer_package.baseline_release
+        )
         expected_request_sha256 = sha256_json(
             {
                 "schema_version": 1,
@@ -461,6 +483,12 @@ def _collect_observations(
                     "prompt_sha256": customer_package.prompt_sha256,
                     "tools_sha256": customer_package.tools_sha256,
                 },
+                "comparison_environment_sha256": (
+                    customer_package.comparison_environment_sha256
+                ),
+                "requested_release_identity_sha256": (
+                    expected_release_identity_sha256
+                ),
                 "input": case.case_input,
                 "skill": injected_skill,
             }
@@ -472,6 +500,13 @@ def _collect_observations(
             != customer_package.executor_artifact_sha256
         ):
             failures.append("客户场景 %s 执行器制品哈希无效" % case_id)
+        if (
+            payload.get("requested_release_identity_sha256")
+            != expected_release_identity_sha256
+            or payload.get("observed_release_identity_sha256")
+            != expected_release_identity_sha256
+        ):
+            failures.append("客户场景 %s 观测 release 与臂绑定不一致" % case_id)
         execution_attestation = execution_attestation_payload(
             run_id=str(report.get("run_id")),
             case_id=case_id,
@@ -486,6 +521,15 @@ def _collect_observations(
             peak_rss_bytes=payload.get("peak_rss_bytes"),
             input_tokens=payload.get("input_tokens"),
             output_tokens=payload.get("output_tokens"),
+            comparison_environment_sha256=(
+                customer_package.comparison_environment_sha256
+            ),
+            requested_release_identity_sha256=payload.get(
+                "requested_release_identity_sha256"
+            ),
+            observed_release_identity_sha256=payload.get(
+                "observed_release_identity_sha256"
+            ),
             executor_artifact_sha256=payload.get(
                 "executor_artifact_sha256"
             ),
@@ -559,6 +603,9 @@ def _collect_observations(
             "endpoint_sha256": customer_package.endpoint_sha256,
             "prompt_sha256": customer_package.prompt_sha256,
             "tools_sha256": customer_package.tools_sha256,
+            "comparison_environment_sha256": (
+                customer_package.comparison_environment_sha256
+            ),
         }
     )
     candidate_hash = None
@@ -585,6 +632,20 @@ def _collect_observations(
             failures.append("客户场景 %s 执行环境快照与客户包不一致" % case_id)
         if baseline.get("arm_label") == candidate.get("arm_label"):
             failures.append("客户场景 %s 盲化标签重复" % case_id)
+        if (
+            baseline.get("requested_release_identity_sha256")
+            != release_identity_sha256(customer_package.baseline_release)
+            or baseline.get("observed_release_identity_sha256")
+            != release_identity_sha256(customer_package.baseline_release)
+        ):
+            failures.append("客户场景 %s baseline release 无效" % case_id)
+        if (
+            candidate.get("requested_release_identity_sha256")
+            != release_identity_sha256(customer_package.candidate_release)
+            or candidate.get("observed_release_identity_sha256")
+            != release_identity_sha256(customer_package.candidate_release)
+        ):
+            failures.append("客户场景 %s candidate release 无效" % case_id)
     return observations
 
 
@@ -690,6 +751,7 @@ def _independent_gates(
     thresholds = customer_package.thresholds
     checks = (
         ("data.full_customer_case_set", metrics["sample_count"], len(customer_package.cases), metrics["sample_count"] == len(customer_package.cases)),
+        ("data.minimum_paired_samples", metrics["sample_count"], thresholds.minimum_paired_samples, metrics["sample_count"] >= thresholds.minimum_paired_samples),
         ("quality.minimum_success_rate_delta", metrics["success_rate_delta"], thresholds.minimum_success_rate_delta, metrics["success_rate_delta"] >= thresholds.minimum_success_rate_delta),
         ("quality.paired_ci95_lower_positive", metrics["paired_delta_ci95_lower"], 0.0, metrics["paired_delta_ci95_lower"] > 0.0),
         ("quality.maximum_regressions", metrics["regression_count"], thresholds.maximum_regressions, metrics["regression_count"] <= thresholds.maximum_regressions),

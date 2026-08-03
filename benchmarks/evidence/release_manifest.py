@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 REPORTS = {
     "retrieval_comparison": "benchmarks/results/cmrc2018-comparison.json",
     "retrieval_verification": "benchmarks/results/cmrc2018-comparison-verification.json",
@@ -288,6 +288,16 @@ def _report_record(root: Path, relative: str) -> dict[str, Any]:
     record["passed"] = payload.get("passed") is True
     record["schema_version"] = payload.get("schema_version")
     record["limitations"] = payload.get("limitations")
+    if relative == REPORTS["skills_selection"]:
+        from benchmarks.skills.runner import verify_skill_selection_report
+
+        contract = verify_skill_selection_report(payload)
+        record["declared_status"] = payload.get("status")
+        record["contract_valid"] = contract["valid"] is True
+        record["contract_errors"] = contract["errors"]
+        if not record["contract_valid"]:
+            record["passed"] = False
+            record["status"] = "INVALID_REPORT_CONTRACT"
     return record
 
 
@@ -298,6 +308,17 @@ def _dataset_record(root: Path, relative: str) -> dict[str, Any]:
         "exists": path.is_file(),
         "sha256": sha256_file(path) if path.is_file() else None,
     }
+
+
+def _skills_dataset_record(root: Path) -> dict[str, Any]:
+    """Record the immutable local silver fixture without calling it gold data."""
+
+    from benchmarks.skills.dataset import EXPECTED_DATASET_SHA256
+
+    record = _dataset_record(root, DATASETS["skills_selection"])
+    record["expected_sha256"] = EXPECTED_DATASET_SHA256
+    record["pinned"] = record["sha256"] == EXPECTED_DATASET_SHA256
+    return record
 
 
 def _current_implementation_fingerprints(root: Path) -> dict[str, tuple[str, str]]:
@@ -381,8 +402,12 @@ def generate_manifest(
     )
     reports = {name: _report_record(root, path) for name, path in REPORTS.items()}
     _apply_report_freshness(root, reports)
-    datasets = {name: _dataset_record(root, path) for name, path in DATASETS.items()}
+    datasets = {
+        name: _dataset_record(root, path) for name, path in DATASETS.items()
+    }
+    datasets["skills_selection"] = _skills_dataset_record(root)
     customer = reports["customer_acceptance"]
+    skills_contract_valid = reports["skills_selection"].get("contract_valid") is True
     web_boundary_closed = (
         reports["web_boundary_security"]["passed"]
         and reports["web_boundary_verification"]["passed"]
@@ -443,6 +468,7 @@ def generate_manifest(
         "SKILLS_PRODUCTION_GATE_ELIGIBLE": (
             "YES" if customer_accepted else "NO"
         ),
+        "SKILLS_LOCAL_REPORT_CONTRACT": "YES" if skills_contract_valid else "NO",
         "GIT_COMMIT_BOUND_EVIDENCE": "YES" if git["commit_bound"] else "ABSENT",
         "REMOTE_CI_REQUIRED_CHECKS": "NOT_RUN",
         "BRANCH_PROTECTION": "ABSENT",
@@ -474,7 +500,9 @@ def generate_manifest(
             and reports["knowledge_verification"]["passed"]
         ),
         "memory_formal_gate": reports["memory_outbox"]["passed"],
-        "skills_formal_gate": customer_accepted,
+        "skills_local_report_contract": skills_contract_valid,
+        "skills_pinned_dataset": datasets["skills_selection"]["pinned"],
+        "skills_formal_gate": skills_contract_valid and customer_accepted,
         "fde_case_evidence": fde_case["release_passed"],
         "customer_acceptance": customer_accepted,
         "git_commit_bound_evidence": git["commit_bound"],
@@ -507,10 +535,51 @@ def verify_manifest(manifest: dict[str, Any], root: Path | None = None) -> dict[
     root = (root or _root()).resolve()
     checks: list[dict[str, Any]] = []
 
+    if not isinstance(manifest, dict):
+        manifest = {}
+
     def check(name: str, actual: Any, expected: Any, passed: bool) -> None:
         checks.append({"name": name, "actual": actual, "expected": expected, "passed": bool(passed)})
 
-    check("schema_version", manifest.get("schema_version"), SCHEMA_VERSION, manifest.get("schema_version") == SCHEMA_VERSION)
+    required_manifest_fields = {
+        "schema_version",
+        "generated_at",
+        "repository_root",
+        "source_fingerprint_sha256",
+        "git",
+        "reports",
+        "datasets",
+        "fde_case",
+        "customer_acceptance_case",
+        "hard_denials",
+        "required_conditions",
+        "passed",
+    }
+    check(
+        "manifest.schema",
+        sorted(manifest.keys()),
+        sorted(required_manifest_fields),
+        set(manifest) == required_manifest_fields,
+    )
+    check(
+        "schema_version",
+        manifest.get("schema_version"),
+        SCHEMA_VERSION,
+        manifest.get("schema_version") == SCHEMA_VERSION,
+    )
+    check(
+        "repository_root",
+        manifest.get("repository_root"),
+        str(root),
+        manifest.get("repository_root") == str(root),
+    )
+    check(
+        "generated_at",
+        manifest.get("generated_at"),
+        "non-empty string",
+        isinstance(manifest.get("generated_at"), str)
+        and bool(manifest["generated_at"]),
+    )
     current_source_fingerprint = source_fingerprint(root)
     check(
         "source_fingerprint",
@@ -529,13 +598,23 @@ def verify_manifest(manifest: dict[str, Any], root: Path | None = None) -> dict[
             declared_git.get(field) == expected,
         )
 
+    declared_reports = manifest.get("reports")
+    declared_reports = declared_reports if isinstance(declared_reports, dict) else {}
+    check(
+        "reports.schema",
+        sorted(declared_reports.keys()),
+        sorted(REPORTS),
+        set(declared_reports) == set(REPORTS),
+    )
     current_reports = {
         name: _report_record(root, relative) for name, relative in REPORTS.items()
     }
     _apply_report_freshness(root, current_reports)
     for name in REPORTS:
-        expected = manifest.get("reports", {}).get(name, {})
+        expected = declared_reports.get(name, {})
+        expected = expected if isinstance(expected, dict) else {}
         current = current_reports[name]
+        check(f"report.{name}.record", expected, current, expected == current)
         check(f"report.{name}.sha256", expected.get("sha256"), current.get("sha256"), expected.get("sha256") == current.get("sha256"))
         check(f"report.{name}.status", expected.get("status"), current.get("status"), expected.get("status") == current.get("status"))
         check(f"report.{name}.passed", expected.get("passed"), current.get("passed"), expected.get("passed") == current.get("passed"))
@@ -552,6 +631,20 @@ def verify_manifest(manifest: dict[str, Any], root: Path | None = None) -> dict[
                     expected.get(linkage_field),
                     current.get(linkage_field),
                     expected.get(linkage_field) == current.get(linkage_field),
+                )
+        if name == "skills_selection":
+            for field in (
+                "schema_version",
+                "declared_status",
+                "limitations",
+                "contract_valid",
+                "contract_errors",
+            ):
+                check(
+                    f"report.skills_selection.{field}",
+                    expected.get(field),
+                    current.get(field),
+                    expected.get(field) == current.get(field),
                 )
 
     from benchmarks.evidence.fde_case import (
@@ -601,9 +694,25 @@ def verify_manifest(manifest: dict[str, Any], root: Path | None = None) -> dict[
         == current_customer_acceptance_case,
     )
 
+    declared_datasets = manifest.get("datasets")
+    declared_datasets = (
+        declared_datasets if isinstance(declared_datasets, dict) else {}
+    )
+    check(
+        "datasets.schema",
+        sorted(declared_datasets.keys()),
+        sorted(DATASETS),
+        set(declared_datasets) == set(DATASETS),
+    )
     for name, relative in DATASETS.items():
-        expected = manifest.get("datasets", {}).get(name, {})
-        current = _dataset_record(root, relative)
+        expected = declared_datasets.get(name, {})
+        expected = expected if isinstance(expected, dict) else {}
+        current = (
+            _skills_dataset_record(root)
+            if name == "skills_selection"
+            else _dataset_record(root, relative)
+        )
+        check(f"dataset.{name}.record", expected, current, expected == current)
         check(f"dataset.{name}.sha256", expected.get("sha256"), current.get("sha256"), expected.get("sha256") == current.get("sha256"))
 
     recomputed = generate_manifest(

@@ -36,6 +36,9 @@ def main() -> int:
         "endpoint_sha256": request["model"]["endpoint_sha256"],
         "prompt_sha256": request["model"]["prompt_sha256"],
         "tools_sha256": request["model"]["tools_sha256"],
+        "comparison_environment_sha256": (
+            request["comparison_environment_sha256"]
+        ),
     }
     snapshot_hash = hashlib.sha256(_canonical(snapshot)).hexdigest()
     request_hash = hashlib.sha256(_canonical(request)).hexdigest()
@@ -54,6 +57,15 @@ def main() -> int:
         "peak_rss_bytes": peak_rss_bytes,
         "input_tokens": 10,
         "output_tokens": 2,
+        "comparison_environment_sha256": (
+            request["comparison_environment_sha256"]
+        ),
+        "requested_release_identity_sha256": (
+            request["requested_release_identity_sha256"]
+        ),
+        "observed_release_identity_sha256": (
+            request["requested_release_identity_sha256"]
+        ),
         "executor_artifact_sha256": _EXECUTOR_ARTIFACT_SHA256,
     }
     signature = Ed25519PrivateKey.from_private_bytes(b"\x11" * 32).sign(
@@ -68,6 +80,9 @@ def main() -> int:
         "execution_snapshot_sha256": snapshot_hash,
         "request_sha256": request_hash,
         "executor_artifact_sha256": _EXECUTOR_ARTIFACT_SHA256,
+        "observed_release_identity_sha256": (
+            request["requested_release_identity_sha256"]
+        ),
         "attestation_signature": signature,
         "latency_ms": latency_ms,
         "resource_usage": {

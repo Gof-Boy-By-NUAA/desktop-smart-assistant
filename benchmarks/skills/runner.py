@@ -11,7 +11,7 @@ import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Sequence, Tuple
+from typing import Any, Dict, Sequence, Tuple
 
 from agent.memory.governance import IdentityContext
 from agent.skills.governance import (
@@ -53,6 +53,19 @@ _IMPLEMENTATION_PATHS = (
     "benchmarks/skills/metrics.py",
     "benchmarks/skills/runner.py",
 )
+_REPORT_SCHEMA_VERSION = 1
+_BLOCKED_DATASET_STATUS = "blocked_invalid_dataset"
+_COMPLETED_SILVER_STATUS = "completed_silver_label_local"
+_SILVER_LIMITATIONS = {
+    "public_github_issue_titles_are_silver_labels": True,
+    "label_rule_leakage": True,
+    "production_gate_eligible": False,
+    "gold_dataset_valid": False,
+    "governed_subset_only": True,
+    "body_or_comments_included": False,
+    "customer_tasks_included": False,
+    "customer_success_rate_measured": False,
+}
 
 
 class _CatalogPublicationExecutor(PairedCaseExecutor):
@@ -101,8 +114,12 @@ def run_skill_selection_benchmark(
     baseline_metrics = calculate_selection_metrics(observations["all_skills_metadata"])
     top_k_metrics = calculate_selection_metrics(observations["controlled_top_k"])
     return {
-        "schema_version": 1,
+        "schema_version": _REPORT_SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        # This benchmark may complete as local silver-label diagnostics, but
+        # it can never establish a Skills production or gold-data gate.
+        "status": _COMPLETED_SILVER_STATUS,
+        "passed": False,
         "dataset": {
             "id": dataset.dataset_id,
             "sha256": dataset.sha256,
@@ -141,13 +158,7 @@ def run_skill_selection_benchmark(
         },
         "cases": case_rows,
         "limitations": {
-            "public_github_issue_titles_are_silver_labels": True,
-            "label_rule_leakage": True,
-            "production_gate_eligible": False,
-            "governed_subset_only": True,
-            "body_or_comments_included": False,
-            "customer_tasks_included": False,
-            "customer_success_rate_measured": False,
+            **_SILVER_LIMITATIONS,
             "claim": (
                 "本报告只测量公开 GitHub issue 标题对确定性路由规则的匹配；"
                 "银标不代表人工金标、真实任务完成率或客户成功率。"
@@ -456,28 +467,185 @@ def _blocked_dataset_report(
     except OSError:
         actual_sha256 = None
     return {
-        "schema_version": 1,
+        "schema_version": _REPORT_SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "status": "blocked_invalid_dataset",
+        "status": _BLOCKED_DATASET_STATUS,
         "passed": False,
         "dataset": {
             "path": str(path),
             "expected_sha256": expected_sha256,
             "actual_sha256": actual_sha256,
             "provenance_complete": False,
+            "label_tier": "deterministic_silver",
         },
+        "implementation_sha256": implementation_fingerprint(),
+        "implementation_files": list(_IMPLEMENTATION_PATHS),
         "error": {
             "type": type(error).__name__,
             "message": str(error),
         },
         "metrics": None,
         "limitations": {
+            "public_github_issue_titles_are_silver_labels": True,
             "label_rule_leakage": True,
             "production_gate_eligible": False,
+            "gold_dataset_valid": False,
             "governed_subset_only": True,
+            "body_or_comments_included": False,
+            "customer_tasks_included": False,
             "customer_success_rate_measured": False,
         },
     }
+
+
+def verify_skill_selection_report(report: object) -> dict[str, object]:
+    """Validate the untrusted local Skills report against its fixed contract.
+
+    The GitHub-title snapshot is explicitly a pinned silver-label fixture.  A
+    report produced from it must never claim ``passed`` or production/gold
+    eligibility, including on the invalid-dataset path.  This is intentionally
+    a local tamper detector, not an external attestation.
+    """
+
+    errors: list[str] = []
+    if not isinstance(report, dict):
+        return {"valid": False, "errors": ["report must be an object"]}
+
+    def require(condition: bool, message: str) -> None:
+        if not condition:
+            errors.append(message)
+
+    require(
+        report.get("schema_version") == _REPORT_SCHEMA_VERSION,
+        "schema_version does not match",
+    )
+    status = report.get("status")
+    require(
+        status in {_BLOCKED_DATASET_STATUS, _COMPLETED_SILVER_STATUS},
+        "status is not an allowed local Skills status",
+    )
+    expected_fields = {
+        "schema_version",
+        "generated_at",
+        "status",
+        "passed",
+        "dataset",
+        "implementation_sha256",
+        "implementation_files",
+        "limitations",
+    }
+    if status == _BLOCKED_DATASET_STATUS:
+        expected_fields |= {"error", "metrics"}
+    elif status == _COMPLETED_SILVER_STATUS:
+        expected_fields |= {"environment", "arms", "cases"}
+    require(
+        set(report) == expected_fields,
+        "report fields do not match the strict status schema",
+    )
+    require(
+        isinstance(report.get("generated_at"), str) and bool(report["generated_at"]),
+        "generated_at must be a non-empty string",
+    )
+    require(report.get("passed") is False, "local silver report must have passed=false")
+    require(
+        report.get("implementation_sha256") == implementation_fingerprint(),
+        "implementation_sha256 does not match current implementation",
+    )
+    require(
+        report.get("implementation_files") == list(_IMPLEMENTATION_PATHS),
+        "implementation_files do not match fixed implementation paths",
+    )
+
+    limitations = report.get("limitations")
+    require(isinstance(limitations, dict), "limitations must be an object")
+    if isinstance(limitations, dict):
+        expected_limitation_fields = set(_SILVER_LIMITATIONS)
+        if status == _COMPLETED_SILVER_STATUS:
+            expected_limitation_fields.add("claim")
+        require(
+            set(limitations) == expected_limitation_fields,
+            "limitations fields do not match the strict status schema",
+        )
+        for name, expected in _SILVER_LIMITATIONS.items():
+            require(
+                limitations.get(name) is expected,
+                "limitations.%s must be %r" % (name, expected),
+            )
+
+    dataset = report.get("dataset")
+    require(isinstance(dataset, dict), "dataset must be an object")
+    if not isinstance(dataset, dict):
+        dataset = {}
+    require(
+        dataset.get("label_tier") == "deterministic_silver",
+        "dataset.label_tier must be deterministic_silver",
+    )
+
+    if status == _BLOCKED_DATASET_STATUS:
+        require(
+            set(dataset)
+            == {
+                "path",
+                "expected_sha256",
+                "actual_sha256",
+                "provenance_complete",
+                "label_tier",
+            },
+            "blocked dataset fields do not match the strict schema",
+        )
+        require(report.get("metrics") is None, "blocked report metrics must be null")
+        require(
+            dataset.get("expected_sha256") == EXPECTED_DATASET_SHA256,
+            "blocked report expected_sha256 does not match fixed dataset pin",
+        )
+        require(
+            dataset.get("actual_sha256") == EXPECTED_DATASET_SHA256,
+            "blocked report actual_sha256 does not match fixed dataset pin",
+        )
+        require(
+            dataset.get("provenance_complete") is False,
+            "blocked report provenance_complete must be false",
+        )
+        error = report.get("error")
+        require(isinstance(error, dict), "blocked report error must be an object")
+        if isinstance(error, dict):
+            require(
+                error.get("type") == "SkillSelectionDatasetError",
+                "blocked report error.type is invalid",
+            )
+            require(isinstance(error.get("message"), str), "blocked report error.message is invalid")
+    elif status == _COMPLETED_SILVER_STATUS:
+        require(
+            set(dataset)
+            == {
+                "id",
+                "sha256",
+                "design_split_sha256",
+                "evaluation_split_sha256",
+                "snapshot_generated_at",
+                "label_tier",
+                "normalization",
+                "design_case_count",
+                "evaluation_case_count",
+                "negative_case_count",
+                "source",
+                "frozen_labels_recomputed",
+                "provenance_complete",
+            },
+            "completed dataset fields do not match the strict schema",
+        )
+        require(
+            dataset.get("sha256") == EXPECTED_DATASET_SHA256,
+            "completed report dataset.sha256 does not match fixed dataset pin",
+        )
+        require(
+            dataset.get("provenance_complete") is True,
+            "completed report provenance_complete must be true",
+        )
+        require(isinstance(report.get("arms"), dict), "completed report arms must be an object")
+        require(isinstance(report.get("cases"), list), "completed report cases must be an array")
+
+    return {"valid": not errors, "errors": errors}
 
 
 if __name__ == "__main__":

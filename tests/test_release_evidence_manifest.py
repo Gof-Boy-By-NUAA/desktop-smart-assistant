@@ -87,6 +87,13 @@ def test_release_manifest_is_explicitly_fail_closed_on_missing_external_gates():
     assert manifest["required_conditions"]["external_verifier_attestation"] is False
     assert manifest["required_conditions"]["fde_case_evidence"] is False
     assert manifest["required_conditions"]["skills_formal_gate"] is False
+    assert manifest["required_conditions"]["skills_local_report_contract"] is False
+    assert manifest["required_conditions"]["skills_pinned_dataset"] is True
+    assert manifest["reports"]["skills_selection"]["contract_valid"] is False
+    assert (
+        manifest["reports"]["skills_selection"]["status"]
+        == "INVALID_REPORT_CONTRACT"
+    )
 
 
 def test_release_manifest_verifier_accepts_currently_generated_manifest():
@@ -149,6 +156,25 @@ def test_release_manifest_verifier_rejects_every_hard_denial_mutation():
             check["name"] == "hard_denials" and not check["passed"]
             for check in result["checks"]
         ), name
+
+
+def test_release_manifest_verifier_rejects_forged_skills_contract_or_dataset_pin():
+    manifest = generate_manifest(ROOT)
+    contract_flip = copy.deepcopy(manifest)
+    contract_flip["reports"]["skills_selection"]["contract_valid"] = True
+    pin_flip = copy.deepcopy(manifest)
+    pin_flip["datasets"]["skills_selection"]["expected_sha256"] = "0" * 64
+
+    for tampered, check_name in (
+        (contract_flip, "report.skills_selection.contract_valid"),
+        (pin_flip, "dataset.skills_selection.record"),
+    ):
+        result = verify_manifest(tampered, ROOT)
+        assert result["integrity_passed"] is False
+        assert any(
+            check["name"] == check_name and not check["passed"]
+            for check in result["checks"]
+        )
 
 
 def test_release_manifest_verifier_rejects_every_git_binding_mutation():

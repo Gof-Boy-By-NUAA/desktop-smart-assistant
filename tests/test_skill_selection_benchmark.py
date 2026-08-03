@@ -25,10 +25,12 @@ from benchmarks.skills.metrics import (
     calculate_selection_metrics,
 )
 from benchmarks.skills.runner import (
+    _blocked_dataset_report,
     implementation_fingerprint,
     main,
     run_skill_selection_benchmark,
     run_skill_selection_benchmark_from_path,
+    verify_skill_selection_report,
 )
 
 
@@ -420,6 +422,34 @@ def test_cli_writes_structured_blocked_report(tmp_path, monkeypatch, capsys):
     assert file_report["metrics"] is None
     assert file_report["dataset"]["provenance_complete"] is False
     assert file_report["limitations"]["production_gate_eligible"] is False
+    assert verify_skill_selection_report(file_report)["valid"] is True
+
+
+def test_strict_local_report_contract_rejects_forged_release_claims():
+    report = _blocked_dataset_report(
+        DEFAULT_DATASET_PATH,
+        EXPECTED_DATASET_SHA256,
+        SkillSelectionDatasetError("fixture invalid"),
+    )
+    assert verify_skill_selection_report(report)["valid"] is True
+
+    mutations = (
+        lambda value: value.__setitem__("passed", True),
+        lambda value: value["dataset"].__setitem__("expected_sha256", "0" * 64),
+        lambda value: value["dataset"].__setitem__("actual_sha256", "0" * 64),
+        lambda value: value.__setitem__("implementation_sha256", "0" * 64),
+        lambda value: value["limitations"].__setitem__(
+            "production_gate_eligible", True
+        ),
+        lambda value: value["limitations"].__setitem__(
+            "gold_dataset_valid", True
+        ),
+    )
+    for mutate in mutations:
+        forged = json.loads(json.dumps(report))
+        mutate(forged)
+        result = verify_skill_selection_report(forged)
+        assert result["valid"] is False
 
 
 def test_metric_rejects_duplicate_selected_skills():

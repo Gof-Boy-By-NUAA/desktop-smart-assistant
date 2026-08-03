@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import math
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
@@ -13,11 +14,12 @@ from common.path_safety import (
     is_link_or_reparse_point,
 )
 
-from .attestation import clean_ed25519_public_key
+from .attestation import clean_ed25519_public_key, clean_ed25519_signature
 from .contracts import (
     CustomerCase,
     CustomerPackage,
     CustomerPackageError,
+    CustomerRelease,
     CustomerThresholds,
 )
 from .json_utils import clean_sha256, clean_text, sha256_json, strict_json_loads
@@ -26,6 +28,8 @@ from .json_utils import clean_sha256, clean_text, sha256_json, strict_json_loads
 _MAX_MANIFEST_BYTES = 256 * 1024
 _MAX_CASES_BYTES = 8 * 1024 * 1024
 _MAX_CASE_COUNT = 10000
+_MINIMUM_PAIRED_SAMPLES = 30
+_GIT_COMMIT = re.compile(r"^[0-9a-f]{40,64}$")
 
 
 def load_customer_package(
@@ -53,6 +57,8 @@ def load_customer_package(
             "package_id",
             "tenant_id",
             "model",
+            "comparison",
+            "releases",
             "attestation",
             "oracle",
             "cases",
@@ -61,8 +67,8 @@ def load_customer_package(
         },
         "客户清单",
     )
-    if manifest["schema_version"] != 1:
-        raise CustomerPackageError("客户清单 schema_version 必须为 1")
+    if manifest["schema_version"] != 2:
+        raise CustomerPackageError("客户清单 schema_version 必须为 2")
 
     model = _object_with_keys(
         manifest["model"],
@@ -75,6 +81,61 @@ def load_customer_package(
     if not isinstance(model["parameters"], dict):
         raise CustomerPackageError("model.parameters 必须是对象")
     sha256_json(model["parameters"])
+    comparison = _object_with_keys(
+        manifest["comparison"],
+        {"execution_environment", "execution_environment_sha256"},
+        "comparison",
+    )
+    execution_environment = _object_with_keys(
+        comparison["execution_environment"],
+        {
+            "agent_runtime_sha256",
+            "container_image_sha256",
+            "machine_profile_sha256",
+            "network_policy_sha256",
+            "os_image_sha256",
+            "provider_model_revision_sha256",
+        },
+        "comparison.execution_environment",
+    )
+    normalized_environment = {
+        field_name: clean_sha256(
+            execution_environment[field_name],
+            "comparison.execution_environment." + field_name,
+        )
+        for field_name in sorted(execution_environment)
+    }
+    comparison_environment_sha256 = clean_sha256(
+        comparison["execution_environment_sha256"],
+        "comparison.execution_environment_sha256",
+    )
+    if comparison_environment_sha256 != sha256_json(
+        {
+            "schema_version": 1,
+            **normalized_environment,
+        }
+    ):
+        raise CustomerPackageError(
+            "comparison.execution_environment_sha256 与环境描述不一致"
+        )
+    releases = _object_with_keys(
+        manifest["releases"], {"baseline", "candidate"}, "releases"
+    )
+    baseline_release = _parse_release(releases["baseline"], "releases.baseline")
+    candidate_release = _parse_release(
+        releases["candidate"], "releases.candidate"
+    )
+    if (
+        baseline_release.release_id == candidate_release.release_id
+        or baseline_release.git_commit == candidate_release.git_commit
+        or baseline_release.source_fingerprint_sha256
+        == candidate_release.source_fingerprint_sha256
+        or baseline_release.artifact_sha256 == candidate_release.artifact_sha256
+        or baseline_release.sbom_sha256 == candidate_release.sbom_sha256
+    ):
+        raise CustomerPackageError(
+            "baseline 与 candidate 必须绑定不同的 release、commit、制品和 SBOM"
+        )
 
     oracle = _object_with_keys(
         manifest["oracle"], {"id", "kind"}, "oracle"
@@ -149,6 +210,10 @@ def load_customer_package(
         raise CustomerPackageError("固定候选技能不满足允许边界")
 
     thresholds = _parse_thresholds(manifest["thresholds"])
+    if len(parsed_cases) < thresholds.minimum_paired_samples:
+        raise CustomerPackageError(
+            "客户场景数量低于 minimum_paired_samples"
+        )
     return CustomerPackage(
         root=root,
         package_id=clean_text(manifest["package_id"], "package_id"),
@@ -160,6 +225,9 @@ def load_customer_package(
         ),
         prompt_sha256=clean_sha256(model["prompt_sha256"], "prompt_sha256"),
         tools_sha256=clean_sha256(model["tools_sha256"], "tools_sha256"),
+        comparison_environment_sha256=comparison_environment_sha256,
+        baseline_release=baseline_release,
+        candidate_release=candidate_release,
         executor_id=executor_attestation["id"],
         executor_version=executor_attestation["version"],
         executor_artifact_sha256=executor_attestation["artifact_sha256"],
@@ -244,6 +312,43 @@ def _parse_attestation_identity(value: Any, field_name: str) -> Dict[str, str]:
     }
 
 
+def _parse_release(value: Any, field_name: str) -> CustomerRelease:
+    raw = _object_with_keys(
+        value,
+        {
+            "release_id",
+            "git_commit",
+            "source_fingerprint_sha256",
+            "artifact_sha256",
+            "sbom_sha256",
+            "signer_key_id",
+            "signature",
+        },
+        field_name,
+    )
+    git_commit = raw["git_commit"]
+    if not isinstance(git_commit, str) or not _GIT_COMMIT.fullmatch(git_commit):
+        raise CustomerPackageError("%s.git_commit 必须是 40-64 位小写提交哈希" % field_name)
+    return CustomerRelease(
+        release_id=clean_text(raw["release_id"], field_name + ".release_id", 128),
+        git_commit=git_commit,
+        source_fingerprint_sha256=clean_sha256(
+            raw["source_fingerprint_sha256"],
+            field_name + ".source_fingerprint_sha256",
+        ),
+        artifact_sha256=clean_sha256(
+            raw["artifact_sha256"], field_name + ".artifact_sha256"
+        ),
+        sbom_sha256=clean_sha256(raw["sbom_sha256"], field_name + ".sbom_sha256"),
+        signer_key_id=clean_text(
+            raw["signer_key_id"], field_name + ".signer_key_id", 128
+        ),
+        signature=clean_ed25519_signature(
+            raw["signature"], field_name + ".signature"
+        ),
+    )
+
+
 def _parse_thresholds(value: Any) -> CustomerThresholds:
     raw = _object_with_keys(
         value,
@@ -255,6 +360,7 @@ def _parse_thresholds(value: Any) -> CustomerThresholds:
             "maximum_cpu_time_ratio",
             "maximum_peak_rss_ratio",
             "maximum_total_tokens",
+            "minimum_paired_samples",
         },
         "thresholds",
     )
@@ -265,6 +371,7 @@ def _parse_thresholds(value: Any) -> CustomerThresholds:
     peak_rss = raw["maximum_peak_rss_ratio"]
     regressions = raw["maximum_regressions"]
     tokens = raw["maximum_total_tokens"]
+    minimum_paired_samples = raw["minimum_paired_samples"]
     if (
         not isinstance(delta, (int, float))
         or isinstance(delta, bool)
@@ -312,6 +419,15 @@ def _parse_thresholds(value: Any) -> CustomerThresholds:
         raise CustomerPackageError("maximum_regressions 必须是非负整数")
     if not isinstance(tokens, int) or isinstance(tokens, bool) or tokens <= 0:
         raise CustomerPackageError("maximum_total_tokens 必须大于零")
+    if (
+        not isinstance(minimum_paired_samples, int)
+        or isinstance(minimum_paired_samples, bool)
+        or minimum_paired_samples < _MINIMUM_PAIRED_SAMPLES
+    ):
+        raise CustomerPackageError(
+            "minimum_paired_samples 必须是不小于 %d 的整数"
+            % _MINIMUM_PAIRED_SAMPLES
+        )
     return CustomerThresholds(
         float(delta),
         regressions,
@@ -320,6 +436,7 @@ def _parse_thresholds(value: Any) -> CustomerThresholds:
         float(cpu_time),
         float(peak_rss),
         tokens,
+        minimum_paired_samples,
     )
 
 

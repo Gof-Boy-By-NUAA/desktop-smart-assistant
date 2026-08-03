@@ -19,6 +19,7 @@ from typing import Any
 from benchmarks.customer.attestation import (
     clean_ed25519_public_key,
     clean_ed25519_signature,
+    release_attestation_payload,
     verify_ed25519_signature,
 )
 from benchmarks.customer.json_utils import (
@@ -31,7 +32,7 @@ from benchmarks.customer.verify import verify_customer_report
 from common.path_safety import has_link_or_reparse_component
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 EVIDENCE_ENV = "SMART_ASSISTANT_CUSTOMER_ACCEPTANCE_EVIDENCE_PATH"
 TRUST_ROOT_ENV = "SMART_ASSISTANT_CUSTOMER_ACCEPTANCE_TRUST_ROOT_PATH"
 TRUST_ROOT_SHA256_ENV = "SMART_ASSISTANT_CUSTOMER_ACCEPTANCE_TRUST_ROOT_SHA256"
@@ -42,7 +43,7 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _COMMIT = re.compile(r"^[0-9a-f]{40,64}$")
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _TRUST_ROOT_KEYS = {"schema_version", "kind", "keys"}
-_TRUST_KEY_KEYS = {"key_id", "ed25519_public_key"}
+_TRUST_KEY_KEYS = {"key_id", "purpose", "ed25519_public_key"}
 _EVIDENCE_KEYS = {
     "schema_version",
     "kind",
@@ -157,7 +158,7 @@ def _external_directory(
     return resolved
 
 
-def _trust_keys(payload: dict[str, Any]) -> dict[str, str]:
+def _trust_keys(payload: dict[str, Any]) -> dict[str, dict[str, str]]:
     if set(payload) != _TRUST_ROOT_KEYS:
         raise ValueError("customer trust root fields are invalid")
     if payload.get("schema_version") != SCHEMA_VERSION:
@@ -167,16 +168,26 @@ def _trust_keys(payload: dict[str, Any]) -> dict[str, str]:
     entries = payload.get("keys")
     if not isinstance(entries, list) or not entries:
         raise ValueError("customer trust root keys are invalid")
-    result: dict[str, str] = {}
+    result: dict[str, dict[str, str]] = {}
+    seen_public_keys: set[str] = set()
     for entry in entries:
         if not isinstance(entry, dict) or set(entry) != _TRUST_KEY_KEYS:
             raise ValueError("customer trust root key entry is invalid")
         key_id = _clean_identifier(entry.get("key_id"), "trust key id")
         if key_id in result:
             raise ValueError("customer trust root contains duplicate key id")
-        result[key_id] = clean_ed25519_public_key(
+        purpose = entry.get("purpose")
+        if purpose not in {"customer_acceptance", "smart_assistant_release"}:
+            raise ValueError("customer trust root key purpose is invalid")
+        public_key = clean_ed25519_public_key(
             entry.get("ed25519_public_key"), "customer trust root public key"
         )
+        if public_key in seen_public_keys:
+            raise ValueError(
+                "customer trust root cannot reuse a key across trust purposes"
+            )
+        seen_public_keys.add(public_key)
+        result[key_id] = {"purpose": purpose, "public_key": public_key}
     return result
 
 
@@ -302,14 +313,16 @@ def verify_customer_acceptance_evidence(
         key_id = _clean_identifier(
             attestation.get("key_id"), "customer acceptance signer"
         )
-        public_key = trusted.get(key_id)
-        if public_key is None:
+        signer = trusted.get(key_id)
+        if signer is None or signer["purpose"] != "customer_acceptance":
             raise ValueError("customer acceptance signer is not trusted")
         signature = clean_ed25519_signature(
             attestation.get("signature"), "customer acceptance signature"
         )
         if not verify_ed25519_signature(
-            public_key, signature, customer_acceptance_attestation_payload(evidence)
+            signer["public_key"],
+            signature,
+            customer_acceptance_attestation_payload(evidence),
         ):
             raise ValueError("customer acceptance signature is invalid")
 
@@ -325,6 +338,30 @@ def verify_customer_acceptance_evidence(
         ):
             raise ValueError("customer acceptance package hash is not signed")
         package = load_customer_package(package_dir, package_sha256)
+        _validate_release_signature(package.baseline_release, trusted)
+        _validate_release_signature(package.candidate_release, trusted)
+        if package.candidate_release.git_commit != expected_git_commit:
+            raise ValueError(
+                "candidate release is not bound to current Git commit"
+            )
+        if (
+            package.candidate_release.source_fingerprint_sha256
+            != expected_source_fingerprint
+        ):
+            raise ValueError(
+                "candidate release is not bound to current source tree"
+            )
+        if package.candidate_release.artifact_sha256 != evidence["artifact_sha256"]:
+            raise ValueError(
+                "candidate release artifact does not match acceptance evidence"
+            )
+        if (
+            package.comparison_environment_sha256
+            != evidence["environment_sha256"]
+        ):
+            raise ValueError(
+                "comparison environment does not match acceptance evidence"
+            )
 
         _report_path, report, report_sha256 = _external_json(
             report_path, root, "customer acceptance report"
@@ -381,3 +418,17 @@ def verify_configured_customer_acceptance_evidence(
             Path(os.environ[REPORT_ENV]) if os.environ.get(REPORT_ENV) else None
         ),
     )
+
+
+def _validate_release_signature(
+    release: Any, trusted: dict[str, dict[str, str]]
+) -> None:
+    signer = trusted.get(release.signer_key_id)
+    if signer is None or signer["purpose"] != "smart_assistant_release":
+        raise ValueError("release signer is not trusted for SmartAssistant releases")
+    if not verify_ed25519_signature(
+        signer["public_key"],
+        release.signature,
+        release_attestation_payload(release),
+    ):
+        raise ValueError("SmartAssistant release signature is invalid")

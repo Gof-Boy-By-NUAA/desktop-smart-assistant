@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any, Dict
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from .contracts import CustomerPackageError
+from .contracts import CustomerPackageError, CustomerRelease
 from .json_utils import canonical_json_bytes
 
 
@@ -36,6 +37,9 @@ def execution_attestation_payload(
     peak_rss_bytes: int,
     input_tokens: int,
     output_tokens: int,
+    comparison_environment_sha256: str,
+    requested_release_identity_sha256: str,
+    observed_release_identity_sha256: str,
     executor_artifact_sha256: str,
 ) -> Dict[str, Any]:
     """生成由可信执行器签名的稳定载荷。"""
@@ -54,7 +58,49 @@ def execution_attestation_payload(
         "peak_rss_bytes": peak_rss_bytes,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
+        "comparison_environment_sha256": comparison_environment_sha256,
+        "requested_release_identity_sha256": (
+            requested_release_identity_sha256
+        ),
+        "observed_release_identity_sha256": (
+            observed_release_identity_sha256
+        ),
         "executor_artifact_sha256": executor_artifact_sha256,
+    }
+
+
+def release_attestation_payload(release: CustomerRelease) -> Dict[str, Any]:
+    """Canonical data signed by the pinned SmartAssistant release key."""
+
+    if not isinstance(release, CustomerRelease):
+        raise CustomerPackageError("release 类型无效")
+    return {
+        "schema_version": 1,
+        "kind": "smart-assistant-release",
+        "release_id": release.release_id,
+        "git_commit": release.git_commit,
+        "source_fingerprint_sha256": release.source_fingerprint_sha256,
+        "artifact_sha256": release.artifact_sha256,
+        "sbom_sha256": release.sbom_sha256,
+        "signer_key_id": release.signer_key_id,
+    }
+
+
+def release_identity_sha256(release: CustomerRelease) -> str:
+    """Stable immutable release identity; excludes only the signature bytes."""
+
+    return hashlib.sha256(
+        canonical_json_bytes(release_attestation_payload(release))
+    ).hexdigest()
+
+
+def release_record(release: CustomerRelease) -> Dict[str, Any]:
+    """Return the signed release declaration stored in the event chain."""
+
+    return {
+        **release_attestation_payload(release),
+        "signature": release.signature,
+        "release_identity_sha256": release_identity_sha256(release),
     }
 
 

@@ -20,6 +20,8 @@ from agent.skills.governance import (
 from .attestation import (
     execution_attestation_payload,
     judgment_attestation_payload,
+    release_identity_sha256,
+    release_record,
     verify_ed25519_signature,
 )
 from .contracts import (
@@ -100,6 +102,15 @@ class ControlledCustomerAcceptanceRunner:
                 "endpoint_sha256": customer_package.endpoint_sha256,
                 "prompt_sha256": customer_package.prompt_sha256,
                 "tools_sha256": customer_package.tools_sha256,
+                "comparison_environment_sha256": (
+                    customer_package.comparison_environment_sha256
+                ),
+                "baseline_release": release_record(
+                    customer_package.baseline_release
+                ),
+                "candidate_release": release_record(
+                    customer_package.candidate_release
+                ),
                 "skill_id": skill.skill_id,
                 "skill_version": skill.version,
                 "skill_content_sha256": skill.content_hash,
@@ -141,6 +152,16 @@ class ControlledCustomerAcceptanceRunner:
                     endpoint_sha256=customer_package.endpoint_sha256,
                     prompt_sha256=customer_package.prompt_sha256,
                     tools_sha256=customer_package.tools_sha256,
+                    comparison_environment_sha256=(
+                        customer_package.comparison_environment_sha256
+                    ),
+                    requested_release_identity_sha256=(
+                        release_identity_sha256(
+                            customer_package.candidate_release
+                            if arm == "candidate"
+                            else customer_package.baseline_release
+                        )
+                    ),
                     case_input=case.case_input,
                     skill=skill_payload if arm == "candidate" else None,
                 )
@@ -194,6 +215,12 @@ class ControlledCustomerAcceptanceRunner:
                             result.execution_snapshot_sha256
                         ),
                         "request_sha256": result.request_sha256,
+                        "requested_release_identity_sha256": (
+                            result.requested_release_identity_sha256
+                        ),
+                        "observed_release_identity_sha256": (
+                            result.observed_release_identity_sha256
+                        ),
                         "executor_artifact_sha256": (
                             result.executor_artifact_sha256
                         ),
@@ -398,6 +425,13 @@ def _validate_execution_result(
         != customer_package.executor_artifact_sha256
     ):
         raise CustomerPackageError("执行器制品哈希与客户包不一致")
+    if (
+        result.requested_release_identity_sha256
+        != request.requested_release_identity_sha256
+        or result.observed_release_identity_sha256
+        != request.requested_release_identity_sha256
+    ):
+        raise CustomerPackageError("执行适配器观测 release 与请求固定 release 不一致")
     for value in (result.input_tokens, result.output_tokens):
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:
             raise CustomerPackageError("执行适配器令牌数量无效")
@@ -434,6 +468,15 @@ def _validate_execution_result(
         peak_rss_bytes=result.peak_rss_bytes,
         input_tokens=result.input_tokens,
         output_tokens=result.output_tokens,
+        comparison_environment_sha256=(
+            request.comparison_environment_sha256
+        ),
+        requested_release_identity_sha256=(
+            result.requested_release_identity_sha256
+        ),
+        observed_release_identity_sha256=(
+            result.observed_release_identity_sha256
+        ),
         executor_artifact_sha256=result.executor_artifact_sha256,
     )
     if not verify_ed25519_signature(
@@ -605,6 +648,12 @@ def _build_gates(
             metrics["sample_count"],
             len(customer_package.cases),
             metrics["sample_count"] == len(customer_package.cases),
+        ),
+        (
+            "data.minimum_paired_samples",
+            metrics["sample_count"],
+            thresholds.minimum_paired_samples,
+            metrics["sample_count"] >= thresholds.minimum_paired_samples,
         ),
         (
             "quality.minimum_success_rate_delta",

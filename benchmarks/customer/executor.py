@@ -152,6 +152,12 @@ def _request_payload(request: CustomerExecutionRequest) -> Dict[str, Any]:
             "prompt_sha256": request.prompt_sha256,
             "tools_sha256": request.tools_sha256,
         },
+        "comparison_environment_sha256": (
+            request.comparison_environment_sha256
+        ),
+        "requested_release_identity_sha256": (
+            request.requested_release_identity_sha256
+        ),
         "input": request.case_input,
         "skill": request.skill,
     }
@@ -169,6 +175,7 @@ def _parse_response(
         "execution_snapshot_sha256",
         "request_sha256",
         "executor_artifact_sha256",
+        "observed_release_identity_sha256",
         "attestation_signature",
         "latency_ms",
         "resource_usage",
@@ -198,6 +205,17 @@ def _parse_response(
     executor_artifact_sha256 = clean_sha256(
         response["executor_artifact_sha256"], "executor_artifact_sha256"
     )
+    observed_release_identity_sha256 = clean_sha256(
+        response["observed_release_identity_sha256"],
+        "observed_release_identity_sha256",
+    )
+    if (
+        observed_release_identity_sha256
+        != request.requested_release_identity_sha256
+    ):
+        raise CustomerExecutionError(
+            "执行适配器观测 release 与请求固定 release 不一致"
+        )
     attestation_signature = clean_ed25519_signature(
         response["attestation_signature"], "attestation_signature"
     )
@@ -251,6 +269,10 @@ def _parse_response(
         output_tokens=usage["output_tokens"],
         execution_snapshot_sha256=expected_snapshot,
         request_sha256=expected_request_sha256,
+        requested_release_identity_sha256=(
+            request.requested_release_identity_sha256
+        ),
+        observed_release_identity_sha256=observed_release_identity_sha256,
         executor_artifact_sha256=executor_artifact_sha256,
         attestation_signature=attestation_signature,
     )
@@ -268,6 +290,9 @@ def execution_snapshot_sha256(request: CustomerExecutionRequest) -> str:
                 "endpoint_sha256": request.endpoint_sha256,
                 "prompt_sha256": request.prompt_sha256,
                 "tools_sha256": request.tools_sha256,
+                "comparison_environment_sha256": (
+                    request.comparison_environment_sha256
+                ),
             }
         )
     ).hexdigest()

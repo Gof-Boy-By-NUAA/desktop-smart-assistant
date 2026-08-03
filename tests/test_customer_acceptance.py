@@ -30,10 +30,15 @@ from benchmarks.customer import (
 from benchmarks.customer.__main__ import main as customer_main
 from benchmarks.customer import executor as customer_executor_module
 from benchmarks.customer import package as customer_package_module
-from benchmarks.customer.attestation import execution_attestation_payload
+from benchmarks.customer.attestation import (
+    execution_attestation_payload,
+    release_identity_sha256,
+    release_attestation_payload,
+)
 from benchmarks.customer.contracts import (
     CustomerExecutionError,
     CustomerPackageError,
+    CustomerRelease,
 )
 from benchmarks.customer.json_utils import canonical_json_bytes, sha256_json
 from benchmarks.customer.runner import (
@@ -58,6 +63,73 @@ _TEST_PUBLIC_KEY_HEX = _TEST_PRIVATE_KEY.public_key().public_bytes(
     encoding=serialization.Encoding.Raw,
     format=serialization.PublicFormat.Raw,
 ).hex()
+_RELEASE_PRIVATE_KEY = Ed25519PrivateKey.from_private_bytes(b"\x12" * 32)
+
+
+def _signed_release(
+    release_id: str,
+    commit_fill: str,
+    source_fill: str,
+    artifact_fill: str,
+    sbom_fill: str,
+) -> CustomerRelease:
+    unsigned = CustomerRelease(
+        release_id=release_id,
+        git_commit=commit_fill * 40,
+        source_fingerprint_sha256=source_fill * 64,
+        artifact_sha256=artifact_fill * 64,
+        sbom_sha256=sbom_fill * 64,
+        signer_key_id="fixture-smart-assistant-release",
+        signature="",
+    )
+    return CustomerRelease(
+        **{
+            **unsigned.__dict__,
+            "signature": _RELEASE_PRIVATE_KEY.sign(
+                canonical_json_bytes(release_attestation_payload(unsigned))
+            ).hex(),
+        }
+    )
+
+
+_BASELINE_RELEASE = _signed_release(
+    "smart-assistant-baseline-v1", "a", "b", "c", "d"
+)
+_CANDIDATE_RELEASE = _signed_release(
+    "smart-assistant-candidate-v2", "e", "f", "1", "2"
+)
+_COMPARISON_ENVIRONMENT = {
+    "agent_runtime_sha256": "3" * 64,
+    "container_image_sha256": "4" * 64,
+    "machine_profile_sha256": "5" * 64,
+    "network_policy_sha256": "6" * 64,
+    "os_image_sha256": "7" * 64,
+    "provider_model_revision_sha256": "8" * 64,
+}
+
+
+def _release_manifest(release: CustomerRelease):
+    return {
+        "release_id": release.release_id,
+        "git_commit": release.git_commit,
+        "source_fingerprint_sha256": release.source_fingerprint_sha256,
+        "artifact_sha256": release.artifact_sha256,
+        "sbom_sha256": release.sbom_sha256,
+        "signer_key_id": release.signer_key_id,
+        "signature": release.signature,
+    }
+
+
+def _comparison_manifest():
+    return {
+        "execution_environment": dict(_COMPARISON_ENVIRONMENT),
+        "execution_environment_sha256": sha256_json(
+            {
+                "schema_version": 1,
+                **_COMPARISON_ENVIRONMENT,
+            }
+        ),
+    }
 
 
 class FixtureCustomerExecutor(CustomerCaseExecutor):
@@ -98,6 +170,15 @@ class FixtureCustomerExecutor(CustomerCaseExecutor):
             peak_rss_bytes=peak_rss_bytes,
             input_tokens=10,
             output_tokens=2,
+            comparison_environment_sha256=(
+                request.comparison_environment_sha256
+            ),
+            requested_release_identity_sha256=(
+                request.requested_release_identity_sha256
+            ),
+            observed_release_identity_sha256=(
+                request.requested_release_identity_sha256
+            ),
             executor_artifact_sha256=_EXECUTOR_ARTIFACT_SHA256,
         )
         return CustomerExecutionResult(
@@ -109,6 +190,12 @@ class FixtureCustomerExecutor(CustomerCaseExecutor):
             output_tokens=2,
             execution_snapshot_sha256=snapshot_sha256,
             request_sha256=request_sha256,
+            requested_release_identity_sha256=(
+                request.requested_release_identity_sha256
+            ),
+            observed_release_identity_sha256=(
+                request.requested_release_identity_sha256
+            ),
             executor_artifact_sha256=_EXECUTOR_ARTIFACT_SHA256,
             attestation_signature=_TEST_PRIVATE_KEY.sign(
                 canonical_json_bytes(attestation)
@@ -130,6 +217,12 @@ class MismatchedSnapshotExecutor(FixtureCustomerExecutor):
             output_tokens=result.output_tokens,
             execution_snapshot_sha256="0" * 64,
             request_sha256=result.request_sha256,
+            requested_release_identity_sha256=(
+                result.requested_release_identity_sha256
+            ),
+            observed_release_identity_sha256=(
+                result.observed_release_identity_sha256
+            ),
             executor_artifact_sha256=result.executor_artifact_sha256,
             attestation_signature=result.attestation_signature,
         )
@@ -197,7 +290,7 @@ def _package(tmp_path: Path, record, case_count: int = 30):
     ).encode("utf-8")
     (root / "cases.json").write_bytes(cases_payload)
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "package_id": "customer-package-v1",
         "tenant_id": _TENANT_ID,
         "model": {
@@ -206,6 +299,11 @@ def _package(tmp_path: Path, record, case_count: int = 30):
             "endpoint_sha256": "c" * 64,
             "prompt_sha256": "a" * 64,
             "tools_sha256": "b" * 64,
+        },
+        "comparison": _comparison_manifest(),
+        "releases": {
+            "baseline": _release_manifest(_BASELINE_RELEASE),
+            "candidate": _release_manifest(_CANDIDATE_RELEASE),
         },
         "attestation": {
             "executor": {
@@ -239,6 +337,7 @@ def _package(tmp_path: Path, record, case_count: int = 30):
             "maximum_cpu_time_ratio": 1.0,
             "maximum_peak_rss_ratio": 1.0,
             "maximum_total_tokens": case_count * 30,
+            "minimum_paired_samples": 30,
         },
     }
     manifest_payload = json.dumps(
@@ -269,6 +368,36 @@ def _rehash_events(report):
         event["event_hash"] = _sha(canonical_json_bytes(unsigned))
         previous = event["event_hash"]
     report["event_chain_head"] = previous
+
+
+def _resign_execution_event(report, event):
+    payload = event["payload"]
+    attestation = execution_attestation_payload(
+        run_id=report["run_id"],
+        case_id=payload["case_id"],
+        arm=payload["arm"],
+        request_sha256=payload["request_sha256"],
+        execution_snapshot_sha256=payload["execution_snapshot_sha256"],
+        output_sha256=payload["output_sha256"],
+        latency_ms=payload["latency_ms"],
+        cpu_time_ms=payload["cpu_time_ms"],
+        peak_rss_bytes=payload["peak_rss_bytes"],
+        input_tokens=payload["input_tokens"],
+        output_tokens=payload["output_tokens"],
+        comparison_environment_sha256=_comparison_manifest()[
+            "execution_environment_sha256"
+        ],
+        requested_release_identity_sha256=payload[
+            "requested_release_identity_sha256"
+        ],
+        observed_release_identity_sha256=payload[
+            "observed_release_identity_sha256"
+        ],
+        executor_artifact_sha256=payload["executor_artifact_sha256"],
+    )
+    payload["executor_attestation_signature"] = _TEST_PRIVATE_KEY.sign(
+        canonical_json_bytes(attestation)
+    ).hex()
 
 
 def test_missing_customer_inputs_can_never_be_reported_as_passed():
@@ -322,6 +451,75 @@ def test_customer_package_rejects_infinite_threshold(tmp_path):
             CustomerPackageError, match="maximum_latency_ratio"
         ):
             load_customer_package(root, _sha(payload))
+    finally:
+        repository.close()
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    (
+        "release_id",
+        "git_commit",
+        "source_fingerprint_sha256",
+        "artifact_sha256",
+        "sbom_sha256",
+    ),
+)
+def test_customer_package_rejects_non_distinct_release_identity(
+    tmp_path, field_name
+):
+    repository, _, record = _candidate(tmp_path)
+    try:
+        root, _ = _package(tmp_path, record)
+        manifest_path = root / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["releases"]["candidate"][field_name] = manifest["releases"][
+            "baseline"
+        ][field_name]
+        payload = json.dumps(
+            manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        manifest_path.write_bytes(payload)
+
+        with pytest.raises(
+            CustomerPackageError, match="baseline.*candidate"
+        ):
+            load_customer_package(root, _sha(payload))
+    finally:
+        repository.close()
+
+
+def test_customer_package_rejects_environment_descriptor_hash_mismatch(tmp_path):
+    repository, _, record = _candidate(tmp_path)
+    try:
+        root, _ = _package(tmp_path, record)
+        manifest_path = root / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["comparison"]["execution_environment"]["os_image_sha256"] = (
+            "0" * 64
+        )
+        payload = json.dumps(
+            manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        manifest_path.write_bytes(payload)
+
+        with pytest.raises(
+            CustomerPackageError, match="execution_environment_sha256"
+        ):
+            load_customer_package(root, _sha(payload))
+    finally:
+        repository.close()
+
+
+def test_customer_package_requires_at_least_thirty_paired_samples(tmp_path):
+    repository, _, record = _candidate(tmp_path)
+    try:
+        root, manifest_sha256 = _package(tmp_path, record, case_count=29)
+
+        with pytest.raises(
+            CustomerPackageError, match="minimum_paired_samples"
+        ):
+            load_customer_package(root, manifest_sha256)
     finally:
         repository.close()
 
@@ -659,6 +857,110 @@ def test_executor_environment_snapshot_mismatch_is_rejected(tmp_path):
         repository.close()
 
 
+def test_executor_observed_release_mismatch_is_rejected_even_if_signed(tmp_path):
+    repository, _, record = _candidate(tmp_path)
+    try:
+        root, manifest_sha256 = _package(tmp_path, record)
+        package = load_customer_package(root, manifest_sha256)
+
+        class WrongReleaseExecutor(FixtureCustomerExecutor):
+            def execute(self, request):
+                result = super().execute(request)
+                observed = "0" * 64
+                attestation = execution_attestation_payload(
+                    run_id=request.run_id,
+                    case_id=request.case_id,
+                    arm=request.arm,
+                    request_sha256=result.request_sha256,
+                    execution_snapshot_sha256=(
+                        result.execution_snapshot_sha256
+                    ),
+                    output_sha256=sha256_json(result.output),
+                    latency_ms=result.latency_ms,
+                    cpu_time_ms=result.cpu_time_ms,
+                    peak_rss_bytes=result.peak_rss_bytes,
+                    input_tokens=result.input_tokens,
+                    output_tokens=result.output_tokens,
+                    comparison_environment_sha256=(
+                        request.comparison_environment_sha256
+                    ),
+                    requested_release_identity_sha256=(
+                        result.requested_release_identity_sha256
+                    ),
+                    observed_release_identity_sha256=observed,
+                    executor_artifact_sha256=result.executor_artifact_sha256,
+                )
+                return CustomerExecutionResult(
+                    output=result.output,
+                    latency_ms=result.latency_ms,
+                    cpu_time_ms=result.cpu_time_ms,
+                    peak_rss_bytes=result.peak_rss_bytes,
+                    input_tokens=result.input_tokens,
+                    output_tokens=result.output_tokens,
+                    execution_snapshot_sha256=result.execution_snapshot_sha256,
+                    request_sha256=result.request_sha256,
+                    requested_release_identity_sha256=(
+                        result.requested_release_identity_sha256
+                    ),
+                    observed_release_identity_sha256=observed,
+                    executor_artifact_sha256=result.executor_artifact_sha256,
+                    attestation_signature=_TEST_PRIVATE_KEY.sign(
+                        canonical_json_bytes(attestation)
+                    ).hex(),
+                )
+
+        with pytest.raises(CustomerPackageError, match="release"):
+            ControlledCustomerAcceptanceRunner(
+                repository, _TENANT_ID, WrongReleaseExecutor()
+            ).run(
+                package,
+                skill_id=record.skill_id,
+                skill_version=record.version,
+                expected_skill_content_sha256=record.content_hash,
+            )
+    finally:
+        repository.close()
+
+
+def test_verifier_rejects_resigned_candidate_receipt_for_baseline_release(
+    tmp_path,
+):
+    repository, _, record = _candidate(tmp_path)
+    try:
+        root, manifest_sha256 = _package(tmp_path, record)
+        package = load_customer_package(root, manifest_sha256)
+        report = ControlledCustomerAcceptanceRunner(
+            repository, _TENANT_ID, FixtureCustomerExecutor()
+        ).run(
+            package,
+            skill_id=record.skill_id,
+            skill_version=record.version,
+            expected_skill_content_sha256=record.content_hash,
+        )
+        forged = copy.deepcopy(report)
+        candidate = next(
+            event
+            for event in forged["events"]
+            if event["event_type"] == "case.executed"
+            and event["payload"]["arm"] == "candidate"
+        )
+        baseline_identity = release_identity_sha256(_BASELINE_RELEASE)
+        candidate["payload"]["requested_release_identity_sha256"] = (
+            baseline_identity
+        )
+        candidate["payload"]["observed_release_identity_sha256"] = (
+            baseline_identity
+        )
+        _resign_execution_event(forged, candidate)
+        _rehash_events(forged)
+
+        failures = verify_customer_report(forged, package)
+
+        assert any("candidate release" in failure for failure in failures)
+    finally:
+        repository.close()
+
+
 def test_subprocess_executor_uses_strict_protocol_and_isolated_workspace(tmp_path):
     fixture = Path(__file__).parent / "fixtures" / "customer_executor_adapter.py"
     executor = SubprocessCustomerCaseExecutor(
@@ -677,6 +979,8 @@ def test_subprocess_executor_uses_strict_protocol_and_isolated_workspace(tmp_pat
         endpoint_sha256="c" * 64,
         prompt_sha256="a" * 64,
         tools_sha256="b" * 64,
+        comparison_environment_sha256="9" * 64,
+        requested_release_identity_sha256="8" * 64,
         case_input={"candidate_output": {"answer": "expected"}},
         skill={"skill_id": "skill-1"},
     )

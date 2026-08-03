@@ -30,6 +30,7 @@ class CustomerThresholds:
     maximum_cpu_time_ratio: float
     maximum_peak_rss_ratio: float
     maximum_total_tokens: int
+    minimum_paired_samples: int
 
 
 @dataclass(frozen=True)
@@ -44,6 +45,19 @@ class CustomerCase:
 
 
 @dataclass(frozen=True)
+class CustomerRelease:
+    """An externally identified baseline or candidate product release."""
+
+    release_id: str
+    git_commit: str
+    source_fingerprint_sha256: str
+    artifact_sha256: str
+    sbom_sha256: str
+    signer_key_id: str
+    signature: str
+
+
+@dataclass(frozen=True)
 class CustomerPackage:
     """经过严格解析和内容寻址的客户验收包。"""
 
@@ -55,6 +69,9 @@ class CustomerPackage:
     endpoint_sha256: str
     prompt_sha256: str
     tools_sha256: str
+    comparison_environment_sha256: str
+    baseline_release: CustomerRelease
+    candidate_release: CustomerRelease
     executor_id: str
     executor_version: str
     executor_artifact_sha256: str
@@ -89,6 +106,8 @@ class CustomerExecutionRequest:
     endpoint_sha256: str
     prompt_sha256: str
     tools_sha256: str
+    comparison_environment_sha256: str
+    requested_release_identity_sha256: str
     case_input: Any
     skill: Dict[str, Any] | None
 
@@ -105,6 +124,8 @@ class CustomerExecutionResult:
     output_tokens: int
     execution_snapshot_sha256: str
     request_sha256: str
+    requested_release_identity_sha256: str
+    observed_release_identity_sha256: str
     executor_artifact_sha256: str
     attestation_signature: str
 
