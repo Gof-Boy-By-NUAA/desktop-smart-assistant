@@ -268,6 +268,7 @@ def _parse_cases(payload: bytes) -> Tuple[CustomerCase, ...]:
         raise CustomerPackageError("客户场景数量超过上限")
     cases = []
     seen = set()
+    seen_task_inputs = set()
     for index, raw_case in enumerate(raw_cases, start=1):
         _require_keys(
             raw_case, {"case_id", "input", "oracle", "critical"},
@@ -278,7 +279,11 @@ def _parse_cases(payload: bytes) -> Tuple[CustomerCase, ...]:
             raise CustomerPackageError("客户场景 case_id 重复: %s" % case_id)
         if not isinstance(raw_case["critical"], bool):
             raise CustomerPackageError("critical 必须是布尔值")
+        task_input_sha256 = sha256_json(raw_case["input"])
+        if task_input_sha256 in seen_task_inputs:
+            raise CustomerPackageError("客户场景包含重复任务输入")
         seen.add(case_id)
+        seen_task_inputs.add(task_input_sha256)
         cases.append(
             CustomerCase(
                 case_id=case_id,

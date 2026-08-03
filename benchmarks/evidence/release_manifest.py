@@ -388,6 +388,39 @@ def _apply_report_freshness(
             record["status"] = "STALE_SOURCE_REPORT"
 
 
+def _customer_acceptance_diagnostic(
+    root: Path,
+    *,
+    expected_source_fingerprint: str,
+    git: dict[str, Any],
+) -> dict[str, Any]:
+    """Preserve local crypto checks as diagnostics, never as release authority.
+
+    Environment-selected keys and evidence files share the local checkout's
+    trust domain.  They can help diagnose a package, but cannot establish the
+    protected CI/registry/customer evidence required to lift customer or Skills
+    production hard denials.
+    """
+
+    from benchmarks.evidence.customer_acceptance_case import (
+        verify_configured_customer_acceptance_evidence,
+    )
+
+    diagnostic = verify_configured_customer_acceptance_evidence(
+        root,
+        expected_source_fingerprint=expected_source_fingerprint,
+        expected_git_commit=str(git["commit"]),
+    )
+    return {
+        **diagnostic,
+        "local_diagnostic_passed": bool(diagnostic.get("passed") is True),
+        "release_checkout_bound": bool(git["commit_bound"]),
+        "external_protected_evidence": False,
+        "release_passed": False,
+        "release_status": "EXTERNAL_PROTECTED_EVIDENCE_ABSENT",
+    }
+
+
 def generate_manifest(
     root: Path | None = None,
     *,
@@ -431,36 +464,18 @@ def generate_manifest(
         "release_checkout_bound": bool(git["commit_bound"]),
         "release_passed": bool(fde_case["passed"] and git["commit_bound"]),
     }
-    from benchmarks.evidence.customer_acceptance_case import (
-        verify_configured_customer_acceptance_evidence,
+    customer_acceptance_case = _customer_acceptance_diagnostic(
+        root,
+        expected_source_fingerprint=current_source_fingerprint,
+        git=git,
     )
-
-    customer_acceptance_case = (
-        verify_configured_customer_acceptance_evidence(
-            root,
-            expected_source_fingerprint=current_source_fingerprint,
-            expected_git_commit=str(git["commit"]),
-        )
-    )
-    # The raw report is a diagnostic artifact inside the checkout.  It cannot
-    # lift a release/customer gate unless an external customer signature also
-    # binds its exact bytes, package, source tree, and commit.
-    customer_acceptance_case = {
-        **customer_acceptance_case,
-        "release_checkout_bound": bool(git["commit_bound"]),
-        "release_passed": bool(
-            customer_acceptance_case["passed"] and git["commit_bound"]
-        ),
-    }
-    customer_accepted = customer_acceptance_case["release_passed"]
+    customer_accepted = False
 
     hard_denials = {
         "FDE_CASE_EVIDENCE": "YES" if fde_case["release_passed"] else "ABSENT",
         "TARGET_CUSTOMER_ACCEPTANCE": "YES" if customer_accepted else "NO",
         "CUSTOMER_ATTESTATION": "YES" if customer_accepted else "ABSENT",
-        "CUSTOMER_TEST_EXECUTION": (
-            "YES" if customer_acceptance_case["release_passed"] else "NOT_RUN"
-        ),
+        "CUSTOMER_TEST_EXECUTION": "NOT_RUN",
         # The legacy GitHub-title selector report is silver-label local
         # diagnostics, not customer gold data.  Only a verified external
         # customer package/report can establish the skills production gate.
@@ -668,24 +683,11 @@ def verify_manifest(manifest: dict[str, Any], root: Path | None = None) -> dict[
         current_fde_case,
         manifest.get("fde_case") == current_fde_case,
     )
-    from benchmarks.evidence.customer_acceptance_case import (
-        verify_configured_customer_acceptance_evidence,
+    current_customer_acceptance_case = _customer_acceptance_diagnostic(
+        root,
+        expected_source_fingerprint=current_source_fingerprint,
+        git=current_git,
     )
-    current_customer_acceptance_case = (
-        verify_configured_customer_acceptance_evidence(
-            root,
-            expected_source_fingerprint=current_source_fingerprint,
-            expected_git_commit=str(current_git["commit"]),
-        )
-    )
-    current_customer_acceptance_case = {
-        **current_customer_acceptance_case,
-        "release_checkout_bound": bool(current_git["commit_bound"]),
-        "release_passed": bool(
-            current_customer_acceptance_case["passed"]
-            and current_git["commit_bound"]
-        ),
-    }
     check(
         "customer_acceptance_case",
         manifest.get("customer_acceptance_case"),

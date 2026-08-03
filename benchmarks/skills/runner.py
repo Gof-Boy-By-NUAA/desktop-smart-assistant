@@ -5,11 +5,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import platform
 import sys
 import tempfile
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Sequence, Tuple
 
@@ -66,6 +67,8 @@ _SILVER_LIMITATIONS = {
     "customer_tasks_included": False,
     "customer_success_rate_measured": False,
 }
+_BASELINE_ARM_DESCRIPTION = "frozen full-catalog metadata selection"
+_CONTROLLED_ARM_DESCRIPTION = "governed verified Top-K selection"
 
 
 class _CatalogPublicationExecutor(PairedCaseExecutor):
@@ -120,24 +123,7 @@ def run_skill_selection_benchmark(
         # it can never establish a Skills production or gold-data gate.
         "status": _COMPLETED_SILVER_STATUS,
         "passed": False,
-        "dataset": {
-            "id": dataset.dataset_id,
-            "sha256": dataset.sha256,
-            "design_split_sha256": dataset.design_split_sha256,
-            "evaluation_split_sha256": dataset.evaluation_split_sha256,
-            "snapshot_generated_at": dataset.snapshot_generated_at,
-            "label_tier": dataset.label_tier,
-            "normalization": dataset.normalization,
-            "design_case_count": len(dataset.design_cases),
-            "evaluation_case_count": len(dataset.evaluation_cases),
-            "negative_case_count": sum(
-                int(not case.expected_skill_names)
-                for case in dataset.evaluation_cases
-            ),
-            "source": dataset.source,
-            "frozen_labels_recomputed": True,
-            "provenance_complete": dataset.provenance_complete,
-        },
+        "dataset": _dataset_metadata(dataset),
         "implementation_sha256": implementation_sha256,
         "implementation_files": list(_IMPLEMENTATION_PATHS),
         "environment": {
@@ -146,11 +132,11 @@ def run_skill_selection_benchmark(
         },
         "arms": {
             "all_skills_metadata": {
-                "description": "每个样本注入冻结目录的全部技能元数据",
+                "description": _BASELINE_ARM_DESCRIPTION,
                 "metrics": baseline_metrics,
             },
             "controlled_top_k": {
-                "description": "产品检索、治理事实复核和投影字节复核后的 Top-K",
+                "description": _CONTROLLED_ARM_DESCRIPTION,
                 "top_k": top_k,
                 "production_candidate_verification": True,
                 "metrics": top_k_metrics,
@@ -164,6 +150,26 @@ def run_skill_selection_benchmark(
                 "银标不代表人工金标、真实任务完成率或客户成功率。"
             ),
         },
+    }
+
+
+def _dataset_metadata(dataset: SkillSelectionDataset) -> Dict[str, object]:
+    return {
+        "id": dataset.dataset_id,
+        "sha256": dataset.sha256,
+        "design_split_sha256": dataset.design_split_sha256,
+        "evaluation_split_sha256": dataset.evaluation_split_sha256,
+        "snapshot_generated_at": dataset.snapshot_generated_at,
+        "label_tier": dataset.label_tier,
+        "normalization": dataset.normalization,
+        "design_case_count": len(dataset.design_cases),
+        "evaluation_case_count": len(dataset.evaluation_cases),
+        "negative_case_count": sum(
+            int(not case.expected_skill_names) for case in dataset.evaluation_cases
+        ),
+        "source": dataset.source,
+        "frozen_labels_recomputed": True,
+        "provenance_complete": dataset.provenance_complete,
     }
 
 
@@ -368,7 +374,10 @@ def _evaluate_arms(
                 "html_url": case.html_url,
                 "expected_skill_names": list(case.expected_skill_names),
                 "all_skills_metadata": list(baseline_names),
+                "all_skills_metadata_prompt": baseline_prompt,
+                "all_skills_metadata_latency_ms": baseline_latency_ms,
                 "controlled_top_k": list(selected_names),
+                "controlled_top_k_prompt": selected_prompt,
                 "injection_status": injection_status,
                 "controlled_top_k_latency_ms": selection_latency_ms,
             }
@@ -498,7 +507,12 @@ def _blocked_dataset_report(
     }
 
 
-def verify_skill_selection_report(report: object) -> dict[str, object]:
+def verify_skill_selection_report(
+    report: object,
+    *,
+    dataset_path: Path = DEFAULT_DATASET_PATH,
+    expected_dataset_sha256: str = EXPECTED_DATASET_SHA256,
+) -> dict[str, object]:
     """Validate the untrusted local Skills report against its fixed contract.
 
     The GitHub-title snapshot is explicitly a pinned silver-label fixture.  A
@@ -542,10 +556,19 @@ def verify_skill_selection_report(report: object) -> dict[str, object]:
         set(report) == expected_fields,
         "report fields do not match the strict status schema",
     )
-    require(
-        isinstance(report.get("generated_at"), str) and bool(report["generated_at"]),
-        "generated_at must be a non-empty string",
-    )
+    generated_at = report.get("generated_at")
+    try:
+        generated_time = datetime.fromisoformat(str(generated_at).replace("Z", "+00:00"))
+        if generated_time.tzinfo is None:
+            raise ValueError("timezone is required")
+        generated_time = generated_time.astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        errors.append("generated_at must be an ISO-8601 timestamp with timezone")
+    else:
+        require(
+            generated_time <= datetime.now(timezone.utc) + timedelta(minutes=5),
+            "generated_at is implausibly in the future",
+        )
     require(report.get("passed") is False, "local silver report must have passed=false")
     require(
         report.get("implementation_sha256") == implementation_fingerprint(),
@@ -595,11 +618,11 @@ def verify_skill_selection_report(report: object) -> dict[str, object]:
         )
         require(report.get("metrics") is None, "blocked report metrics must be null")
         require(
-            dataset.get("expected_sha256") == EXPECTED_DATASET_SHA256,
+            dataset.get("expected_sha256") == expected_dataset_sha256,
             "blocked report expected_sha256 does not match fixed dataset pin",
         )
         require(
-            dataset.get("actual_sha256") == EXPECTED_DATASET_SHA256,
+            dataset.get("actual_sha256") == expected_dataset_sha256,
             "blocked report actual_sha256 does not match fixed dataset pin",
         )
         require(
@@ -615,37 +638,237 @@ def verify_skill_selection_report(report: object) -> dict[str, object]:
             )
             require(isinstance(error.get("message"), str), "blocked report error.message is invalid")
     elif status == _COMPLETED_SILVER_STATUS:
-        require(
-            set(dataset)
-            == {
-                "id",
-                "sha256",
-                "design_split_sha256",
-                "evaluation_split_sha256",
-                "snapshot_generated_at",
-                "label_tier",
-                "normalization",
-                "design_case_count",
-                "evaluation_case_count",
-                "negative_case_count",
-                "source",
-                "frozen_labels_recomputed",
-                "provenance_complete",
-            },
-            "completed dataset fields do not match the strict schema",
+        errors.extend(
+            _completed_report_errors(
+                report,
+                dataset_path=dataset_path,
+                expected_dataset_sha256=expected_dataset_sha256,
+            )
         )
-        require(
-            dataset.get("sha256") == EXPECTED_DATASET_SHA256,
-            "completed report dataset.sha256 does not match fixed dataset pin",
-        )
-        require(
-            dataset.get("provenance_complete") is True,
-            "completed report provenance_complete must be true",
-        )
-        require(isinstance(report.get("arms"), dict), "completed report arms must be an object")
-        require(isinstance(report.get("cases"), list), "completed report cases must be an array")
 
     return {"valid": not errors, "errors": errors}
+
+
+def _completed_report_errors(
+    report: dict[str, object],
+    *,
+    dataset_path: Path,
+    expected_dataset_sha256: str,
+) -> list[str]:
+    """Recompute every serialised case and arm from the immutable dataset."""
+
+    try:
+        dataset = load_skill_selection_dataset(
+            dataset_path, expected_dataset_sha256
+        )
+    except SkillSelectionDatasetError as exc:
+        return ["fixed dataset could not be verified: %s" % exc]
+
+    errors: list[str] = []
+    dataset_record = report.get("dataset")
+    if not isinstance(dataset_record, dict) or not _json_equivalent(
+        dataset_record, _dataset_metadata(dataset)
+    ):
+        errors.append("completed report dataset metadata does not match fixed dataset")
+
+    environment = report.get("environment")
+    if not isinstance(environment, dict) or set(environment) != {"python", "platform"}:
+        errors.append("completed report environment schema is invalid")
+    elif not all(isinstance(value, str) and value for value in environment.values()):
+        errors.append("completed report environment values are invalid")
+
+    arms = report.get("arms")
+    if not isinstance(arms, dict) or set(arms) != {
+        "all_skills_metadata",
+        "controlled_top_k",
+    }:
+        return errors + ["completed report arms schema is invalid"]
+    baseline = arms["all_skills_metadata"]
+    controlled = arms["controlled_top_k"]
+    if not isinstance(baseline, dict) or set(baseline) != {"description", "metrics"}:
+        errors.append("baseline arm schema is invalid")
+    elif baseline.get("description") != _BASELINE_ARM_DESCRIPTION:
+        errors.append("baseline arm description is invalid")
+    if not isinstance(controlled, dict) or set(controlled) != {
+        "description",
+        "top_k",
+        "production_candidate_verification",
+        "metrics",
+    }:
+        errors.append("controlled arm schema is invalid")
+        top_k = None
+    else:
+        top_k = controlled.get("top_k")
+        if controlled.get("description") != _CONTROLLED_ARM_DESCRIPTION:
+            errors.append("controlled arm description is invalid")
+        if not isinstance(top_k, int) or isinstance(top_k, bool) or top_k <= 0:
+            errors.append("controlled arm top_k is invalid")
+        if controlled.get("production_candidate_verification") is not True:
+            errors.append("controlled arm verification flag is invalid")
+
+    rows = report.get("cases")
+    if not isinstance(rows, list) or not rows:
+        return errors + ["completed report cases must be a non-empty array"]
+    expected_cases = {case.number: case for case in dataset.evaluation_cases}
+    if len(rows) != len(expected_cases):
+        errors.append("completed report case count does not match fixed dataset")
+    seen_numbers: set[int] = set()
+    baseline_observations: list[SelectionObservation] = []
+    controlled_observations: list[SelectionObservation] = []
+    expected_catalog = tuple(sorted(dataset.skill_names))
+    known_skills = set(dataset.skill_names)
+    required_case_fields = {
+        "number",
+        "html_url",
+        "expected_skill_names",
+        "all_skills_metadata",
+        "all_skills_metadata_prompt",
+        "all_skills_metadata_latency_ms",
+        "controlled_top_k",
+        "controlled_top_k_prompt",
+        "injection_status",
+        "controlled_top_k_latency_ms",
+    }
+    for index, row in enumerate(rows, start=1):
+        if not isinstance(row, dict) or set(row) != required_case_fields:
+            errors.append("case %d schema is invalid" % index)
+            continue
+        number = row.get("number")
+        if not isinstance(number, int) or isinstance(number, bool):
+            errors.append("case %d number is invalid" % index)
+            continue
+        if number in seen_numbers:
+            errors.append("case %d is duplicated" % number)
+            continue
+        seen_numbers.add(number)
+        fixed_case = expected_cases.get(number)
+        if fixed_case is None:
+            errors.append("case %d is absent from fixed dataset" % number)
+            continue
+        if row.get("html_url") != fixed_case.html_url:
+            errors.append("case %d html_url does not match fixed dataset" % number)
+        if row.get("expected_skill_names") != list(fixed_case.expected_skill_names):
+            errors.append("case %d labels do not match fixed dataset" % number)
+
+        baseline_names = _reported_skill_names(
+            row.get("all_skills_metadata"), "case %d baseline" % number, errors
+        )
+        controlled_names = _reported_skill_names(
+            row.get("controlled_top_k"), "case %d controlled" % number, errors
+        )
+        if baseline_names is None or controlled_names is None:
+            continue
+        if tuple(baseline_names) != expected_catalog:
+            errors.append("case %d baseline catalog does not match fixed dataset" % number)
+        if not set(controlled_names).issubset(known_skills):
+            errors.append("case %d controlled selection has an unknown skill" % number)
+        if tuple(controlled_names) != fixed_case.expected_skill_names:
+            errors.append("case %d controlled selection does not match fixed dataset" % number)
+        if isinstance(top_k, int) and len(controlled_names) > top_k:
+            errors.append("case %d controlled selection exceeds top_k" % number)
+        injection_status = row.get("injection_status")
+        if injection_status not in {"injected", "no_eligible_candidate", "no_match"}:
+            errors.append("case %d injection_status is invalid" % number)
+        elif (injection_status == "injected") != bool(controlled_names):
+            errors.append("case %d injection_status contradicts selection" % number)
+        elif not controlled_names and injection_status != "no_match":
+            errors.append("case %d injection_status must be no_match" % number)
+
+        baseline_prompt = row.get("all_skills_metadata_prompt")
+        controlled_prompt = row.get("controlled_top_k_prompt")
+        baseline_latency = row.get("all_skills_metadata_latency_ms")
+        controlled_latency = row.get("controlled_top_k_latency_ms")
+        if not isinstance(baseline_prompt, str) or not isinstance(controlled_prompt, str):
+            errors.append("case %d prompt evidence is invalid" % number)
+            continue
+        if not _finite_nonnegative(baseline_latency) or not _finite_nonnegative(controlled_latency):
+            errors.append("case %d latency evidence is invalid" % number)
+            continue
+        baseline_observations.append(
+            SelectionObservation(
+                fixed_case, tuple(baseline_names), baseline_prompt, float(baseline_latency)
+            )
+        )
+        controlled_observations.append(
+            SelectionObservation(
+                fixed_case, tuple(controlled_names), controlled_prompt, float(controlled_latency)
+            )
+        )
+
+    if seen_numbers != set(expected_cases):
+        errors.append("completed report cases do not cover the fixed dataset exactly")
+    if len(baseline_observations) != len(expected_cases) or len(controlled_observations) != len(expected_cases):
+        return errors
+    try:
+        recomputed_baseline = calculate_selection_metrics(baseline_observations)
+        recomputed_controlled = calculate_selection_metrics(controlled_observations)
+    except (TypeError, ValueError) as exc:
+        return errors + ["completed report metrics cannot be recomputed: %s" % exc]
+    if not isinstance(baseline, dict) or not _json_equivalent(
+        baseline.get("metrics"), recomputed_baseline
+    ):
+        errors.append("baseline arm metrics do not match case evidence")
+    if not isinstance(controlled, dict) or not _json_equivalent(
+        controlled.get("metrics"), recomputed_controlled
+    ):
+        errors.append("controlled arm metrics do not match case evidence")
+    if errors or not isinstance(top_k, int):
+        return errors
+    try:
+        executed = run_skill_selection_benchmark(dataset, top_k=top_k)
+    except (OSError, RuntimeError, ValueError) as exc:
+        return [*errors, "local selection chain could not be replayed: %s" % exc]
+    executed_rows = {
+        row["number"]: row for row in executed["cases"] if isinstance(row, dict)
+    }
+    for row in rows:
+        number = row["number"]
+        expected_row = executed_rows.get(number)
+        if expected_row is None:
+            errors.append("case %d is absent from local selection replay" % number)
+            continue
+        for field in (
+            "expected_skill_names",
+            "all_skills_metadata",
+            "controlled_top_k",
+            "injection_status",
+        ):
+            if row[field] != expected_row[field]:
+                errors.append(
+                    "case %d %s does not match local selection replay"
+                    % (number, field)
+                )
+    return errors
+
+
+def _reported_skill_names(
+    value: object, context: str, errors: list[str]
+) -> list[str] | None:
+    if not isinstance(value, list) or not all(isinstance(name, str) for name in value):
+        errors.append("%s selection must be an array of strings" % context)
+        return None
+    if value != sorted(set(value)):
+        errors.append("%s selection must be sorted and unique" % context)
+        return None
+    return value
+
+
+def _finite_nonnegative(value: object) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value >= 0
+    )
+
+
+def _json_equivalent(left: object, right: object) -> bool:
+    try:
+        return json.dumps(left, ensure_ascii=False, sort_keys=True, separators=(",", ":")) == json.dumps(
+            right, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+    except (TypeError, ValueError):
+        return False
 
 
 if __name__ == "__main__":

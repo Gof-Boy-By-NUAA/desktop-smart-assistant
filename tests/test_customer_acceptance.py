@@ -278,8 +278,10 @@ def _package(tmp_path: Path, record, case_count: int = 30):
         "cases": [
             {
                 "case_id": "case-%03d" % index,
-                "input": {"candidate_output": {"answer": "expected"}},
-                "oracle": {"answer": "expected"},
+                "input": {
+                    "candidate_output": {"answer": "expected-%03d" % index},
+                },
+                "oracle": {"answer": "expected-%03d" % index},
                 "critical": index <= 5,
             }
             for index in range(1, case_count + 1)
@@ -455,6 +457,32 @@ def test_customer_package_rejects_infinite_threshold(tmp_path):
         repository.close()
 
 
+def test_customer_package_rejects_cloned_case_inputs(tmp_path):
+    repository, _, record = _candidate(tmp_path)
+    try:
+        root, _ = _package(tmp_path, record)
+        manifest_path = root / "manifest.json"
+        cases_path = root / "cases.json"
+        cases = json.loads(cases_path.read_text(encoding="utf-8"))
+        cases["cases"][1]["input"] = copy.deepcopy(cases["cases"][0]["input"])
+        cases["cases"][1]["oracle"] = copy.deepcopy(cases["cases"][0]["oracle"])
+        cases_payload = json.dumps(
+            cases, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        cases_path.write_bytes(cases_payload)
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["cases"]["sha256"] = _sha(cases_payload)
+        manifest_payload = json.dumps(
+            manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        manifest_path.write_bytes(manifest_payload)
+
+        with pytest.raises(CustomerPackageError, match="重复任务输入"):
+            load_customer_package(root, _sha(manifest_payload))
+    finally:
+        repository.close()
+
+
 @pytest.mark.parametrize(
     "field_name",
     (
@@ -626,9 +654,12 @@ def test_independent_verifier_recomputes_deterministic_oracle(tmp_path):
             if event["event_type"] == "case.executed"
             and event["payload"]["arm"] == "baseline"
         )
-        baseline["payload"]["output_sha256"] = sha256_json(
-            {"answer": "expected"}
+        expected_case = next(
+            case
+            for case in package.cases
+            if case.case_id == baseline["payload"]["case_id"]
         )
+        baseline["payload"]["output_sha256"] = sha256_json(expected_case.oracle)
         _rehash_events(tampered)
 
         failures = verify_customer_report(tampered, package)

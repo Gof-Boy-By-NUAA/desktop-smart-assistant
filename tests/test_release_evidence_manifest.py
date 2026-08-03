@@ -5,6 +5,8 @@ import json
 import subprocess
 from pathlib import Path
 
+from benchmarks.evidence import customer_acceptance_case as customer_case_module
+from benchmarks.evidence import release_manifest as release_manifest_module
 from benchmarks.evidence.release_manifest import (
     _git_state,
     _is_git_tracked_path,
@@ -94,6 +96,37 @@ def test_release_manifest_is_explicitly_fail_closed_on_missing_external_gates():
         manifest["reports"]["skills_selection"]["status"]
         == "INVALID_REPORT_CONTRACT"
     )
+
+
+def test_local_customer_crypto_diagnostic_cannot_lift_customer_or_skills_gates(
+    monkeypatch,
+):
+    simulated_git = {
+        **_git_state(ROOT),
+        "clean": True,
+        "commit_bound": True,
+    }
+    monkeypatch.setattr(
+        release_manifest_module, "_git_state", lambda root: simulated_git
+    )
+    monkeypatch.setattr(
+        customer_case_module,
+        "verify_configured_customer_acceptance_evidence",
+        lambda *args, **kwargs: {"passed": True, "status": "LOCAL_CRYPTO_VALID"},
+    )
+
+    manifest = release_manifest_module.generate_manifest(ROOT)
+    diagnostic = manifest["customer_acceptance_case"]
+    assert diagnostic["local_diagnostic_passed"] is True
+    assert diagnostic["external_protected_evidence"] is False
+    assert diagnostic["release_passed"] is False
+    assert manifest["hard_denials"]["TARGET_CUSTOMER_ACCEPTANCE"] == "NO"
+    assert manifest["hard_denials"]["CUSTOMER_ATTESTATION"] == "ABSENT"
+    assert manifest["hard_denials"]["CUSTOMER_TEST_EXECUTION"] == "NOT_RUN"
+    assert manifest["hard_denials"]["SKILLS_GOLD_DATASET_VALID"] == "NO"
+    assert manifest["hard_denials"]["SKILLS_PRODUCTION_GATE_ELIGIBLE"] == "NO"
+    assert manifest["required_conditions"]["customer_acceptance"] is False
+    assert manifest["required_conditions"]["skills_formal_gate"] is False
 
 
 def test_release_manifest_verifier_accepts_currently_generated_manifest():

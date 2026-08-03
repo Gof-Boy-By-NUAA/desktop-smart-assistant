@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 from pathlib import Path
@@ -449,6 +450,42 @@ def test_strict_local_report_contract_rejects_forged_release_claims():
         forged = json.loads(json.dumps(report))
         mutate(forged)
         result = verify_skill_selection_report(forged)
+        assert result["valid"] is False
+
+
+def test_completed_report_recomputes_fixed_cases_arms_and_metrics(tmp_path):
+    document = _strict_document(tmp_path)
+    path = tmp_path / "fixed-valid-dataset.json"
+    dataset_sha256 = _write_json(path, document)
+    dataset = load_skill_selection_dataset(path, dataset_sha256)
+    report = run_skill_selection_benchmark(dataset, top_k=2)
+
+    verified = verify_skill_selection_report(
+        report,
+        dataset_path=path,
+        expected_dataset_sha256=dataset_sha256,
+    )
+    assert verified["valid"] is True, verified["errors"]
+
+    mutations = (
+        lambda value: value["cases"].clear(),
+        lambda value: value["cases"].append(copy.deepcopy(value["cases"][0])),
+        lambda value: value["arms"]["all_skills_metadata"]["metrics"].__setitem__(
+            "case_count", 0
+        ),
+        lambda value: value["cases"][0].__setitem__("controlled_top_k", []),
+        lambda value: value["dataset"].__setitem__("evaluation_case_count", 2),
+        lambda value: value.__setitem__("generated_at", "2099-01-01T00:00:00+00:00"),
+        lambda value: value.__setitem__("status", "completed_gold_production"),
+    )
+    for mutate in mutations:
+        forged = copy.deepcopy(report)
+        mutate(forged)
+        result = verify_skill_selection_report(
+            forged,
+            dataset_path=path,
+            expected_dataset_sha256=dataset_sha256,
+        )
         assert result["valid"] is False
 
 

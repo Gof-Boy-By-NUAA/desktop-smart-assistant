@@ -32,7 +32,8 @@ from benchmarks.customer.verify import verify_customer_report
 from common.path_safety import has_link_or_reparse_component
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+TRUST_ROOT_SCHEMA_VERSION = 2
 EVIDENCE_ENV = "SMART_ASSISTANT_CUSTOMER_ACCEPTANCE_EVIDENCE_PATH"
 TRUST_ROOT_ENV = "SMART_ASSISTANT_CUSTOMER_ACCEPTANCE_TRUST_ROOT_PATH"
 TRUST_ROOT_SHA256_ENV = "SMART_ASSISTANT_CUSTOMER_ACCEPTANCE_TRUST_ROOT_SHA256"
@@ -56,6 +57,8 @@ _EVIDENCE_KEYS = {
     "environment_sha256",
     "customer_package_sha256",
     "customer_report_sha256",
+    "customer_report_run_id",
+    "customer_report_event_chain_head",
     "executed_at",
     "attestation",
 }
@@ -161,7 +164,7 @@ def _external_directory(
 def _trust_keys(payload: dict[str, Any]) -> dict[str, dict[str, str]]:
     if set(payload) != _TRUST_ROOT_KEYS:
         raise ValueError("customer trust root fields are invalid")
-    if payload.get("schema_version") != SCHEMA_VERSION:
+    if payload.get("schema_version") != TRUST_ROOT_SCHEMA_VERSION:
         raise ValueError("customer trust root schema version is invalid")
     if payload.get("kind") != "smart-assistant-customer-acceptance-trust-root":
         raise ValueError("customer trust root kind is invalid")
@@ -283,6 +286,13 @@ def verify_customer_acceptance_evidence(
         execution_id = _clean_identifier(
             evidence.get("execution_id"), "execution id"
         )
+        report_run_id = _clean_identifier(
+            evidence.get("customer_report_run_id"), "customer report run id"
+        )
+        report_event_chain_head = _clean_sha256(
+            evidence.get("customer_report_event_chain_head"),
+            "customer report event-chain head",
+        )
         git_commit = evidence.get("git_commit")
         if not isinstance(git_commit, str) or not _COMMIT.fullmatch(git_commit):
             raise ValueError("customer acceptance Git commit is invalid")
@@ -372,6 +382,18 @@ def verify_customer_acceptance_evidence(
             raise ValueError("customer acceptance report hash is not signed")
         if report.get("status") != "completed" or report.get("passed") is not True:
             raise ValueError("customer acceptance report did not pass")
+        if report.get("run_id") != report_run_id:
+            raise ValueError(
+                "customer acceptance evidence execution does not match report run"
+            )
+        if execution_id != report_run_id:
+            raise ValueError(
+                "customer acceptance execution id does not match report run"
+            )
+        if report.get("event_chain_head") != report_event_chain_head:
+            raise ValueError(
+                "customer acceptance evidence does not match report event chain"
+            )
         failures = verify_customer_report(report, package)
         if failures:
             raise ValueError("customer acceptance report verification failed: %s" % failures[0])

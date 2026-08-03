@@ -104,7 +104,12 @@ def _write_external_inputs(
     report_path = tmp_path / "customer-report.json"
     report_path.write_text(
         json.dumps(
-            {"status": "completed", "passed": True},
+            {
+                "status": "completed",
+                "passed": True,
+                "run_id": "customer-skills-run-001",
+                "event_chain_head": "d" * 64,
+            },
             sort_keys=True,
             separators=(",", ":"),
         ),
@@ -132,7 +137,7 @@ def _write_external_inputs(
         comparison_environment_sha256="b" * 64,
     )
     evidence = {
-        "schema_version": 2,
+        "schema_version": 3,
         "kind": "smart-assistant-customer-acceptance-evidence",
         "acceptance_id": "customer-skills-acceptance-001",
         "customer_id": "target-customer",
@@ -143,6 +148,8 @@ def _write_external_inputs(
         "environment_sha256": "b" * 64,
         "customer_package_sha256": sha256_file(package_manifest),
         "customer_report_sha256": sha256_file(report_path),
+        "customer_report_run_id": "customer-skills-run-001",
+        "customer_report_event_chain_head": "d" * 64,
         "executed_at": datetime.now(timezone.utc).isoformat(),
         "attestation": {
             "key_id": "target-customer-acceptance-2026",
@@ -250,7 +257,12 @@ def test_customer_evidence_rejects_report_or_signature_tampering(
     )
     report_path.write_text(
         json.dumps(
-            {"status": "completed", "passed": False},
+            {
+                "status": "completed",
+                "passed": False,
+                "run_id": "customer-skills-run-001",
+                "event_chain_head": "d" * 64,
+            },
             sort_keys=True,
             separators=(",", ":"),
         ),
@@ -272,7 +284,12 @@ def test_customer_evidence_rejects_report_or_signature_tampering(
     )
     report_path.write_text(
         json.dumps(
-            {"status": "completed", "passed": True},
+            {
+                "status": "completed",
+                "passed": True,
+                "run_id": "customer-skills-run-001",
+                "event_chain_head": "d" * 64,
+            },
             sort_keys=True,
             separators=(",", ":"),
         ),
@@ -392,3 +409,34 @@ def test_customer_evidence_rejects_invalid_release_signature(
 
     assert result["status"] == "INVALID"
     assert "release signature is invalid" in result["errors"][0]
+
+
+def test_customer_evidence_rejects_execution_or_event_chain_replay(
+    monkeypatch, tmp_path
+):
+    evidence_path, trust_path, trust_sha256, package_root, report_path, package = (
+        _write_external_inputs(tmp_path)
+    )
+    monkeypatch.setattr(
+        evidence_module, "load_customer_package", lambda root, manifest_sha256: package
+    )
+    monkeypatch.setattr(
+        evidence_module, "verify_customer_report", lambda report, loaded: ()
+    )
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    evidence["execution_id"] = "replayed-execution"
+    private_key = Ed25519PrivateKey.from_private_bytes(b"\x71" * 32)
+    evidence["attestation"]["signature"] = private_key.sign(
+        canonical_json_bytes(customer_acceptance_attestation_payload(evidence))
+    ).hex()
+    evidence_path.write_text(
+        json.dumps(evidence, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+
+    result = _verify(
+        evidence_path, trust_path, trust_sha256, package_root, report_path
+    )
+
+    assert result["status"] == "INVALID"
+    assert "execution id does not match report run" in result["errors"][0]
