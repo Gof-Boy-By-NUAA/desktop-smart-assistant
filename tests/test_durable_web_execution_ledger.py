@@ -64,6 +64,23 @@ def _claim_web_request_in_child(path: str, start, results, index: int) -> None:
         results.put((f"error:{type(exc).__name__}:{exc}", ""))
 
 
+def _acquire_session_fence_in_child(path: str, start, results, index: int) -> None:
+    try:
+        store = DurableSSEJournalStore(path)
+        start.wait(timeout=10)
+        claim = _claim(
+            store,
+            f"web-session-fence-request-{index}",
+            key=f"web-session-fence-key-{index:04d}",
+            runner=f"web-session-fence-runner-{multiprocessing.current_process().pid}",
+        )
+        results.put(
+            "acquired" if claim["claim_status"] == "claimed" else "busy"
+        )
+    except Exception as exc:  # pragma: no cover - asserted by parent
+        results.put(f"error:{type(exc).__name__}:{exc}")
+
+
 def test_same_owner_session_key_is_durable_single_worker_and_payload_immutable(tmp_path):
     store = DurableSSEJournalStore(str(tmp_path / "web.sqlite3"))
 
@@ -75,6 +92,7 @@ def test_same_owner_session_key_is_durable_single_worker_and_payload_immutable(t
     assert duplicate["request_id"] == "web-request-1"
     assert duplicate["execution_state"] == "running"
     assert "lease_token" not in duplicate
+    assert "session_fence_token" not in duplicate
 
     with pytest.raises(ValueError, match="different request"):
         _claim(store, "web-request-3", digest=_digest("b"))
@@ -137,6 +155,124 @@ def test_two_processes_claim_one_authenticated_web_request_only(tmp_path):
         "duplicate",
     ]
     assert len({request_id for _status, request_id in records}) == 1
+
+
+def test_distinct_requests_for_one_session_have_one_non_reentrant_fence(tmp_path):
+    store = DurableSSEJournalStore(str(tmp_path / "web.sqlite3"))
+    first = _claim(
+        store,
+        "session-fence-first",
+        key="web-session-fence-key-0001",
+    )
+    second = _claim(
+        store,
+        "session-fence-second",
+        key="web-session-fence-key-0002",
+    )
+
+    assert first["claim_status"] == "claimed"
+    # A different idempotency key cannot reserve a second mutable turn.  It
+    # receives no request lease and therefore cannot start a worker at all.
+    assert second == {
+        "claim_status": "session_busy",
+        "owner_id": OWNER,
+        "session_id": SESSION,
+        "execution_state": "session_busy",
+    }
+
+    store.verify_session_execution_fence(
+        first["request_id"],
+        OWNER,
+        SESSION,
+        first["lease_token"],
+        RUNNER,
+        first["session_fence_token"],
+    )
+    with pytest.raises(RuntimeError, match="no longer owned"):
+        store.verify_session_execution_fence(
+            first["request_id"],
+            OWNER,
+            SESSION,
+            first["lease_token"],
+            RUNNER,
+            "forged-session-fence",
+        )
+
+    # Terminal settlement and fence release are one transaction.  A later
+    # distinct request can now obtain the session.
+    store.finish_execution(
+        first["request_id"],
+        OWNER,
+        SESSION,
+        first["lease_token"],
+        RUNNER,
+        outcome="completed",
+    )
+    third = _claim(
+        store,
+        "session-fence-third",
+        key="web-session-fence-key-0003",
+    )
+    assert third["claim_status"] == "claimed"
+    assert third["session_fence_token"]
+
+
+def test_two_processes_acquire_one_fence_for_distinct_session_requests(tmp_path):
+    path = str(tmp_path / "web.sqlite3")
+    context = multiprocessing.get_context("spawn")
+    start = context.Event()
+    results = context.Queue()
+    first = context.Process(
+        target=_acquire_session_fence_in_child,
+        args=(path, start, results, 1),
+    )
+    second = context.Process(
+        target=_acquire_session_fence_in_child,
+        args=(path, start, results, 2),
+    )
+    first.start()
+    second.start()
+    start.set()
+    first.join(timeout=20)
+    second.join(timeout=20)
+
+    assert first.exitcode == 0
+    assert second.exitcode == 0
+    assert sorted(results.get(timeout=5) for _ in range(2)) == [
+        "acquired",
+        "busy",
+    ]
+
+
+def test_crash_recovery_keeps_session_fenced_instead_of_reassigning_it(tmp_path):
+    path = str(tmp_path / "web.sqlite3")
+    first_store = DurableSSEJournalStore(path)
+    first = _claim(
+        first_store,
+        "session-fence-crash-first",
+        key="web-session-crash-key-0001",
+    )
+    assert first["claim_status"] == "claimed"
+
+    # A fresh process must not infer that it is safe to steal an unfinished
+    # session merely because the predecessor is no longer reachable.
+    recovered_store = DurableSSEJournalStore(path)
+    recovered_store.mark_interrupted_execution(first["request_id"], OWNER)
+    assert (
+        recovered_store.replay(first["request_id"], OWNER)["execution_state"]
+        == "in_doubt"
+    )
+    second = _claim(
+        recovered_store,
+        "session-fence-crash-second",
+        key="web-session-crash-key-0002",
+    )
+    assert second == {
+        "claim_status": "session_busy",
+        "owner_id": OWNER,
+        "session_id": SESSION,
+        "execution_state": "session_busy",
+    }
 
 
 def test_stale_or_forged_lease_cannot_settle_a_web_execution(tmp_path):
@@ -345,6 +481,7 @@ def _web_execution_context(claim: dict) -> Context:
             "channel_type": "web",
             "_web_execution_lease": claim["lease_token"],
             "_web_execution_runner_id": RUNNER,
+            "_web_session_execution_fence": claim["session_fence_token"],
         },
     )
 
@@ -386,6 +523,28 @@ def test_agentbridge_marks_completed_only_after_normal_run_returns(monkeypatch, 
     assert reply.type == ReplyType.TEXT
     assert reply.content == "durably completed"
     assert store.replay(claim["request_id"], OWNER)["execution_state"] == "completed"
+
+
+def test_agentbridge_rejects_forged_session_fence_before_agent_run(
+    monkeypatch, tmp_path
+):
+    store = DurableSSEJournalStore(str(tmp_path / "web.sqlite3"))
+    claim = _claim(store, "agentbridge-forged-session-fence")
+    agent = _CompletedAgent()
+    agent_runs: list[bool] = []
+    agent.run_stream = lambda **_kwargs: agent_runs.append(True) or "unexpected"
+    bridge = _bridge_for_execution_test(agent)
+    monkeypatch.setattr(
+        bridge, "_get_durable_web_execution_store", lambda: store
+    )
+    context = _web_execution_context(claim)
+    context["_web_session_execution_fence"] = "forged-session-fence"
+
+    reply = bridge.agent_reply("must not reach Agent", context=context)
+
+    assert reply.type == ReplyType.ERROR
+    assert agent_runs == []
+    assert store.replay(claim["request_id"], OWNER)["execution_state"] == "failed_safe"
 
 
 def test_agentbridge_persistence_failure_after_agent_run_is_in_doubt(
@@ -596,6 +755,57 @@ def test_authenticated_post_retries_one_request_and_rejects_missing_or_changed_k
     )
     conflict = json.loads(WebChannel.post_message(instance, owner_id=OWNER))
     assert conflict["status"] == "error"
+    assert len(_NoStartThread.started) == 1
+
+
+def test_authenticated_post_rejects_distinct_key_while_session_turn_is_reserved(
+    monkeypatch, tmp_path
+):
+    """The HTTP response must not claim a worker started when the session is busy."""
+
+    store = DurableSSEJournalStore(str(tmp_path / "web.sqlite3"))
+    instance = _web_instance()
+    _NoStartThread.started = []
+    current_payload = {
+        "session_id": SESSION,
+        "message": "first external action",
+        "stream": True,
+        "idempotency_key": "web-session-reservation-key-0001",
+    }
+    monkeypatch.setattr(web_channel, "_get_durable_sse_store", lambda: store)
+    monkeypatch.setattr(web_channel, "_claim_web_session", lambda *_args: None)
+    monkeypatch.setattr(web_channel, "_web_identity", lambda owner: owner)
+    monkeypatch.setattr(
+        web_channel, "conf", lambda: {"single_chat_prefix": [""]}
+    )
+    monkeypatch.setattr(
+        web_channel.web,
+        "data",
+        lambda: json.dumps(current_payload).encode(),
+    )
+    monkeypatch.setattr(web_channel.threading, "Thread", _NoStartThread)
+
+    accepted = json.loads(WebChannel.post_message(instance, owner_id=OWNER))
+    assert accepted["status"] == "success"
+    assert len(_NoStartThread.started) == 1
+    assert store.replay(accepted["request_id"], OWNER)["execution_state"] == "running"
+
+    current_payload = {
+        "session_id": SESSION,
+        "message": "second external action",
+        "stream": True,
+        "idempotency_key": "web-session-reservation-key-0002",
+    }
+    rejected = json.loads(WebChannel.post_message(instance, owner_id=OWNER))
+
+    assert rejected == {
+        "status": "error",
+        "stream": False,
+        "execution_state": "session_busy",
+        "message": (
+            "Session is already processing another request; retry after it finishes"
+        ),
+    }
     assert len(_NoStartThread.started) == 1
 
 

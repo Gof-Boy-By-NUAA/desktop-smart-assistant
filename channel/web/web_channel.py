@@ -2510,6 +2510,23 @@ class WebChannel(ChatChannel):
                     _WEB_EXECUTION_RUNNER_ID,
                 )
                 if execution_claim["claim_status"] != "claimed":
+                    if execution_claim["claim_status"] == "session_busy":
+                        # Do not acknowledge a second mutable turn as a
+                        # success and then fail it later in a worker.  The
+                        # caller can retry after the fenced turn reaches a
+                        # durable terminal outcome.
+                        return json.dumps(
+                            {
+                                "status": "error",
+                                "stream": False,
+                                "execution_state": "session_busy",
+                                "message": (
+                                    "Session is already processing another request; "
+                                    "retry after it finishes"
+                                ),
+                            },
+                            ensure_ascii=False,
+                        )
                     # A network retry reconnects to the original request. It
                     # never creates a replacement worker, even if a previous
                     # process left the durable claim unresolved.
@@ -2603,6 +2620,9 @@ class WebChannel(ChatChannel):
                 context["trusted_identity"] = _web_identity(owner_id)
                 context["_web_execution_lease"] = execution_claim["lease_token"]
                 context["_web_execution_runner_id"] = execution_claim["runner_id"]
+                context["_web_session_execution_fence"] = execution_claim[
+                    "session_fence_token"
+                ]
             context["request_id"] = request_id
             if is_voice_input:
                 # Web channel runs its own TTS post-pipeline via

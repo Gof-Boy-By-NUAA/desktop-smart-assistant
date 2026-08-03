@@ -403,11 +403,16 @@ class AgentBridge:
         owner_id = context.get("session_owner_id") or None
         lease_token = context.get("_web_execution_lease") or None
         runner_id = context.get("_web_execution_runner_id") or None
+        session_fence_token = context.get("_web_session_execution_fence") or None
         # Ordinary IM and scheduler contexts often have a session id (and may
         # have a request id) without ever entering the authenticated Web HTTP
         # execution boundary. The server-only lease fields are the unambiguous
         # marker. An authenticated Web context without them is rejected below.
-        if lease_token is None and runner_id is None:
+        if (
+            lease_token is None
+            and runner_id is None
+            and session_fence_token is None
+        ):
             if (
                 owner_id is not None
                 and request_id is not None
@@ -415,7 +420,16 @@ class AgentBridge:
             ):
                 raise PermissionError("incomplete Web execution claim")
             return None
-        if not all((owner_id, request_id, session_id, lease_token, runner_id)):
+        if not all(
+            (
+                owner_id,
+                request_id,
+                session_id,
+                lease_token,
+                runner_id,
+                session_fence_token,
+            )
+        ):
             raise PermissionError("incomplete Web execution claim")
         if context.get("channel_type") != "web":
             raise PermissionError("Web execution claim used by a non-Web channel")
@@ -425,6 +439,7 @@ class AgentBridge:
             "session_id": str(session_id),
             "lease_token": str(lease_token),
             "runner_id": str(runner_id),
+            "session_fence_token": str(session_fence_token),
         }
 
     @staticmethod
@@ -674,6 +689,7 @@ class AgentBridge:
         web_execution_store = None
         web_execution_settled = False
         web_execution_settlement_attempted = False
+        web_session_fence_token = None
         agent_run_entered = False
 
         def settle_web_execution(outcome: str, detail: str) -> None:
@@ -717,6 +733,15 @@ class AgentBridge:
                     web_execution["runner_id"],
                 )
                 web_execution_store = candidate_store
+                web_session_fence_token = web_execution["session_fence_token"]
+                candidate_store.verify_session_execution_fence(
+                    web_execution["request_id"],
+                    web_execution["owner_id"],
+                    web_execution["session_id"],
+                    web_execution["lease_token"],
+                    web_execution["runner_id"],
+                    web_session_fence_token,
+                )
 
             # Register a cancel token. Prefer per-turn request_id (web),
             # fall back to session_id (IM channels). The Event is polled by
@@ -851,6 +876,23 @@ class AgentBridge:
             try:
                 if session_id:
                     steer_inbox = get_steer_registry().register(session_id)
+                if (
+                    web_execution is not None
+                    and web_execution_store is not None
+                    and web_session_fence_token is not None
+                ):
+                    # Revalidate at the last durable boundary before the Agent
+                    # can persist a turn or invoke a tool.  A local process
+                    # lock only serializes this worker; this database-backed
+                    # token fences all workers sharing the Web data root.
+                    web_execution_store.verify_session_execution_fence(
+                        web_execution["request_id"],
+                        web_execution["owner_id"],
+                        web_execution["session_id"],
+                        web_execution["lease_token"],
+                        web_execution["runner_id"],
+                        web_session_fence_token,
+                    )
                 # Use agent's run_stream method with event handler
                 # The durable Web claim is already in ``running`` state. Set
                 # this marker immediately before entering the Agent executor so

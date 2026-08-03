@@ -101,7 +101,22 @@ class DurableSSEJournalStore:
                             ON DELETE CASCADE
                     );
                     CREATE INDEX IF NOT EXISTS idx_web_sse_runs_owner_updated
-                        ON web_sse_runs(owner_id, updated_at);
+                    ON web_sse_runs(owner_id, updated_at);
+                    CREATE TABLE IF NOT EXISTS web_session_execution_fences (
+                        owner_id TEXT NOT NULL,
+                        session_id TEXT NOT NULL,
+                        request_id TEXT NOT NULL UNIQUE,
+                        execution_lease TEXT NOT NULL,
+                        runner_id TEXT NOT NULL,
+                        fence_token TEXT NOT NULL UNIQUE,
+                        acquired_at REAL NOT NULL,
+                        PRIMARY KEY(owner_id, session_id),
+                        FOREIGN KEY(request_id) REFERENCES web_sse_runs(request_id)
+                            ON DELETE CASCADE
+                    );
+                    CREATE INDEX IF NOT EXISTS
+                    idx_web_session_execution_fences_request
+                    ON web_session_execution_fences(request_id);
                     """
                 )
                 columns = {
@@ -344,7 +359,30 @@ class DurableSSEJournalStore:
                 result["claim_status"] = "duplicate"
                 return result
 
+            # This reservation is intentionally part of the same transaction as
+            # the request claim.  A new idempotency key is not permission to
+            # start another mutable Agent turn for the same Web session.
+            # Returning a direct rejection here, rather than after a worker has
+            # been started, prevents the Web UI from showing a false initial
+            # success for a request that will never be allowed to execute.
+            holder = connection.execute(
+                """
+                SELECT 1 FROM web_session_execution_fences
+                WHERE owner_id = ? AND session_id = ?
+                """,
+                (owner_id, session_id),
+            ).fetchone()
+            if holder is not None:
+                connection.execute("COMMIT")
+                return {
+                    "claim_status": "session_busy",
+                    "owner_id": owner_id,
+                    "session_id": session_id,
+                    "execution_state": "session_busy",
+                }
+
             lease_token = secrets.token_urlsafe(32)
+            session_fence_token = secrets.token_urlsafe(32)
             connection.execute(
                 """
                 INSERT INTO web_sse_runs(
@@ -366,6 +404,23 @@ class DurableSSEJournalStore:
                     now,
                 ),
             )
+            connection.execute(
+                """
+                INSERT INTO web_session_execution_fences(
+                    owner_id, session_id, request_id, execution_lease,
+                    runner_id, fence_token, acquired_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    owner_id,
+                    session_id,
+                    request_id,
+                    lease_token,
+                    runner_id,
+                    session_fence_token,
+                    now,
+                ),
+            )
             connection.execute("COMMIT")
             return {
                 "claim_status": "claimed",
@@ -377,6 +432,7 @@ class DurableSSEJournalStore:
                 "execution_detail": None,
                 "lease_token": lease_token,
                 "runner_id": runner_id,
+                "session_fence_token": session_fence_token,
                 "created_at": now,
                 "updated_at": now,
                 "execution_started_at": now,
@@ -422,6 +478,56 @@ class DurableSSEJournalStore:
                     f"{record['execution_state']}"
                 )
             return record
+        finally:
+            connection.close()
+
+    def verify_session_execution_fence(
+        self,
+        request_id: str,
+        owner_id: str,
+        session_id: str,
+        lease_token: str,
+        runner_id: str,
+        fence_token: str,
+    ) -> None:
+        """Fail closed unless this worker still owns the session fence."""
+
+        self._validate_identity(request_id, owner_id, session_id)
+        self._validate_runner_id(runner_id)
+        if (
+            not isinstance(lease_token, str)
+            or not lease_token
+            or len(lease_token) > 256
+            or not isinstance(fence_token, str)
+            or not fence_token
+            or len(fence_token) > 256
+        ):
+            raise ValueError("invalid Web session execution fence")
+        self._ensure_schema()
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                """
+                SELECT run.execution_state
+                FROM web_session_execution_fences AS fence
+                JOIN web_sse_runs AS run ON run.request_id = fence.request_id
+                WHERE fence.owner_id = ? AND fence.session_id = ?
+                  AND fence.request_id = ? AND fence.execution_lease = ?
+                  AND fence.runner_id = ? AND fence.fence_token = ?
+                """,
+                (
+                    owner_id,
+                    session_id,
+                    request_id,
+                    lease_token,
+                    runner_id,
+                    fence_token,
+                ),
+            ).fetchone()
+            if row is None or str(row["execution_state"]) != "running":
+                raise RuntimeError(
+                    "Web session execution fence is no longer owned by this worker"
+                )
         finally:
             connection.close()
 
@@ -475,6 +581,19 @@ class DurableSSEJournalStore:
                 raise RuntimeError(
                     "Web execution completion was rejected (stale or missing lease)"
                 )
+            # The request lease is also the only authority permitted to release
+            # its per-session fence.  Keep this deletion in the same transaction
+            # as the terminal state write: a crash cannot leave a successful
+            # request looking settled while another worker is permanently
+            # excluded, nor can a different request release this worker's fence.
+            connection.execute(
+                """
+                DELETE FROM web_session_execution_fences
+                WHERE owner_id = ? AND session_id = ? AND request_id = ?
+                  AND execution_lease = ? AND runner_id = ?
+                """,
+                (owner_id, session_id, request_id, lease_token, runner_id),
+            )
             connection.execute("COMMIT")
         except Exception:
             try:
