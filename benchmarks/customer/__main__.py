@@ -88,7 +88,13 @@ def main(arguments: Optional[Sequence[str]] = None) -> int:
         repository = GovernedSkillRepository(args.skills_db)
         try:
             runner = ControlledCustomerAcceptanceRunner(
-                repository, args.tenant_id, executor, judge
+                repository,
+                args.tenant_id,
+                executor,
+                judge,
+                execution_ledger_path=(
+                    args.run_root / "customer_execution_ledger.sqlite3"
+                ),
             )
             report = runner.run(
                 package,

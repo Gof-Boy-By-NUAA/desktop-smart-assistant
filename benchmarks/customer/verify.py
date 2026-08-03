@@ -22,7 +22,7 @@ from .json_utils import canonical_json_bytes, sha256_json
 _BOOTSTRAP_ROUNDS = 5000
 _GENESIS_HASH = "0" * 64
 _RUNNER_ID = "controlled-customer-skill-injection"
-_RUNNER_VERSION = "1.0.0"
+_RUNNER_VERSION = "1.1.0"
 _COMPLETED_REPORT_KEYS = {
     "schema_version",
     "status",
@@ -36,6 +36,23 @@ _COMPLETED_REPORT_KEYS = {
     "gates",
     "events",
     "event_chain_head",
+}
+_IN_DOUBT_REPORT_KEYS = {
+    "schema_version",
+    "status",
+    "passed",
+    "run_id",
+    "package",
+    "ledger",
+}
+_LEDGER_RUN_STATES = {"running", "completed", "in_doubt"}
+_LEDGER_OPERATION_STATES = {
+    "planned",
+    "intent",
+    "execution_receipt",
+    "judgment_intent",
+    "completed",
+    "in_doubt",
 }
 
 
@@ -66,6 +83,8 @@ def verify_customer_report(
         ):
             failures.append("待客户输入清单无效")
         return tuple(failures)
+    if report.get("status") == "in_doubt":
+        return _verify_in_doubt_report(report, customer_package)
     if report.get("status") != "completed":
         return ("报告状态无效",)
     if customer_package is None:
@@ -244,6 +263,126 @@ def verify_customer_report(
             failures.append("结束事件门禁哈希无效")
         if payload.get("passed") is not expected_passed:
             failures.append("结束事件通过状态无效")
+    return tuple(failures)
+
+
+def _verify_in_doubt_report(
+    report: Dict[str, Any],
+    customer_package: Optional[CustomerPackage],
+) -> Tuple[str, ...]:
+    """Validate a negative-only durable-recovery report.
+
+    An unresolved durable intent is not evidence of an accepted customer run.
+    It is nevertheless useful to validate its structure so the CLI can expose
+    a deterministic failed result instead of relaunching an external executor.
+    """
+
+    failures: List[str] = []
+    if set(report) != _IN_DOUBT_REPORT_KEYS:
+        failures.append("in_doubt report fields are invalid")
+    if report.get("schema_version") != 1:
+        failures.append("in_doubt report version is invalid")
+    if report.get("passed") is not False:
+        failures.append("in_doubt report must never pass")
+    run_id = report.get("run_id")
+    if (
+        not isinstance(run_id, str)
+        or not run_id
+        or run_id != run_id.strip()
+        or len(run_id) > 128
+        or any(ord(character) < 32 for character in run_id)
+    ):
+        failures.append("in_doubt report run_id is invalid")
+
+    package = report.get("package")
+    expected_package_keys = {
+        "package_id",
+        "tenant_id",
+        "manifest_sha256",
+        "cases_sha256",
+        "case_count",
+    }
+    if not isinstance(package, dict) or set(package) != expected_package_keys:
+        failures.append("in_doubt report package is invalid")
+    elif customer_package is not None:
+        expected_package = {
+            "package_id": customer_package.package_id,
+            "tenant_id": customer_package.tenant_id,
+            "manifest_sha256": customer_package.manifest_sha256,
+            "cases_sha256": customer_package.cases_sha256,
+            "case_count": len(customer_package.cases),
+        }
+        if package != expected_package:
+            failures.append("in_doubt report package does not match customer package")
+    else:
+        for field_name in ("package_id", "tenant_id"):
+            value = package.get(field_name)
+            if (
+                not isinstance(value, str)
+                or not value
+                or value != value.strip()
+                or len(value) > 256
+                or any(ord(character) < 32 for character in value)
+            ):
+                failures.append("in_doubt report package %s is invalid" % field_name)
+        for field_name in ("manifest_sha256", "cases_sha256"):
+            if not _is_sha256(package.get(field_name)):
+                failures.append("in_doubt report package %s is invalid" % field_name)
+        case_count = package.get("case_count")
+        if (
+            not isinstance(case_count, int)
+            or isinstance(case_count, bool)
+            or case_count <= 0
+        ):
+            failures.append("in_doubt report package case_count is invalid")
+
+    ledger = report.get("ledger")
+    if not isinstance(ledger, dict) or set(ledger) != {
+        "state",
+        "operation_count",
+        "operation_states",
+        "detail",
+    }:
+        failures.append("in_doubt report ledger is invalid")
+        return tuple(failures)
+    if ledger.get("state") not in _LEDGER_RUN_STATES:
+        failures.append("in_doubt report ledger state is invalid")
+    operation_count = ledger.get("operation_count")
+    operation_states = ledger.get("operation_states")
+    if (
+        not isinstance(operation_count, int)
+        or isinstance(operation_count, bool)
+        or operation_count < 0
+    ):
+        failures.append("in_doubt report operation_count is invalid")
+    if not isinstance(operation_states, dict):
+        failures.append("in_doubt report operation_states is invalid")
+    else:
+        total = 0
+        for state, count in operation_states.items():
+            if state not in _LEDGER_OPERATION_STATES:
+                failures.append("in_doubt report operation state is invalid")
+            if (
+                not isinstance(count, int)
+                or isinstance(count, bool)
+                or count <= 0
+            ):
+                failures.append("in_doubt report operation count is invalid")
+            elif isinstance(count, int) and not isinstance(count, bool):
+                total += count
+        if (
+            isinstance(operation_count, int)
+            and not isinstance(operation_count, bool)
+            and total != operation_count
+        ):
+            failures.append("in_doubt report operation counters disagree")
+    detail = ledger.get("detail")
+    if detail is not None and (
+        not isinstance(detail, str)
+        or len(detail) > 512
+        or any(character in detail for character in ("\x00", "\r", "\n"))
+    ):
+        failures.append("in_doubt report ledger detail is invalid")
     return tuple(failures)
 
 
