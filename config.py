@@ -363,12 +363,29 @@ def _mask_value(val):
     return val[0:3] + "*" * 5 + val[-3:]
 
 
+_SENSITIVE_CONFIG_KEY_PARTS = (
+    "key",
+    "secret",
+    "password",
+    "token",
+    "credential",
+    "bearer",
+)
+
+
+def _is_sensitive_config_key(key) -> bool:
+    """Return whether a configuration field name may carry credential material."""
+    return isinstance(key, str) and any(
+        part in key.lower() for part in _SENSITIVE_CONFIG_KEY_PARTS
+    )
+
+
 def _mask_sensitive_recursive(obj):
-    """Recursively mask values whose keys contain 'key' or 'secret'."""
+    """Recursively mask credential values before they reach any logger."""
     if isinstance(obj, dict):
         masked = {}
         for k, v in obj.items():
-            if ("key" in k or "secret" in k) and isinstance(v, str):
+            if _is_sensitive_config_key(k) and isinstance(v, str):
                 masked[k] = _mask_value(v)
             else:
                 masked[k] = _mask_sensitive_recursive(v)
@@ -439,7 +456,9 @@ def load_config():
         if name.startswith("_"):
             continue
         if name in available_setting:
-            logger.info("[INIT] override config by environ args: {}={}".format(name, value))
+            # Environment values can contain customer credentials. Log the
+            # selected setting name for diagnostics, never the supplied value.
+            logger.info("[INIT] override config from environment: %s=<redacted>", name)
             try:
                 # SECURITY: Use ast.literal_eval instead of eval().
                 # ast.literal_eval only parses Python literals (strings, numbers,

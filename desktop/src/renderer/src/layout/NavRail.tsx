@@ -78,9 +78,10 @@ const NAV_ITEMS: NavItem[] = [
 interface NavRailProps {
   onLangChange: () => void
   onLogout?: () => Promise<void>
+  onForgetDeviceIdentity?: () => Promise<void>
 }
 
-const NavRail: React.FC<NavRailProps> = ({ onLangChange, onLogout }) => {
+const NavRail: React.FC<NavRailProps> = ({ onLangChange, onLogout, onForgetDeviceIdentity }) => {
   const location = useLocation()
   const navigate = useNavigate()
   const { navCollapsed, toggleNav } = useUIStore()
@@ -250,6 +251,7 @@ const NavRail: React.FC<NavRailProps> = ({ onLangChange, onLogout }) => {
             onLanguage={toggleLanguage}
             onCheckUpdate={checkUpdate}
             onLogout={onLogout}
+            onForgetDeviceIdentity={onForgetDeviceIdentity}
             onOpenLink={(url) => {
               setMenuOpen(false)
               openExternal(url)
@@ -348,7 +350,8 @@ const FooterMenu: React.FC<{
   onCheckUpdate: () => void
   onOpenLink: (url: string) => void
   onLogout?: () => Promise<void>
-}> = ({ theme, checking, pendingUpdate, upToDate, themeId, themes, onThemeId, onLogs, onTheme, onLanguage, onCheckUpdate, onOpenLink, onLogout }) => {
+  onForgetDeviceIdentity?: () => Promise<void>
+}> = ({ theme, checking, pendingUpdate, upToDate, themeId, themes, onThemeId, onLogs, onTheme, onLanguage, onCheckUpdate, onOpenLink, onLogout, onForgetDeviceIdentity }) => {
   const [themeMenuOpen, setThemeMenuOpen] = useState(false)
   const updateLabel = checking
     ? t('update_checking')
@@ -418,6 +421,16 @@ const FooterMenu: React.FC<{
         onClick={() => {
           setThemeMenuOpen(false)
           void onLogout()
+        }}
+      />
+    )}
+    {onForgetDeviceIdentity && (
+      <MenuItem
+        icon={<LogOut size={16} />}
+        label={t('menu_forget_device_identity')}
+        onClick={() => {
+          setThemeMenuOpen(false)
+          void onForgetDeviceIdentity()
         }}
       />
     )}

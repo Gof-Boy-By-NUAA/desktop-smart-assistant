@@ -11,6 +11,7 @@
     "dev:main": "tsc -p tsconfig.main.json && electron .",
     "dev:renderer": "vite",
     "build": "npm run build:renderer && npm run build:main",
+    "test:trusted-backend": "npm run build:main && node --test tests/trusted-backend.test.cjs",
     "build:main": "tsc -p tsconfig.main.json",
     "build:renderer": "vite build",
     "dist": "npm run build && electron-builder",

@@ -115,7 +115,9 @@ class CustomerExecutionLedger:
                             )
                         ),
                         execution_receipt_sha256 TEXT,
+                        execution_receipt_json TEXT,
                         judgment_receipt_sha256 TEXT,
+                        judgment_receipt_json TEXT,
                         detail TEXT,
                         created_at REAL NOT NULL,
                         updated_at REAL NOT NULL,
@@ -133,7 +135,36 @@ class CustomerExecutionLedger:
                     ON customer_acceptance_operations(
                         package_manifest_sha256, cases_sha256, state
                     );
+                    CREATE TABLE IF NOT EXISTS customer_execution_ledger_schema (
+                        singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                        schema_version INTEGER NOT NULL
+                    );
                     """
+                )
+                # Version 1 stored receipt digests only.  Such rows remain
+                # readable, but cannot be safely replayed because their output
+                # and judgment evidence are unavailable.  Version 2 stores a
+                # canonical, hash-bound receipt so recovery can reuse it.
+                columns = {
+                    str(row["name"])
+                    for row in connection.execute(
+                        "PRAGMA table_info(customer_acceptance_operations)"
+                    )
+                }
+                for name in (
+                    "execution_receipt_json",
+                    "judgment_receipt_json",
+                ):
+                    if name not in columns:
+                        connection.execute(
+                            "ALTER TABLE customer_acceptance_operations "
+                            "ADD COLUMN %s TEXT" % name
+                        )
+                connection.execute(
+                    "INSERT INTO customer_execution_ledger_schema("
+                    "singleton, schema_version) VALUES (1, 2) "
+                    "ON CONFLICT(singleton) DO UPDATE SET schema_version = "
+                    "MAX(schema_version, excluded.schema_version)"
                 )
                 try:
                     os.chmod(self.path, 0o600)
@@ -153,6 +184,17 @@ class CustomerExecutionLedger:
             connection.rollback()
         except sqlite3.Error:
             pass
+
+    def _commit(self, connection: sqlite3.Connection) -> None:
+        """Commit using SQLite's FULL-sync transaction boundary.
+
+        SQLite owns database/WAL locking and durability.  Reopening either file
+        while a connection is live bypasses that VFS contract on Windows and can
+        corrupt the journal, so callers must rely on ``synchronous=FULL`` set by
+        :meth:`_connect` instead of attempting a second raw-file flush.
+        """
+
+        connection.execute("COMMIT")
 
     @staticmethod
     def _detail(value: object | None) -> str | None:
@@ -295,7 +337,7 @@ class CustomerExecutionLedger:
                         for case_id, arm, request_sha256 in plan
                     ],
                 )
-                connection.execute("COMMIT")
+                self._commit(connection)
                 return {"claim_status": "claimed", "state": "running"}
 
             summary = self._run_summary(row)
@@ -331,14 +373,43 @@ class CustomerExecutionLedger:
                     raise CustomerPackageError(
                         "completed customer report hash is invalid"
                     )
-                connection.execute("COMMIT")
+                self._commit(connection)
                 return {
                     "claim_status": "completed",
                     "state": "completed",
                     "report": report,
                 }
 
-            connection.execute("COMMIT")
+            # A prior process may have crashed after a durable receipt but
+            # before it rebuilt the in-memory event chain or final report.  It
+            # is safe to resume only when no external effect is outstanding:
+            # ``intent`` and ``judgment_intent`` are deliberately fenced as
+            # in_doubt and never automatically replayed.
+            if (
+                summary["state"] == "running"
+                and summary["run_id"] == run_id
+                and summary["run_binding_sha256"] == binding
+                and summary["implementation_sha256"] == implementation
+            ):
+                states = {
+                    str(item["state"])
+                    for item in connection.execute(
+                        "SELECT state FROM customer_acceptance_operations "
+                        "WHERE package_manifest_sha256 = ? "
+                        "AND cases_sha256 = ?",
+                        (manifest, cases),
+                    ).fetchall()
+                }
+                if (
+                    states.intersection({"intent", "judgment_intent", "in_doubt"})
+                    or not states.intersection({"execution_receipt", "completed"})
+                ):
+                    self._commit(connection)
+                    return {"claim_status": "in_doubt", **summary}
+                self._commit(connection)
+                return {"claim_status": "resumable", **summary}
+
+            self._commit(connection)
             return {"claim_status": "in_doubt", **summary}
         except CustomerPackageError:
             self._rollback(connection)
@@ -407,7 +478,7 @@ class CustomerExecutionLedger:
                     "customer execution operation does not match the reserved plan"
                 )
             if str(row["state"]) != "planned":
-                connection.execute("COMMIT")
+                self._commit(connection)
                 return {
                     "claim_status": "in_doubt",
                     "state": str(row["state"]),
@@ -437,7 +508,7 @@ class CustomerExecutionLedger:
                 raise CustomerPackageError(
                     "customer execution operation intent was rejected"
                 )
-            connection.execute("COMMIT")
+            self._commit(connection)
             return {"claim_status": "claimed", "state": "intent"}
         except CustomerPackageError:
             self._rollback(connection)
@@ -486,7 +557,15 @@ class CustomerExecutionLedger:
         run_id, case_id, arm, request_sha256 = self._operation_values(
             run_id, case_id, arm, request_sha256
         )
-        receipt_sha256 = sha256_json(dict(receipt)) if receipt is not None else None
+        receipt_value = dict(receipt) if receipt is not None else None
+        receipt_sha256 = (
+            sha256_json(receipt_value) if receipt_value is not None else None
+        )
+        receipt_json = (
+            canonical_json_bytes(receipt_value).decode("utf-8")
+            if receipt_value is not None
+            else None
+        )
         self._ensure_schema()
         connection = self._connect()
         try:
@@ -513,10 +592,12 @@ class CustomerExecutionLedger:
                     ),
                 )
             else:
+                receipt_json_field = receipt_field.replace("_sha256", "_json")
                 cursor = connection.execute(
                     f"""
                     UPDATE customer_acceptance_operations
-                    SET state = ?, {receipt_field} = ?, updated_at = ?
+                    SET state = ?, {receipt_field} = ?, {receipt_json_field} = ?,
+                        updated_at = ?
                     WHERE package_manifest_sha256 = ? AND cases_sha256 = ?
                       AND run_id = ? AND case_id = ? AND arm = ?
                       AND request_sha256 = ? AND state = ?
@@ -524,6 +605,7 @@ class CustomerExecutionLedger:
                     (
                         next_state,
                         receipt_sha256,
+                        receipt_json,
                         time.time(),
                         manifest,
                         cases,
@@ -538,7 +620,7 @@ class CustomerExecutionLedger:
                 raise CustomerPackageError(
                     "customer ledger transition was rejected"
                 )
-            connection.execute("COMMIT")
+            self._commit(connection)
         except CustomerPackageError:
             self._rollback(connection)
             raise
@@ -601,7 +683,8 @@ class CustomerExecutionLedger:
                 SET state = 'in_doubt', detail = ?, updated_at = ?
                 WHERE package_manifest_sha256 = ? AND cases_sha256 = ?
                   AND run_id = ? AND case_id = ? AND arm = ?
-                  AND request_sha256 = ? AND state != 'completed'
+                  AND request_sha256 = ?
+                  AND state IN ('intent', 'judgment_intent')
                 """,
                 (
                     self._detail(detail),
@@ -614,7 +697,7 @@ class CustomerExecutionLedger:
                     request_sha256,
                 ),
             )
-            connection.execute("COMMIT")
+            self._commit(connection)
         except sqlite3.Error as error:
             self._rollback(connection)
             raise CustomerPackageError(
@@ -622,6 +705,82 @@ class CustomerExecutionLedger:
             ) from error
         finally:
             connection.close()
+
+    def load_operation_receipts(
+        self,
+        package_manifest_sha256: str,
+        cases_sha256: str,
+        run_id: str,
+        case_id: str,
+        arm: str,
+        request_sha256: str,
+    ) -> Dict[str, Any]:
+        """Load hash-verified receipts without permitting an executor replay."""
+
+        manifest, cases = self._package_keys(package_manifest_sha256, cases_sha256)
+        run_id, case_id, arm, request_sha256 = self._operation_values(
+            run_id, case_id, arm, request_sha256
+        )
+        self._ensure_schema()
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                """
+                SELECT state, execution_receipt_sha256, execution_receipt_json,
+                       judgment_receipt_sha256, judgment_receipt_json, detail
+                FROM customer_acceptance_operations
+                WHERE package_manifest_sha256 = ? AND cases_sha256 = ?
+                  AND run_id = ? AND case_id = ? AND arm = ?
+                  AND request_sha256 = ?
+                """,
+                (manifest, cases, run_id, case_id, arm, request_sha256),
+            ).fetchone()
+            if row is None:
+                raise CustomerPackageError("customer execution receipt is absent")
+
+            def receipt(name: str) -> Dict[str, Any] | None:
+                encoded = row[name + "_json"]
+                digest = row[name + "_sha256"]
+                if encoded is None and digest is None:
+                    return None
+                if not isinstance(encoded, str) or not isinstance(digest, str):
+                    raise CustomerPackageError(
+                        "customer execution receipt is not recoverable"
+                    )
+                value = strict_json_loads(
+                    encoded.encode("utf-8"), "customer execution receipt"
+                )
+                if not isinstance(value, dict) or sha256_json(value) != digest:
+                    raise CustomerPackageError(
+                        "customer execution receipt integrity is invalid"
+                    )
+                return value
+
+            return {
+                "state": str(row["state"]),
+                "detail": row["detail"],
+                "execution_receipt": receipt("execution_receipt"),
+                "judgment_receipt": receipt("judgment_receipt"),
+            }
+        except sqlite3.Error as error:
+            raise CustomerPackageError(
+                "customer ledger cannot read an execution receipt"
+            ) from error
+        finally:
+            connection.close()
+
+    def is_recoverable_run(
+        self, package_manifest_sha256: str, cases_sha256: str, run_id: str
+    ) -> bool:
+        """Whether a crash left only durable, non-executing recovery work."""
+
+        record = self.describe_run(package_manifest_sha256, cases_sha256)
+        if record is None or record["state"] != "running" or record["run_id"] != run_id:
+            return False
+        states = set(record["operation_states"])
+        return bool(states.intersection({"execution_receipt", "completed"})) and not bool(
+            states.intersection({"intent", "judgment_intent", "in_doubt"})
+        )
 
     def mark_run_in_doubt(
         self,
@@ -651,7 +810,7 @@ class CustomerExecutionLedger:
                     run_id,
                 ),
             )
-            connection.execute("COMMIT")
+            self._commit(connection)
         except sqlite3.Error as error:
             self._rollback(connection)
             raise CustomerPackageError(
@@ -785,7 +944,7 @@ class CustomerExecutionLedger:
             )
             if cursor.rowcount != 1:
                 raise CustomerPackageError("customer ledger completion was rejected")
-            connection.execute("COMMIT")
+            self._commit(connection)
         except CustomerPackageError:
             self._rollback(connection)
             raise

@@ -42,6 +42,11 @@ _TOOL_RESULT_SSE_MAX_PRESERVED_CITATIONS = 20
 _SSE_EVENT_JOURNAL_MAX_EVENTS = 4096
 _SSE_EVENT_JOURNAL_MAX_BYTES = 16 * 1024 * 1024
 _WEB_EXECUTION_RUNNER_ID = uuid.uuid4().hex
+# A destructive mutation remains fail-closed after this synchronous request
+# times out. The caller may retry, but no new authenticated execution can enter
+# the session until durable quiescence is proven.
+_SESSION_MUTATION_WAIT_SECONDS = 5.0
+_SESSION_MUTATION_POLL_SECONDS = 0.05
 
 
 def _get_durable_sse_store():
@@ -50,6 +55,84 @@ def _get_durable_sse_store():
     from channel.web.sse_persistence import get_durable_web_request_store
 
     return get_durable_web_request_store()
+
+
+def _begin_and_wait_for_durable_session_mutation(
+    owner_id: str,
+    session_id: str,
+    *,
+    mutation_kind: str,
+    detail: str,
+    timeout: float | None = None,
+) -> dict[str, Any]:
+    """Close a session, request cancellation, then prove both local and durable quiet.
+
+    ``AgentBridge.cancel_and_wait_for_session`` remains useful for the current
+    process, particularly for work in post-processing after it has left a
+    durable executor checkpoint. It is *not* the distributed proof: a second
+    Web process can have no entry in this registry. The persistent session
+    mutation fence is therefore required to report ``quiescent`` as well.
+
+    The durable fence is intentionally retained if this function times out or
+    fails. Retrying the same mutation resumes the existing closure; accepting a
+    new request during that uncertainty would recreate the data-race this guard
+    exists to prevent.
+    """
+
+    try:
+        from bridge.bridge import Bridge
+
+        agent_bridge = Bridge().get_agent_bridge()
+    except Exception as exc:
+        raise RuntimeError("local session mutation fence is unavailable") from exc
+
+    durable_store = _get_durable_sse_store()
+    mutation = durable_store.begin_session_mutation(
+        owner_id,
+        session_id,
+        mutation_kind=mutation_kind,
+        detail=detail,
+    )
+    wait_seconds = _SESSION_MUTATION_WAIT_SECONDS if timeout is None else max(0.0, timeout)
+    deadline = time.monotonic() + wait_seconds
+    quiescence = None
+    local_quiescent = False
+    while True:
+        try:
+            # This call also signals the local cancellation registry. Its
+            # boolean is only an additional same-process condition, never a
+            # substitute for the cross-instance SQLite query below.
+            local_quiescent = bool(
+                agent_bridge.cancel_and_wait_for_session(
+                    session_id, owner_id, timeout=0.0
+                )
+            )
+        except Exception as exc:
+            raise RuntimeError("local session mutation fence could not be confirmed") from exc
+        quiescence = durable_store.session_mutation_quiescence(
+            owner_id,
+            session_id,
+            mutation["mutation_token"],
+        )
+        if local_quiescent and quiescence["quiescent"]:
+            return {
+                "durable_store": durable_store,
+                "agent_bridge": agent_bridge,
+                "mutation": mutation,
+                "quiescence": quiescence,
+                "local_quiescent": True,
+                "quiescent": True,
+            }
+        if time.monotonic() >= deadline:
+            return {
+                "durable_store": durable_store,
+                "agent_bridge": agent_bridge,
+                "mutation": mutation,
+                "quiescence": quiescence,
+                "local_quiescent": local_quiescent,
+                "quiescent": False,
+            }
+        time.sleep(_SESSION_MUTATION_POLL_SECONDS)
 
 
 def _web_request_digest(prompt: str, is_voice_input: bool) -> str:
@@ -71,6 +154,61 @@ def _web_request_digest(prompt: str, is_voice_input: bool) -> str:
         allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+class _DurableWebExecutionPreflight:
+    """Keep an authenticated claim alive before AgentBridge owns the run."""
+
+    def __init__(self, store, execution: dict):
+        self._store = store
+        self._execution = execution
+        self._stop = threading.Event()
+        self._thread = None
+        self._lock = threading.Lock()
+        self._lost_error = None
+
+    def verify_now(self) -> None:
+        with self._lock:
+            if self._lost_error is not None:
+                raise RuntimeError("durable Web preflight lease was lost") from self._lost_error
+        try:
+            self._store.verify_session_execution_fence(
+                self._execution["request_id"],
+                self._execution["owner_id"],
+                self._execution["session_id"],
+                self._execution["lease_token"],
+                self._execution["runner_id"],
+                self._execution["session_fence_token"],
+            )
+        except Exception as exc:
+            with self._lock:
+                self._lost_error = exc
+            raise RuntimeError("durable Web preflight lease is no longer owned") from exc
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self.verify_now()
+        interval = max(1.0, min(10.0, self._store._lease_seconds() / 3.0))
+
+        def renew() -> None:
+            while not self._stop.wait(interval):
+                try:
+                    self.verify_now()
+                except Exception:
+                    return
+
+        self._thread = threading.Thread(
+            target=renew, name="smart-assistant-web-preflight-lease", daemon=True
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=max(1.0, self._store._lease_seconds() / 3.0))
+        self._thread = None
 
 
 def _web_execution_state_for_terminal_delivery(
@@ -100,7 +238,8 @@ def _web_execution_state_for_terminal_delivery(
         lease_token = context.get("_web_execution_lease")
         runner_id = context.get("_web_execution_runner_id")
         session_id = context.get("session_id")
-        if not all((lease_token, runner_id, session_id)):
+        fence_token = context.get("_web_session_execution_fence")
+        if not all((lease_token, runner_id, session_id, fence_token)):
             return "in_doubt"
         try:
             store.finish_execution(
@@ -114,6 +253,7 @@ def _web_execution_state_for_terminal_delivery(
                     "reply reached Web terminal delivery without a durable "
                     "Agent execution settlement"
                 ),
+                fence_token=str(fence_token),
             )
         except Exception as exc:
             logger.error(
@@ -146,6 +286,7 @@ class _SSEEventJournal:
         self._next_event_id = 1
         self._bytes = 0
         self._overflowed = False
+        self._invalidated = False
         self._condition = threading.Condition()
         self._append_callback = append_callback
 
@@ -189,29 +330,72 @@ class _SSEEventJournal:
         self._overflowed = True
         self._condition.notify_all()
 
+    def _hydrate_locked(self, events) -> None:
+        """Merge durable event data without invoking the local writer."""
+
+        # A clear/delete mutation invalidates this in-process cache only after
+        # the durable store has closed delivery. Never let a late hydration from
+        # an old worker resurrect response bytes for the old context.
+        if self._invalidated:
+            return
+        known = {event_id: item for event_id, item in self._events}
+        previous = self._next_event_id - 1
+        incoming_previous = 0
+        for event_id, item in events:
+            if (
+                not isinstance(event_id, int)
+                or event_id <= incoming_previous
+                or not isinstance(item, dict)
+            ):
+                raise ValueError("invalid durable SSE event sequence")
+            incoming_previous = event_id
+            if event_id <= previous:
+                if known.get(event_id) != item:
+                    raise ValueError("conflicting durable SSE event sequence")
+                continue
+            if event_id != previous + 1:
+                raise ValueError("non-contiguous durable SSE event sequence")
+            self._events.append((event_id, item))
+            known[event_id] = item
+            self._bytes += self._encoded_size(item)
+            previous = event_id
+        self._next_event_id = previous + 1
+        self._condition.notify_all()
+
     def restore(self, events) -> None:
-        """Hydrate a durable prefix without re-appending it to storage."""
+        """Hydrate an initial durable prefix without re-appending it."""
 
         with self._condition:
-            previous = 0
-            for event_id, item in events:
-                if (
-                    not isinstance(event_id, int)
-                    or event_id <= previous
-                    or not isinstance(item, dict)
-                ):
-                    raise ValueError("invalid durable SSE event sequence")
-                self._events.append((event_id, item))
-                self._bytes += self._encoded_size(item)
-                previous = event_id
-            self._next_event_id = previous + 1
+            if self._events or self._next_event_id != 1:
+                raise ValueError("durable SSE journal is already initialized")
+            self._hydrate_locked(events)
+
+    def hydrate(self, events) -> None:
+        """Merge newly observed durable events from another process."""
+
+        with self._condition:
+            self._hydrate_locked(events)
+
+    def invalidate(self) -> None:
+        """Discard a locally buffered response after durable session mutation.
+
+        The durable store remains the audit record. This only prevents a live
+        process from emitting an already-buffered old-context event before its
+        next durable status check observes ``mutation_pending`` or
+        ``stale_context``.
+        """
+
+        with self._condition:
+            self._events.clear()
+            self._bytes = 0
+            self._invalidated = True
             self._condition.notify_all()
 
     def put(self, item: dict):
         """Append an event. Kept queue-like because producers only call put()."""
         size = self._encoded_size(item)
         with self._condition:
-            if self._overflowed:
+            if self._invalidated or self._overflowed:
                 return
             if (
                 len(self._events) >= _SSE_EVENT_JOURNAL_MAX_EVENTS
@@ -940,12 +1124,27 @@ def _clear_login_failures(key: str) -> None:
 
 # Localized text for /cancel system replies. Web is the only channel that
 # honors a per-request `lang`; other channels reply in Chinese by default.
-def _cancel_reply_text(cancelled: int, lang: str) -> str:
-    en = lang.startswith("en")
-    if cancelled > 0:
-        return "🛑 Cancelled" if en else "🛑 已中止"
-    return "Nothing to cancel." if en else "当前没有可中止的任务。"
+def _cancel_reply_text(
+    cancelled: int, lang: str, *, cancellation_requested: int = 0
+) -> str:
+    """Describe terminal cancellation separately from a pending request."""
 
+    en = lang.startswith("en")
+    if cancellation_requested > 0:
+        if cancelled > 0:
+            return (
+                "Cancellation requested for the active task; queued work was cancelled."
+                if en
+                else "???????????????????"
+            )
+        return (
+            "Cancellation requested; the active task may still be winding down."
+            if en
+            else "??????????????????"
+        )
+    if cancelled > 0:
+        return "Cancelled" if en else "???"
+    return "Nothing to cancel." if en else "???????????"
 
 def _steer_reply_text(status, lang: str) -> str:
     from agent.protocol import SteerStatus
@@ -1658,6 +1857,9 @@ class WebChannel(ChatChannel):
         self.sse_last_active = {}
         self._http_server = None
         self._sse_janitor_started = False
+        self._durable_dispatch_lock = threading.Lock()
+        self._durable_dispatch_wakeup = threading.Event()
+        self._durable_dispatch_started = False
 
     def _generate_msg_id(self):
         """生成唯一的消息ID"""
@@ -1667,6 +1869,292 @@ class WebChannel(ChatChannel):
     def _generate_request_id(self):
         """生成唯一的请求ID"""
         return str(uuid.uuid4())
+
+    def _settle_claimed_web_execution(
+        self,
+        durable_store,
+        claim: dict,
+        *,
+        outcome: str,
+        detail: str,
+    ) -> bool:
+        """Fail closed for a claim that was accepted but could not dispatch."""
+
+        try:
+            durable_store.finish_execution(
+                str(claim["request_id"]),
+                str(claim["owner_id"]),
+                str(claim["session_id"]),
+                str(claim["lease_token"]),
+                str(claim["runner_id"]),
+                outcome=outcome,
+                detail=detail,
+                fence_token=str(claim["session_fence_token"]),
+            )
+            return True
+        except Exception as exc:
+            logger.error(
+                "[WebChannel] failed to settle durable Web claim %s as %s: %s",
+                claim.get("request_id"),
+                outcome,
+                exc,
+            )
+            return False
+
+    def _new_durable_sse_journal(self, durable_store, claim: dict):
+        """Create the sole writer journal for an exact active claim."""
+
+        request_id = str(claim["request_id"])
+        owner_id = str(claim["owner_id"])
+        lease_token = str(claim["lease_token"])
+        runner_id = str(claim["runner_id"])
+        fence_token = str(claim["session_fence_token"])
+
+        def append(event_id: int, payload: dict) -> None:
+            durable_store.append(
+                request_id,
+                event_id,
+                payload,
+                lease_token=lease_token,
+                runner_id=runner_id,
+                fence_token=fence_token,
+            )
+
+        journal = _SSEEventJournal(append)
+        existing_events = durable_store.events_after(request_id, owner_id, 0)
+        if existing_events:
+            journal.restore(existing_events)
+        return journal
+
+    def _attach_durable_sse_observer(
+        self,
+        durable_store,
+        request_id: str,
+        owner_id: str,
+        *,
+        replay: Optional[dict] = None,
+    ) -> Optional[dict]:
+        """Attach this process to owner-authorized durable SSE evidence."""
+
+        if replay is None:
+            replay = durable_store.replay(request_id, owner_id)
+        if replay is None:
+            return None
+        if replay.get("delivery_status", "current") != "current":
+            # Do not recreate a local journal from old context data while a
+            # clear/delete closes presentation or after a clear advances it.
+            return None
+        events = replay.get("events")
+        if not isinstance(events, list):
+            raise ValueError("durable SSE replay has invalid event list")
+        existing = self.sse_queues.get(request_id)
+        if isinstance(existing, _SSEEventJournal):
+            existing.hydrate(events)
+        else:
+            journal = _SSEEventJournal()
+            journal.restore(events)
+            self.sse_queues[request_id] = journal
+        self.request_to_session[request_id] = str(replay["session_id"])
+        self.request_owners[request_id] = str(replay["owner_id"])
+        self.sse_last_active[request_id] = time.time()
+        return replay
+
+    def _wake_durable_web_dispatcher(self) -> None:
+        wakeup = getattr(self, "_durable_dispatch_wakeup", None)
+        if wakeup is not None:
+            wakeup.set()
+
+    def _start_durable_web_dispatcher(self) -> None:
+        """Start the local queue scanner once; SQLite decides ownership."""
+
+        lock = getattr(self, "_durable_dispatch_lock", None)
+        wakeup = getattr(self, "_durable_dispatch_wakeup", None)
+        if lock is None or wakeup is None:
+            return
+        with lock:
+            if getattr(self, "_durable_dispatch_started", False):
+                wakeup.set()
+                return
+            self._durable_dispatch_started = True
+
+        def dispatch_loop() -> None:
+            while True:
+                try:
+                    self._dispatch_durable_web_queues()
+                except Exception as exc:
+                    logger.error("[WebChannel] durable Web dispatch loop failed: %s", exc)
+                wakeup.wait(1.0)
+                wakeup.clear()
+
+        try:
+            threading.Thread(
+                target=dispatch_loop,
+                name="smart-assistant-web-durable-dispatch",
+                daemon=True,
+            ).start()
+        except Exception:
+            with lock:
+                self._durable_dispatch_started = False
+            raise
+
+    def _launch_claimed_web_execution(self, durable_store, claim: dict) -> tuple[bool, Optional[str]]:
+        """Construct and start an Agent worker only after a queue claim."""
+
+        preflight = None
+        worker_started = False
+        request_id = str(claim.get("request_id") or "")
+        try:
+            required = (
+                "request_id", "owner_id", "session_id", "lease_token",
+                "runner_id", "session_fence_token",
+            )
+            if claim.get("claim_status") != "claimed" or any(not claim.get(key) for key in required):
+                raise ValueError("invalid durable Web dispatch claim")
+            preflight = _DurableWebExecutionPreflight(durable_store, claim)
+            preflight.start()
+
+            def cancellation_requested() -> bool:
+                return durable_store.cancellation_requested_for_fence(
+                    str(claim["request_id"]),
+                    str(claim["owner_id"]),
+                    str(claim["session_id"]),
+                    str(claim["lease_token"]),
+                    str(claim["runner_id"]),
+                    str(claim["session_fence_token"]),
+                )
+
+            if cancellation_requested():
+                self._settle_claimed_web_execution(
+                    durable_store,
+                    claim,
+                    outcome="cancelled",
+                    detail="cancelled before durable Web dispatch",
+                )
+                preflight.stop()
+                return False, "Cancellation requested before Agent execution"
+            dispatch = durable_store.load_execution_dispatch(
+                str(claim["request_id"]),
+                str(claim["owner_id"]),
+                str(claim["session_id"]),
+                str(claim["lease_token"]),
+                str(claim["runner_id"]),
+                str(claim["session_fence_token"]),
+            )
+            prompt = dispatch.get("prompt")
+            is_voice_input = dispatch.get("is_voice_input")
+            if not isinstance(prompt, str) or not isinstance(is_voice_input, bool):
+                raise ValueError("durable Web dispatch envelope is invalid")
+
+            _claim_web_session(str(claim["session_id"]), str(claim["owner_id"]))
+            preflight.verify_now()
+            msg = WebMessage(self._generate_msg_id(), prompt)
+            msg.from_user_id = str(claim["session_id"])
+            context = self._compose_context(
+                ContextType.TEXT, prompt, msg=msg, isgroup=False
+            )
+            preflight.verify_now()
+            if context is None:
+                self._settle_claimed_web_execution(
+                    durable_store, claim,
+                    outcome="failed_safe",
+                    detail="Web message was filtered before Agent execution",
+                )
+                preflight.stop()
+                return False, "Message was filtered"
+
+            session_id = str(claim["session_id"])
+            owner_id = str(claim["owner_id"])
+            self.request_to_session[request_id] = session_id
+            self.request_owners[request_id] = owner_id
+            if session_id not in self.session_queues:
+                self.session_queues[session_id] = Queue()
+            self.sse_queues[request_id] = self._new_durable_sse_journal(
+                durable_store, claim
+            )
+            self.sse_last_active[request_id] = time.time()
+
+            context["session_id"] = session_id
+            context["receiver"] = session_id
+            context["channel_type"] = "web"
+            context["session_owner_id"] = owner_id
+            context["trusted_identity"] = _web_identity(owner_id)
+            context["_web_execution_lease"] = str(claim["lease_token"])
+            context["_web_execution_runner_id"] = str(claim["runner_id"])
+            context["_web_session_execution_fence"] = str(claim["session_fence_token"])
+            context["request_id"] = request_id
+            if is_voice_input:
+                context["is_voice_input"] = True
+            context["on_event"] = self._make_sse_callback(request_id)
+            if cancellation_requested():
+                self._settle_claimed_web_execution(
+                    durable_store,
+                    claim,
+                    outcome="cancelled",
+                    detail="cancelled before Agent worker start",
+                )
+                preflight.stop()
+                return False, "Cancellation requested before Agent execution"
+
+            def run_claimed_worker() -> None:
+                try:
+                    self.produce(context)
+                finally:
+                    try:
+                        self._wake_durable_web_dispatcher()
+                    finally:
+                        preflight.stop()
+
+            threading.Thread(
+                target=run_claimed_worker,
+                name=f"smart-assistant-web-request-{request_id[:12]}",
+                daemon=True,
+            ).start()
+            worker_started = True
+            return True, None
+        except Exception as exc:
+            logger.error(
+                "[WebChannel] durable Web dispatch rejected for %s: %s",
+                request_id or claim.get("request_id"), exc,
+            )
+            if preflight is not None:
+                preflight.stop()
+            if not worker_started:
+                self._settle_claimed_web_execution(
+                    durable_store, claim,
+                    outcome="failed_safe",
+                    detail="Web dispatch failed before Agent execution",
+                )
+                if request_id:
+                    self._drop_sse_request(request_id)
+            return False, "Web dispatch failed before Agent execution"
+
+    def _dispatch_durable_web_queues(self) -> int:
+        """Claim and launch a bounded number of global queued heads."""
+
+        lock = getattr(self, "_durable_dispatch_lock", None)
+        if lock is None or not lock.acquire(blocking=False):
+            return 0
+        try:
+            durable_store = _get_durable_sse_store()
+            dispatched = 0
+            for _ in range(32):
+                claim = durable_store.claim_next_queued_execution(
+                    _WEB_EXECUTION_RUNNER_ID
+                )
+                if claim is None:
+                    break
+                dispatched += 1
+                started, message = self._launch_claimed_web_execution(
+                    durable_store, claim
+                )
+                if not started:
+                    logger.warning(
+                        "[WebChannel] queued Web request %s was settled without a worker: %s",
+                        claim.get("request_id"), message,
+                    )
+            return dispatched
+        finally:
+            lock.release()
 
     def _fetch_latest_pair_seqs(
         self, session_id: str, owner_id: Optional[str] = None
@@ -1740,11 +2228,30 @@ class WebChannel(ChatChannel):
                     })
                     return
                 if execution_state == "cancelled":
-                    # A cancel may happen before the Agent event callback
-                    # reaches the stream.  Emit the UI marker again (the
-                    # frontend de-duplicates it) so the trailing partial
-                    # response cannot be mistaken for a normal success.
-                    self.sse_queues[request_id].put({
+                    # Durable cancellation writes its terminal marker in the
+                    # same transaction as execution_state. Hydrate that exact
+                    # evidence instead of allowing this late producer to append
+                    # a second event (especially a trailing ``done``).
+                    queue = self.sse_queues[request_id]
+                    if isinstance(queue, _SSEEventJournal):
+                        owner_id = context.get("session_owner_id") if context else None
+                        if owner_id:
+                            try:
+                                queue.hydrate(
+                                    _get_durable_sse_store().events_after(
+                                        request_id, str(owner_id), 0
+                                    )
+                                )
+                            except Exception as durable_exc:
+                                logger.error(
+                                    "[WebChannel] cancelled durable SSE hydrate failed for %s: %s",
+                                    request_id,
+                                    durable_exc,
+                                )
+                        return
+                    # Legacy focused-test queues have no durable writer and
+                    # retain their historical post-cancel tail behaviour.
+                    queue.put({
                         "type": "cancelled",
                         "content": "",
                         "request_id": request_id,
@@ -1976,16 +2483,31 @@ class WebChannel(ChatChannel):
                 })
 
             elif event_type == "agent_cancelled":
-                # Push an explicit cancelled SSE event so the frontend
-                # marks the bubble as stopped. A trailing "done" still
-                # arrives with the partial answer.
-                final_response = data.get("final_response", "")
-                q.put({
-                    "type": "cancelled",
-                    "content": final_response,
-                    "request_id": request_id,
-                    "timestamp": time.time(),
-                })
+                if isinstance(q, _SSEEventJournal):
+                    # A durable terminal marker is written only by the exact
+                    # fence holder's finish_execution() transaction. Emitting
+                    # ``cancelled`` here would let a crash between callback and
+                    # settlement leave a false terminal after recovery becomes
+                    # in_doubt. Keep the UI informed with a non-terminal phase.
+                    q.put({
+                        "type": "phase",
+                        "content": i18n.t(
+                            "?????????????",
+                            "Cancellation observed; confirming durable outcome.",
+                        ),
+                        "request_id": request_id,
+                        "timestamp": time.time(),
+                    })
+                else:
+                    # Legacy focused-test queues have no durable settlement
+                    # authority and retain their historical cancellation marker.
+                    final_response = data.get("final_response", "")
+                    q.put({
+                        "type": "cancelled",
+                        "content": final_response,
+                        "request_id": request_id,
+                        "timestamp": time.time(),
+                    })
 
             elif event_type == "agent_end":
                 # Do not synthesize a terminal `done` here.  This callback
@@ -2365,20 +2887,52 @@ class WebChannel(ChatChannel):
             # inline_reply payload to be rendered synchronously.
             stripped_prompt = (prompt or "").strip().lower()
             if stripped_prompt == "/cancel":
+                from agent.protocol import get_cancel_registry
+
+                immediately_cancelled = 0
+                cancellation_requested = 0
+                local_signal_count = 0
                 if owner_id is not None:
                     _require_web_session(session_id, owner_id)
-                from agent.protocol import get_cancel_registry
-                cancelled = get_cancel_registry().cancel_session(session_id)
+                    session_result = _get_durable_sse_store().request_session_cancellation(
+                        owner_id,
+                        session_id,
+                        detail="cancelled by authenticated Web session command",
+                    )
+                    immediately_cancelled = int(session_result["cancelled"])
+                    cancellation_requested = int(
+                        session_result["cancellation_requested"]
+                    )
+                    # This only accelerates the local worker. The response and
+                    # inline text are driven by the durable counts above.
+                    local_signal_count = get_cancel_registry().cancel_session_owned(
+                        session_id, owner_id
+                    )
+                else:
+                    local_signal_count = get_cancel_registry().cancel_session(session_id)
+                    cancellation_requested = local_signal_count
                 lang = (json_data.get('lang') or 'zh').lower()
-                msg_text = _cancel_reply_text(cancelled, lang)
+                msg_text = _cancel_reply_text(
+                    immediately_cancelled,
+                    lang,
+                    cancellation_requested=cancellation_requested,
+                )
                 logger.info(
-                    f"[WebChannel] /cancel fast-path: session={session_id}, cancelled={cancelled}, lang={lang}"
+                    f"[WebChannel] /cancel fast-path: session={session_id}, "
+                    f"immediately_cancelled={immediately_cancelled}, "
+                    f"cancellation_requested={cancellation_requested}, "
+                    f"local_signal={local_signal_count}, lang={lang}"
                 )
                 return json.dumps({
                     "status": "success",
                     "request_id": "",
                     "stream": False,
                     "inline_reply": msg_text,
+                    "cancelled": immediately_cancelled,
+                    "cancellation_requested": cancellation_requested,
+                    "cancellation_accepted": (
+                        immediately_cancelled + cancellation_requested
+                    ),
                 })
 
             # Explicit steering also bypasses the normal session queue. The
@@ -2501,6 +3055,9 @@ class WebChannel(ChatChannel):
             request_id = self._generate_request_id()
             if owner_id is not None:
                 durable_store = _get_durable_sse_store()
+                start_dispatcher = getattr(self, "_start_durable_web_dispatcher", None)
+                if callable(start_dispatcher):
+                    start_dispatcher()
                 execution_claim = durable_store.claim_execution(
                     request_id,
                     owner_id,
@@ -2508,66 +3065,103 @@ class WebChannel(ChatChannel):
                     json_data.get("idempotency_key"),
                     _web_request_digest(prompt, is_voice_input),
                     _WEB_EXECUTION_RUNNER_ID,
+                    {"prompt": prompt, "is_voice_input": is_voice_input},
                 )
-                if execution_claim["claim_status"] != "claimed":
-                    if execution_claim["claim_status"] == "session_busy":
-                        # Do not acknowledge a second mutable turn as a
-                        # success and then fail it later in a worker.  The
-                        # caller can retry after the fenced turn reaches a
-                        # durable terminal outcome.
+
+                dispatch_claim = execution_claim.get("dispatch_claim")
+                if (
+                    isinstance(dispatch_claim, dict)
+                    and dispatch_claim.get("request_id") != execution_claim.get("request_id")
+                ):
+                    started, message = self._launch_claimed_web_execution(
+                        durable_store, dispatch_claim
+                    )
+                    if not started:
+                        logger.warning(
+                            "[WebChannel] predecessor dispatch %s was not started: %s",
+                            dispatch_claim.get("request_id"), message,
+                        )
+
+                claim_status = execution_claim.get("claim_status")
+                execution_state = str(execution_claim.get("execution_state") or "")
+                if claim_status in {"mutation_pending", "stale_context"}:
+                    message = (
+                        "session mutation is in progress; prior request cannot be replayed"
+                        if claim_status == "mutation_pending"
+                        else "prior request belongs to a cleared session context and cannot be replayed"
+                    )
+                    return json.dumps(
+                        {
+                            "status": "error",
+                            "request_id": execution_claim.get("request_id"),
+                            "stream": False,
+                            "execution_state": execution_state,
+                            claim_status: True,
+                            "message": message,
+                        },
+                        ensure_ascii=False,
+                    )
+                if claim_status == "claimed":
+                    started, message = self._launch_claimed_web_execution(
+                        durable_store, execution_claim
+                    )
+                    if not started:
                         return json.dumps(
                             {
                                 "status": "error",
+                                "request_id": execution_claim.get("request_id"),
                                 "stream": False,
-                                "execution_state": "session_busy",
-                                "message": (
-                                    "Session is already processing another request; "
-                                    "retry after it finishes"
-                                ),
+                                "execution_state": "failed_safe",
+                                "message": message or "Web dispatch failed before Agent execution",
                             },
                             ensure_ascii=False,
                         )
-                    # A network retry reconnects to the original request. It
-                    # never creates a replacement worker, even if a previous
-                    # process left the durable claim unresolved.
-                    execution_state = execution_claim["execution_state"]
-                    if execution_state in {"failed_safe", "in_doubt"}:
-                        return json.dumps(
-                            {
-                                "status": "error",
-                                "request_id": execution_claim["request_id"],
-                                "stream": False,
-                                "duplicate": True,
-                                "execution_state": execution_state,
-                                "message": (
-                                    "prior request did not reach a safely "
-                                    "retryable terminal outcome"
-                                ),
-                            },
-                            ensure_ascii=False,
-                        )
+                    execution_worker_started = True
                     return json.dumps(
                         {
                             "status": "success",
                             "request_id": execution_claim["request_id"],
                             "stream": True,
-                            "duplicate": True,
-                            "execution_state": execution_state,
+                            "execution_state": "running",
                         },
                         ensure_ascii=False,
                     )
 
-                # Conversation ownership is itself persistent state.  Record
-                # the Web execution claim first so malformed attachments,
-                # prefix/config failures, or a session-store failure cannot
-                # create an untracked state mutation before the request has a
-                # durable fail-closed identity.
-                _claim_web_session(session_id, owner_id)
+                if claim_status not in {"queued", "duplicate"}:
+                    raise RuntimeError("durable Web request returned an unknown claim state")
+                if execution_state in {"failed_safe", "in_doubt"}:
+                    return json.dumps(
+                        {
+                            "status": "error",
+                            "request_id": execution_claim.get("request_id"),
+                            "stream": False,
+                            "duplicate": claim_status == "duplicate",
+                            "execution_state": execution_state,
+                            "message": "prior request did not reach a safely retryable terminal outcome",
+                        },
+                        ensure_ascii=False,
+                    )
 
-            # Plugins run inside _compose_context. The durable claim must
-            # already exist before that hook, because a plugin is extension
-            # code and must not be allowed to perform an untracked side effect
-            # before the request's fail-closed execution fence.
+                observed_request_id = str(execution_claim["request_id"])
+                replay = self._attach_durable_sse_observer(
+                    durable_store, observed_request_id, owner_id
+                )
+                if replay is None:
+                    raise RuntimeError("durable Web request disappeared before SSE observation")
+                response = {
+                    "status": "success",
+                    "request_id": observed_request_id,
+                    "stream": True,
+                    "duplicate": claim_status == "duplicate",
+                    "execution_state": execution_state,
+                }
+                queue_position = execution_claim.get("queue_position")
+                if execution_state == "queued" and isinstance(queue_position, int):
+                    response["queued"] = True
+                    response["queue_position"] = queue_position
+                    self._wake_durable_web_dispatcher()
+                return json.dumps(response, ensure_ascii=False)
+
             msg = WebMessage(self._generate_msg_id(), prompt)
             msg.from_user_id = session_id
             context = self._compose_context(
@@ -2575,16 +3169,6 @@ class WebChannel(ChatChannel):
             )
 
             if context is None:
-                if execution_claim is not None and durable_store is not None:
-                    durable_store.finish_execution(
-                        request_id,
-                        execution_claim["owner_id"],
-                        execution_claim["session_id"],
-                        execution_claim["lease_token"],
-                        execution_claim["runner_id"],
-                        outcome="failed_safe",
-                        detail="Web message was filtered before Agent execution",
-                    )
                 logger.warning(
                     f"[WebChannel] Context is None for session {session_id}, "
                     "message may be filtered"
@@ -2592,55 +3176,24 @@ class WebChannel(ChatChannel):
                 return json.dumps({"status": "error", "message": "Message was filtered"})
 
             self.request_to_session[request_id] = session_id
-            if owner_id is not None:
-                self.request_owners[request_id] = owner_id
             if session_id not in self.session_queues:
                 self.session_queues[session_id] = Queue()
-
             if use_sse:
-                if not owner_id:
-                    # All HTTP entry points provide an authenticated principal.
-                    # Refuse a direct/legacy caller rather than start a stream
-                    # whose durable owner cannot be verified on recovery.
-                    raise PermissionError("SSE request owner is required")
-                self.sse_queues[request_id] = _SSEEventJournal(
-                    lambda event_id, payload: durable_store.append(
-                        request_id, event_id, payload
-                    )
-                )
-                self.sse_last_active[request_id] = time.time()
+                raise PermissionError("SSE request owner is required")
 
             context["session_id"] = session_id
             context["receiver"] = session_id
-            if owner_id is not None:
-                # Do not rely on channel-factory mutation for the security
-                # boundary: this HTTP handler is Web by construction.
-                context["channel_type"] = "web"
-                context["session_owner_id"] = owner_id
-                context["trusted_identity"] = _web_identity(owner_id)
-                context["_web_execution_lease"] = execution_claim["lease_token"]
-                context["_web_execution_runner_id"] = execution_claim["runner_id"]
-                context["_web_session_execution_fence"] = execution_claim[
-                    "session_fence_token"
-                ]
             context["request_id"] = request_id
             if is_voice_input:
-                # Web channel runs its own TTS post-pipeline via
-                # _maybe_dispatch_auto_tts; don't set desire_rtype here or
-                # chat_channel would synthesize a duplicate VOICE reply.
                 context["is_voice_input"] = True
-
-            if use_sse:
-                context["on_event"] = self._make_sse_callback(request_id)
-
             threading.Thread(target=self.produce, args=(context,)).start()
             execution_worker_started = True
-
             return json.dumps({"status": "success", "request_id": request_id, "stream": use_sse})
 
         except Exception as e:
             if (
                 execution_claim is not None
+                and execution_claim.get("claim_status") == "claimed"
                 and durable_store is not None
                 and not execution_worker_started
             ):
@@ -2653,6 +3206,7 @@ class WebChannel(ChatChannel):
                         execution_claim["runner_id"],
                         outcome="failed_safe",
                         detail="Web dispatch failed before Agent execution",
+                        fence_token=execution_claim["session_fence_token"],
                     )
                 except Exception as finish_exc:
                     logger.error(
@@ -2663,6 +3217,27 @@ class WebChannel(ChatChannel):
                 self._drop_sse_request(request_id)
             logger.error(f"Error processing message: {e}")
             return json.dumps({"status": "error", "message": str(e)})
+
+    def _invalidate_durable_session_sse(self, owner_id: str, session_id: str) -> int:
+        """Invalidate only this process's old-context journals for a session.
+
+        Other Web processes are fenced by ``execution_delivery_status`` on
+        every durable stream observation. We deliberately keep the mappings
+        long enough for a live local stream to emit a truthful terminal error
+        rather than silently delivering a buffered old response.
+        """
+
+        invalidated = 0
+        for request_id, mapped_session in list(self.request_to_session.items()):
+            if mapped_session != session_id:
+                continue
+            if self.request_owners.get(request_id) != owner_id:
+                continue
+            journal = self.sse_queues.get(request_id)
+            if isinstance(journal, _SSEEventJournal):
+                journal.invalidate()
+                invalidated += 1
+        return invalidated
 
     def _drop_sse_request(self, request_id: str):
         """Reclaim all state tied to an SSE request to prevent fd/memory leaks.
@@ -2683,22 +3258,12 @@ class WebChannel(ChatChannel):
     def _recover_sse_request(
         self, request_id: str, owner_id: Optional[str]
     ) -> bool:
-        """Hydrate an owner-checked durable SSE prefix after a process loss.
-
-        A restarted process cannot honestly resume the old agent worker. For a
-        non-terminal durable run it therefore appends an in-memory terminal
-        `unconfirmed` error after the durable prefix. This preserves every
-        committed event while preventing a reconnect from displaying success.
-        """
+        """Observe durable evidence without killing a live peer worker."""
 
         if not request_id or not owner_id:
             return False
         try:
             durable_store = _get_durable_sse_store()
-            # This process has no live queue for the request. A durable
-            # ``running`` claim may have crossed a process crash, a proxy route
-            # change, or a second-instance handover. Fence it as uncertain
-            # before replay rather than starting another Agent/tool worker.
             durable_store.mark_interrupted_execution(request_id, owner_id)
             replay = durable_store.replay(request_id, owner_id)
         except Exception as exc:
@@ -2706,23 +3271,16 @@ class WebChannel(ChatChannel):
                 f"[WebChannel] durable SSE recovery unavailable for {request_id}: {exc}"
             )
             return False
-        if replay is None:
+        if replay is None or replay.get("delivery_status", "current") != "current":
             return False
-        execution_state = replay["execution_state"]
+
+        execution_state = str(replay["execution_state"])
         replay_events = replay["events"]
         if execution_state in {"in_doubt", "failed_safe"}:
-            # A stale worker could have written a transport `done` before its
-            # execution claim was fenced.  Preserve its sequence numbers for
-            # Last-Event-ID correctness, but rewrite all renderer-terminal
-            # payloads into non-terminal status lines so a reconnect can never
-            # display a false completed answer and stop before our explicit
-            # uncertainty error arrives.
             replay_events = []
             for event_id, payload in replay["events"]:
                 if str(payload.get("type") or "") in {
-                    "done",
-                    "error",
-                    "voice_attach",
+                    "done", "error", "cancelled", "voice_attach"
                 }:
                     replay_events.append((
                         event_id,
@@ -2738,6 +3296,7 @@ class WebChannel(ChatChannel):
                     ))
                 else:
                     replay_events.append((event_id, payload))
+
         journal = _SSEEventJournal()
         try:
             journal.restore(replay_events)
@@ -2747,7 +3306,7 @@ class WebChannel(ChatChannel):
             )
             return False
         terminal_seen = any(
-            str(payload.get("type") or "") in {"done", "error"}
+            str(payload.get("type") or "") in {"done", "error", "cancelled"}
             for _event_id, payload in replay_events
         )
         if execution_state == "in_doubt":
@@ -2760,10 +3319,7 @@ class WebChannel(ChatChannel):
                 "request_id": request_id,
                 "recovered": True,
             })
-        elif not terminal_seen:
-            # A durable execution state can settle before the channel sends its
-            # final SSE payload. Do not manufacture a successful ``done`` with
-            # missing content; direct the user to the durably stored history.
+        elif execution_state not in {"queued", "running"} and not terminal_seen:
             if execution_state == "completed":
                 message = (
                     "Agent execution completed, but its final stream payload "
@@ -2785,10 +3341,13 @@ class WebChannel(ChatChannel):
                 "request_id": request_id,
                 "recovered": True,
             })
+
         self.request_to_session[request_id] = str(replay["session_id"])
         self.request_owners[request_id] = str(replay["owner_id"])
         self.sse_queues[request_id] = journal
         self.sse_last_active[request_id] = time.time()
+        if execution_state == "queued":
+            self._wake_durable_web_dispatcher()
         return True
 
     def _start_sse_janitor(self):
@@ -2860,13 +3419,27 @@ class WebChannel(ChatChannel):
             if not callable(recover) or not recover(request_id, owner_id):
                 yield b"data: {\"type\": \"error\", \"message\": \"invalid request_id\"}\n\n"
                 return
-        if owner_id is not None and self.request_owners.get(request_id) != owner_id:
+        # Legacy in-memory Queue streams intentionally have no durable owner
+        # registry. Authenticated streams remain fail-closed: a supplied owner
+        # must exactly match the registry entry before any event is yielded.
+        request_owners = getattr(self, "request_owners", {})
+        if owner_id is not None and request_owners.get(request_id) != owner_id:
             yield b"data: {\"type\": \"error\", \"message\": \"invalid request_id\"}\n\n"
             return
 
         q = self.sse_queues[request_id]
         journal = isinstance(q, _SSEEventJournal)
         cursor = _parse_sse_event_cursor(after_event_id)
+        durable_owner_id = owner_id or request_owners.get(request_id)
+        durable_store = None
+        durable_status_check_at = 0.0
+        if journal and durable_owner_id:
+            try:
+                durable_store = _get_durable_sse_store()
+            except Exception as exc:
+                logger.warning(
+                    f"[WebChannel] durable SSE observer unavailable for {request_id}: {exc}"
+                )
         stream_lock = getattr(self, "_sse_stream_lock", None)
         stream_generations = getattr(self, "_sse_stream_generations", None)
         connection_id = uuid.uuid4().hex
@@ -2898,10 +3471,44 @@ class WebChannel(ChatChannel):
         post_deadline = 0.0
         cancelled = False
 
+        def durable_delivery_status() -> str | None:
+            if not journal or not durable_owner_id:
+                return "current"
+            if durable_store is None:
+                return None
+            return durable_store.execution_delivery_status(
+                request_id, str(durable_owner_id)
+            )
+
+        def delivery_rejection_payload(status: str | None) -> dict[str, str]:
+            if status == "mutation_pending":
+                message = "session mutation is in progress; prior task result is unavailable"
+            elif status == "stale_context":
+                message = "session context was cleared; prior task result is unavailable"
+            else:
+                message = "durable SSE observation failed; task result is unconfirmed"
+            return {"type": "error", "message": message}
+
         try:
             while time.time() < deadline:
                 if not owns_connection():
                     return
+                if journal and durable_owner_id:
+                    try:
+                        delivery_status = durable_delivery_status()
+                    except Exception as durable_exc:
+                        logger.warning(
+                            f"[WebChannel] durable SSE delivery status rejected {request_id}: {durable_exc}"
+                        )
+                        delivery_status = None
+                    if delivery_status != "current":
+                        payload = json.dumps(
+                            delivery_rejection_payload(delivery_status),
+                            ensure_ascii=False,
+                        )
+                        yield f"data: {payload}\n\n".encode("utf-8")
+                        post_done = True
+                        return
                 # Mark the stream alive on every loop. While the client keeps
                 # consuming, the generator runs and refreshes this, so the
                 # janitor won't reclaim a long-running but active stream.
@@ -2915,6 +3522,39 @@ class WebChannel(ChatChannel):
                     else:
                         item = q.get(timeout=1)
                 except Empty:
+                    if journal and durable_store is not None and durable_owner_id:
+                        try:
+                            durable_events = durable_store.events_after(
+                                request_id, str(durable_owner_id), cursor
+                            )
+                            if durable_events:
+                                q.hydrate(durable_events)
+                                continue
+                            now = time.time()
+                            if now >= durable_status_check_at:
+                                replay = durable_store.replay(
+                                    request_id, str(durable_owner_id)
+                                )
+                                durable_status_check_at = now + 5.0
+                                if replay is not None and replay.get("execution_state") in {
+                                    "queued", "running"
+                                }:
+                                    deadline = now + idle_timeout
+                                    if replay.get("execution_state") == "queued":
+                                        self._wake_durable_web_dispatcher()
+                        except Exception as durable_exc:
+                            logger.warning(
+                                f"[WebChannel] durable SSE observer rejected {request_id}: {durable_exc}"
+                            )
+                            payload = json.dumps(
+                                {
+                                    "type": "error",
+                                    "message": "durable SSE observation failed; task result is unconfirmed",
+                                },
+                                ensure_ascii=False,
+                            )
+                            yield f"data: {payload}\n\n".encode("utf-8")
+                            return
                     if post_done and time.time() >= post_deadline:
                         break
                     yield b": keepalive\n\n"
@@ -2922,6 +3562,24 @@ class WebChannel(ChatChannel):
 
                 if not owns_connection():
                     return
+                # Recheck after a local journal read. A clear may have committed
+                # between the first status observation and this buffered event.
+                if journal and durable_owner_id:
+                    try:
+                        delivery_status = durable_delivery_status()
+                    except Exception as durable_exc:
+                        logger.warning(
+                            f"[WebChannel] durable SSE delivery recheck rejected {request_id}: {durable_exc}"
+                        )
+                        delivery_status = None
+                    if delivery_status != "current":
+                        payload = json.dumps(
+                            delivery_rejection_payload(delivery_status),
+                            ensure_ascii=False,
+                        )
+                        yield f"data: {payload}\n\n".encode("utf-8")
+                        post_done = True
+                        return
                 deadline = time.time() + (
                     CANCEL_GRACE_SECONDS if cancelled else idle_timeout
                 )
@@ -2939,12 +3597,18 @@ class WebChannel(ChatChannel):
                         else POST_DONE_TAIL_SECONDS
                     )
                 elif itype == "cancelled":
-                    # Wait for the run to actually wind down and send its
-                    # partial reply as "done"; closing on a blind timer here
-                    # strands in-flight tool bubbles and makes the client
-                    # reconnect onto a dropped queue.
                     cancelled = True
-                    deadline = time.time() + CANCEL_GRACE_SECONDS
+                    if journal:
+                        # A durable cancellation marker is terminal evidence.
+                        # Do not wait for a late producer to add ``done`` after
+                        # it; retain a short replay tail, then close cleanly.
+                        post_done = True
+                        post_deadline = time.time() + POST_CANCEL_TAIL_SECONDS
+                        deadline = post_deadline
+                    else:
+                        # Legacy in-memory Queue streams retain their old
+                        # post-cancel tail for focused compatibility tests.
+                        deadline = time.time() + CANCEL_GRACE_SECONDS
                 elif itype == "voice_attach":
                     # WSGI buffers the previous chunk until the next yield;
                     # shrink the tail so the generator wakes up quickly to
@@ -2975,14 +3639,7 @@ class WebChannel(ChatChannel):
                 self._drop_sse_request(request_id)
 
     def cancel_request(self, owner_id: Optional[str] = None):
-        """
-        Cancel an in-flight agent run.
-
-        Body: {"request_id": "...", "session_id": "..."}
-        Either field is sufficient; request_id is preferred when known.
-        Always returns success even when nothing was running, so the
-        client's UX is idempotent.
-        """
+        """Cancel one owned request or all owned queued/running session work."""
         try:
             from agent.protocol import get_cancel_registry
 
@@ -2995,45 +3652,104 @@ class WebChannel(ChatChannel):
             request_id = (json_data.get("request_id") or "").strip()
             session_id = (json_data.get("session_id") or "").strip()
             lang = (json_data.get("lang") or "zh").lower()
+            durable_store = None
 
             if owner_id is not None:
-                if request_id and self.request_owners.get(request_id) != owner_id:
-                    raise PermissionError("request not found")
+                durable_store = _get_durable_sse_store()
+                if request_id:
+                    local_owner = self.request_owners.get(request_id)
+                    if local_owner is not None and local_owner != owner_id:
+                        raise PermissionError("request not found")
+                    if local_owner is None and durable_store.replay(request_id, owner_id) is None:
+                        raise PermissionError("request not found")
                 if session_id:
                     _require_web_session(session_id, owner_id)
 
             registry = get_cancel_registry()
-            cancelled = 0
+            immediately_cancelled = 0
+            cancellation_requested = 0
+            local_signal_count = 0
+            cancellation_record = None
 
             if request_id:
                 if owner_id is not None:
+                    cancellation_record = durable_store.request_execution_cancellation(
+                        request_id,
+                        owner_id,
+                        detail="cancelled by authenticated Web request",
+                    )
+                    if cancellation_record is None:
+                        raise PermissionError("request not found")
+                    if cancellation_record.get("cancellation_state") == "cancelled":
+                        immediately_cancelled = 1
+                    elif cancellation_record.get("cancellation_state") == "requested":
+                        cancellation_requested = 1
+                    # The registry is only an in-process acceleration. The
+                    # durable result above, not this count, is the API's proof
+                    # that a different Web process accepted the request.
                     if registry.cancel_request_owned(request_id, owner_id):
-                        cancelled = 1
+                        local_signal_count = 1
                 elif registry.cancel_request(request_id):
-                    cancelled = 1
+                    cancellation_requested = 1
+                    local_signal_count = 1
+            elif session_id:
+                if owner_id is not None:
+                    session_result = durable_store.request_session_cancellation(
+                        owner_id,
+                        session_id,
+                        detail="cancelled by authenticated Web session request",
+                    )
+                    immediately_cancelled = int(session_result["cancelled"])
+                    cancellation_requested = int(session_result["cancellation_requested"])
+                    local_signal_count = registry.cancel_session_owned(session_id, owner_id)
+                else:
+                    local_signal_count = registry.cancel_session(session_id)
+                    cancellation_requested = local_signal_count
 
-            if cancelled == 0 and session_id:
-                cancelled = (
-                    registry.cancel_session_owned(session_id, owner_id)
-                    if owner_id is not None
-                    else registry.cancel_session(session_id)
+            cancellation_accepted = immediately_cancelled + cancellation_requested
+            if cancellation_accepted < 1:
+                logger.info(
+                    f"[WebChannel] cancel request had no active owned target: "
+                    f"request_id={request_id!r}, session_id={session_id!r}"
                 )
-
-            if request_id and request_id in self.sse_queues:
-                self.sse_queues[request_id].put({
-                    "type": "cancelled",
-                    "content": "🛑 Cancelled" if lang.startswith("en") else "🛑 已中止",
-                    "request_id": request_id,
-                    "timestamp": time.time(),
+                return json.dumps({
+                    "status": "error",
+                    "cancelled": 0,
+                    "cancellation_requested": 0,
+                    "cancellation_accepted": 0,
+                    "message": "no active owned request accepted cancellation",
                 })
+            if (
+                request_id
+                and immediately_cancelled
+                and owner_id is not None
+                and request_id in self.sse_queues
+            ):
+                queue = self.sse_queues[request_id]
+                if isinstance(queue, _SSEEventJournal):
+                    # Queued cancellation was committed directly by the durable
+                    # store. Hydrate it rather than enqueueing a second local
+                    # terminal payload with a different timestamp.
+                    queue.hydrate(durable_store.events_after(request_id, owner_id, 0))
+                else:
+                    queue.put({
+                        "type": "cancelled",
+                        "content": "?? Cancelled" if lang.startswith("en") else "?? ???",
+                        "request_id": request_id,
+                        "timestamp": time.time(),
+                    })
 
             logger.info(
                 f"[WebChannel] cancel request: request_id={request_id!r}, "
-                f"session_id={session_id!r}, cancelled={cancelled}"
+                f"session_id={session_id!r}, immediately_cancelled={immediately_cancelled}, "
+                f"cancellation_requested={cancellation_requested}, local_signal={local_signal_count}"
             )
+            self._wake_durable_web_dispatcher()
             return json.dumps({
                 "status": "success",
-                "cancelled": cancelled,
+                "cancelled": immediately_cancelled,
+                "cancellation_requested": cancellation_requested,
+                "cancellation_accepted": cancellation_accepted,
             })
 
         except Exception as e:
@@ -3086,12 +3802,42 @@ class WebChannel(ChatChannel):
         return html.replace("{{COW_DEFAULT_LANG}}", i18n.get_language())
 
     def startup(self):
-        configured_host = conf().get("web_host", "")
-        host, is_public_bind = _resolve_web_bind_host(configured_host)
-        # The desktop app passes its chosen port via COW_WEB_PORT so its backend
-        # never collides with a source-run web console (default 9899). This makes
-        # the port a single source of truth owned by the Electron shell.
-        port = int(os.environ.get("COW_WEB_PORT") or conf().get("web_port", 9899))
+        desktop_mode = os.environ.get("COW_DESKTOP") == "1"
+        desktop_launch_id = None
+        desktop_secret = None
+        desktop_control_fd = None
+        desktop_tls_material = None
+        desktop_certificate_pem = None
+        if desktop_mode:
+            # Desktop is a private Electron↔backend channel, never a configured
+            # web-console listener.  Force an OS-selected loopback port and
+            # obtain the one-launch capability only from the inherited fd.
+            host, is_public_bind, port = "127.0.0.1", False, 0
+            try:
+                from channel.web.desktop_protocol import (
+                    DesktopProtocolError,
+                    create_ephemeral_tls_material,
+                    make_ready_frame,
+                    read_bootstrap_credentials,
+                    read_control_frame,
+                )
+
+                fd_value = os.environ.get("COW_DESKTOP_CONTROL_FD", "")
+                if not fd_value.isdigit():
+                    raise DesktopProtocolError("desktop control fd is absent")
+                desktop_control_fd = int(fd_value)
+                bootstrap = read_control_frame(desktop_control_fd)
+                desktop_launch_id, desktop_secret = read_bootstrap_credentials(bootstrap)
+                desktop_tls_material = create_ephemeral_tls_material(desktop_launch_id)
+                desktop_certificate_pem = desktop_tls_material.certificate_pem
+            except Exception as exc:
+                # There is no safe HTTP fallback in desktop mode: a failed
+                # bootstrap must make the child fail before it binds a listener.
+                raise RuntimeError("desktop trusted transport bootstrap failed") from exc
+        else:
+            configured_host = conf().get("web_host", "")
+            host, is_public_bind = _resolve_web_bind_host(configured_host)
+            port = int(os.environ.get("COW_WEB_PORT") or conf().get("web_port", 9899))
 
         self._cleanup_stale_voice_recordings()
 
@@ -3134,7 +3880,7 @@ class WebChannel(ChatChannel):
         for idx, (name, label) in enumerate(channels, 1):
             logger.info(f"[WebChannel]  {idx:>2}. {name:<{name_width}} - {label}")
         logger.info("[WebChannel] ✅ Web console is running")
-        logger.info(f"[WebChannel] 🌐 Local access: http://localhost:{port}")
+        logger.info(f"[WebChannel] 🌐 Local access: {'https' if desktop_mode else 'http'}://localhost:{port}")
         logger.info(
             f"[WebChannel] ?? Listening on {host} only. For remote access, "
             "terminate TLS in a trusted reverse proxy on the same host and "
@@ -3143,7 +3889,7 @@ class WebChannel(ChatChannel):
 
         # In desktop mode the Electron shell renders the UI, so don't pop a
         # browser window (also avoids issues when running detached/headless).
-        if os.environ.get("COW_DESKTOP") != "1":
+        if not desktop_mode:
             try:
                 import webbrowser
                 webbrowser.open(f"http://localhost:{port}")
@@ -3231,7 +3977,26 @@ class WebChannel(ChatChannel):
         # Build WSGI app with middleware (same as runsimple but without print)
         func = web.httpserver.StaticMiddleware(app.wsgifunc())
         func = web.httpserver.LogMiddleware(func)
+        if desktop_mode:
+            from channel.web.desktop_protocol import DesktopRequestAuthMiddleware
+
+            # Keep this wrapper outermost so static assets, health and every
+            # API route reject direct loopback callers before application code.
+            func = DesktopRequestAuthMiddleware(func, desktop_launch_id, desktop_secret)
         server = web.httpserver.WSGIServer((host, port), func)
+        if desktop_mode:
+            try:
+                from cheroot.ssl.builtin import BuiltinSSLAdapter
+
+                server.ssl_adapter = BuiltinSSLAdapter(
+                    desktop_tls_material.certificate_path,
+                    desktop_tls_material.private_key_path,
+                )
+            finally:
+                # BuiltinSSLAdapter loads the PEM chain into an SSLContext in
+                # its constructor; the disk-only private key may disappear now.
+                desktop_tls_material.cleanup()
+                desktop_tls_material = None
         server.daemon_threads = True
         # Default request_queue_size(5) / timeout(10s) / numthreads(10) are
         # too small: when SSE streams occupy many threads, the backlog fills
@@ -3244,7 +4009,27 @@ class WebChannel(ChatChannel):
         # Reclaim orphaned SSE queues so disconnected clients don't leak fds.
         self._start_sse_janitor()
         try:
-            server.start()
+            if desktop_mode:
+                # `prepare()` atomically binds port 0.  Only after the socket is
+                # live do we publish its number and pinned certificate through
+                # the private control pipe, then serve authenticated requests.
+                server.prepare()
+                bound_port = int(server.socket.getsockname()[1])
+                from channel.web.desktop_protocol import make_ready_frame, write_control_frame
+
+                write_control_frame(
+                    desktop_control_fd,
+                    make_ready_frame(
+                        desktop_launch_id,
+                        desktop_secret,
+                        bound_port,
+                        desktop_certificate_pem or "",
+                    ),
+                )
+                logger.info("[WebChannel] desktop trusted transport is ready")
+                server.serve()
+            else:
+                server.start()
         except (KeyboardInterrupt, SystemExit):
             server.stop()
         except OSError as e:
@@ -3253,6 +4038,10 @@ class WebChannel(ChatChannel):
                     f"[WebChannel] 端口 {port} 已被占用，可执行 `cow restart` 清理残留进程，"
                     f"或在 config.json 中修改 web_port"
                 )
+            raise
+        except Exception:
+            if desktop_mode:
+                server.stop()
             raise
 
     def stop(self):
@@ -3271,9 +4060,9 @@ class RootHandler:
 
 
 class HealthHandler:
-    # Unauthenticated liveness probe. The desktop shell polls this to know the
-    # backend is up; it must never require auth (a set web_password would
-    # otherwise make startup hang). Returns no sensitive data.
+    # Standalone liveness is unauthenticated. In COW_DESKTOP mode the outer
+    # DesktopRequestAuthMiddleware verifies a signed request over pinned TLS
+    # before this handler is reached, so a 200 never authenticates a listener.
     def GET(self):
         web.header('Content-Type', 'application/json; charset=utf-8')
         web.header('Cache-Control', 'no-store')
@@ -3354,6 +4143,13 @@ class ReleaseEvidenceHandler:
             from benchmarks.evidence.release_manifest import verify_manifest
             verification = verify_manifest(manifest, Path(root))
             if verification.get('integrity_passed') is not True:
+                # A body saying `passed: false` is not enough for generic
+                # health/monitoring clients: tampered evidence is a failed
+                # verification, not a successful API result with bad data.
+                try:
+                    web.ctx.status = "422 Unprocessable Entity"
+                except Exception:
+                    pass
                 return json.dumps({
                     "status": "invalid_evidence",
                     "passed": False,
@@ -3361,6 +4157,7 @@ class ReleaseEvidenceHandler:
                     "message": "release evidence integrity verification failed",
                     "verification": {
                         "passed": False,
+                        "integrity_passed": False,
                         "checks": verification.get('checks', []),
                     },
                 }, ensure_ascii=False)
@@ -3387,6 +4184,10 @@ class ReleaseEvidenceHandler:
             }, ensure_ascii=False)
         except Exception as exc:
             logger.exception(f"[ReleaseEvidenceHandler] evidence read failed: {exc}")
+            try:
+                web.ctx.status = "500 Internal Server Error"
+            except Exception:
+                pass
             return json.dumps({
                 "status": "invalid_evidence",
                 "passed": False,
@@ -6997,20 +7798,40 @@ class SessionDetailHandler:
             if not session_id:
                 return json.dumps({"status": "error", "message": "session_id required"})
 
-            # Authorize before every side effect. A destructive mutation must
-            # acquire AgentBridge's session fence after cancelling all queued
-            # work; otherwise a late assistant/tool write can resurrect data.
-            from agent.memory import get_conversation_store
-            store = get_conversation_store()
-            _require_web_session(session_id, owner_id)
+            # Authorize before creating a mutation closure; otherwise a caller
+            # who does not own the session could deny its legitimate owner. A
+            # lost response after a completed delete is the sole exception: the
+            # exact same owner may prove its durable completion receipt and get
+            # an idempotent already_deleted response without recreating state.
+            delete_retry_receipt = None
             try:
-                from bridge.bridge import Bridge
-                ab = Bridge().get_agent_bridge()
-                if not ab.cancel_and_wait_for_session(session_id, owner_id):
-                    return json.dumps({
-                        "status": "error",
-                        "message": "session cancellation is still pending; delete was not applied",
-                    })
+                store = _require_web_session(session_id, owner_id)
+            except PermissionError:
+                durable_retry_store = _get_durable_sse_store()
+                delete_retry_receipt = durable_retry_store.get_delete_session_mutation(
+                    owner_id, session_id
+                )
+                if delete_retry_receipt is None:
+                    raise
+                if delete_retry_receipt["completed_at"] is not None:
+                    channel = WebChannel()
+                    channel.session_queues.pop(session_id, None)
+                    channel._invalidate_durable_session_sse(owner_id, session_id)
+                    return json.dumps({"status": "success", "already_deleted": True})
+                # A prior process may have committed the conversation tombstone
+                # but crashed before writing its durable completion receipt. Use
+                # the same owner-checked store operation below to reconcile;
+                # never return success merely because the mutation row exists.
+                from agent.memory import get_conversation_store
+
+                store = get_conversation_store()
+            try:
+                mutation_fence = _begin_and_wait_for_durable_session_mutation(
+                    owner_id,
+                    session_id,
+                    mutation_kind="delete_session",
+                    detail="session deletion requested",
+                )
             except Exception as fence_error:
                 logger.warning(
                     f"[WebChannel] Session delete mutation fence failed: {fence_error}"
@@ -7019,27 +7840,52 @@ class SessionDetailHandler:
                     "status": "error",
                     "message": "session cancellation could not be confirmed; delete was not applied",
                 })
-            # Commit a durable tombstone. Late persistence is rejected instead
-            # of recreating the deleted row.
-            store.delete_session(session_id, owner_id=owner_id)
+            if not mutation_fence["quiescent"]:
+                pending = mutation_fence["quiescence"] or {}
+                logger.warning(
+                    "[WebChannel] Session delete remains pending: "
+                    f"sid={session_id}, local_quiescent={mutation_fence['local_quiescent']}, "
+                    f"pending={pending.get('pending_request_ids', [])}"
+                )
+                message = (
+                    "session execution outcome is unconfirmed; delete was not applied"
+                    if "in_doubt" in pending.get("pending_execution_states", [])
+                    else "session cancellation is still pending; delete was not applied"
+                )
+                return json.dumps({
+                    "status": "error",
+                    "message": message,
+                })
 
-            ab.clear_session(session_id)
-            logger.info(f"[WebChannel] Removed agent instance for session {session_id}")
+            # The durable delete closure remains as a tombstone after this
+            # operation. It must never be released: a late/replayed Web request
+            # is denied before it can recreate a deleted session.
+            agent_bridge = mutation_fence["agent_bridge"]
+            durable_store = mutation_fence["durable_store"]
+            try:
+                agent_bridge.clear_session(session_id)
+                store.delete_session(session_id, owner_id=owner_id)
+                durable_store.record_delete_session_completion(
+                    owner_id,
+                    session_id,
+                    mutation_fence["mutation"]["mutation_token"],
+                    detail="owner-checked conversation tombstone committed",
+                )
+            except Exception as mutation_error:
+                logger.error(
+                    f"[WebChannel] Session delete failed after durable quiescence: {mutation_error}"
+                )
+                return json.dumps({
+                    "status": "error",
+                    "message": "session deletion could not be confirmed; admission remains closed",
+                })
 
             channel = WebChannel()
             channel.session_queues.pop(session_id, None)
-            for request_id, request_session in list(channel.request_to_session.items()):
-                if (
-                    request_session == session_id
-                    and channel.request_owners.get(request_id) == owner_id
-                    and request_id in channel.sse_queues
-                ):
-                    channel.sse_queues[request_id].put({
-                        "type": "cancelled",
-                        "content": "Session deleted",
-                        "request_id": request_id,
-                        "timestamp": time.time(),
-                    })
+            # The durable delete tombstone already revokes delivery in every
+            # process. Clear this process's cached journal instead of hydrating
+            # any old terminal payload back into a live SSE connection.
+            channel._invalidate_durable_session_sse(owner_id, session_id)
 
             logger.info(f"[WebChannel] Session deleted: {session_id}")
             return json.dumps({"status": "success"})
@@ -7142,15 +7988,16 @@ class SessionClearContextHandler:
             if not session_id:
                 return json.dumps({"status": "error", "message": "session_id required"})
 
+            # Authorization precedes mutation-gate creation so an unknown or
+            # foreign locator cannot be turned into a denial-of-service gate.
+            store = _require_web_session(session_id, owner_id)
             try:
-                from bridge.bridge import Bridge
-                bridge = Bridge()
-                ab = bridge.get_agent_bridge()
-                if not ab.cancel_and_wait_for_session(session_id, owner_id):
-                    return json.dumps({
-                        "status": "error",
-                        "message": "session cancellation is still pending; context was not cleared",
-                    })
+                mutation_fence = _begin_and_wait_for_durable_session_mutation(
+                    owner_id,
+                    session_id,
+                    mutation_kind="clear_context",
+                    detail="session context clear requested",
+                )
             except Exception as fence_error:
                 logger.warning(
                     f"[WebChannel] Clear context mutation fence failed: {fence_error}"
@@ -7159,11 +8006,56 @@ class SessionClearContextHandler:
                     "status": "error",
                     "message": "session cancellation could not be confirmed; context was not cleared",
                 })
+            if not mutation_fence["quiescent"]:
+                pending = mutation_fence["quiescence"] or {}
+                logger.warning(
+                    "[WebChannel] Clear context remains pending: "
+                    f"sid={session_id}, local_quiescent={mutation_fence['local_quiescent']}, "
+                    f"pending={pending.get('pending_request_ids', [])}"
+                )
+                message = (
+                    "session execution outcome is unconfirmed; context was not cleared"
+                    if "in_doubt" in pending.get("pending_execution_states", [])
+                    else "session cancellation is still pending; context was not cleared"
+                )
+                return json.dumps({
+                    "status": "error",
+                    "message": message,
+                })
 
-            from agent.memory import get_conversation_store
-            store = get_conversation_store()
-            new_seq = store.clear_context(session_id, owner_id=owner_id)
-            ab.clear_session(session_id)
+            # Keep the gate closed until both persistent context and cached
+            # agent state converge. If either step crashes, the caller receives
+            # an error and the durable closure remains for a safe retry.
+            durable_store = mutation_fence["durable_store"]
+            agent_bridge = mutation_fence["agent_bridge"]
+            mutation = mutation_fence["mutation"]
+            try:
+                new_seq = store.clear_context(session_id, owner_id=owner_id)
+                # The persistent conversation is now clear. Advance the durable
+                # context generation before reopening admission, so an old
+                # idempotency key, SSE replay, or late writer cannot cross into
+                # the fresh context even if the process crashes below.
+                durable_store.advance_session_context_generation(
+                    owner_id,
+                    session_id,
+                    mutation["mutation_token"],
+                )
+                WebChannel()._invalidate_durable_session_sse(owner_id, session_id)
+                agent_bridge.clear_session(session_id)
+                durable_store.release_session_mutation(
+                    owner_id,
+                    session_id,
+                    mutation["mutation_token"],
+                    mutation_kind="clear_context",
+                )
+            except Exception as mutation_error:
+                logger.error(
+                    f"[WebChannel] Clear context failed after durable quiescence: {mutation_error}"
+                )
+                return json.dumps({
+                    "status": "error",
+                    "message": "context clear could not be confirmed; admission remains closed",
+                })
             logger.info(f"[WebChannel] Cleared agent instance for session {session_id}")
 
             return json.dumps({"status": "success", "context_start_seq": new_seq})

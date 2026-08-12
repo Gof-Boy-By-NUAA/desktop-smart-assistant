@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import copy
 import json
@@ -39,11 +39,27 @@ def test_release_source_fingerprint_covers_full_delivery_control_plane():
     assert not any(path.startswith("tmp/") for path in source_paths)
 
 
-def test_git_binding_uses_unquoted_non_ascii_paths():
-    state = _git_state(ROOT)
-    assert state["all_source_paths_tracked"] is True
-    assert state["source_file_count"] == state["tracked_source_count"]
+def test_git_binding_uses_unquoted_non_ascii_paths(tmp_path: Path):
+    # This must test Git/path handling independently of the current SmartAssistant
+    # checkout, which is intentionally dirty during implementation and should
+    # truthfully fail its release gate. A small committed Unicode-path repo
+    # proves _git_state reads NUL-delimited paths without C-style quoting.
+    repository = tmp_path / "unicode-仓库"
+    repository.mkdir()
+    (repository / "源文件.txt").write_text("evidence", encoding="utf-8")
+    for command in (
+        ["git", "init"],
+        ["git", "config", "user.email", "release-test@example.invalid"],
+        ["git", "config", "user.name", "Release Test"],
+        ["git", "add", "--", "源文件.txt"],
+        ["git", "commit", "-m", "unicode source fixture"],
+    ):
+        subprocess.run(command, cwd=repository, check=True, capture_output=True)
 
+    state = _git_state(repository)
+    assert state["all_source_paths_tracked"] is True
+    assert state["source_file_count"] == state["tracked_source_count"] == 1
+    assert state["commit_bound"] is True
 
 def test_release_manifest_is_an_ignored_generated_artifact_not_tracked_source(
     tmp_path: Path,
@@ -51,12 +67,19 @@ def test_release_manifest_is_an_ignored_generated_artifact_not_tracked_source(
     output = ROOT / "benchmarks/results/release-evidence-manifest.json"
     assert _is_git_tracked_path(ROOT, output) is False
     ignored = subprocess.run(
-        ["git", "check-ignore", "--quiet", "--", output.relative_to(ROOT).as_posix()],
+        [
+            "git",
+            "-c",
+            f"safe.directory={ROOT.resolve().as_posix()}",
+            "check-ignore",
+            "--quiet",
+            "--",
+            output.relative_to(ROOT).as_posix(),
+        ],
         cwd=ROOT,
         check=False,
     )
     assert ignored.returncode == 0
-
     tracked_output = ROOT / ".gitignore"
     original = tracked_output.read_bytes()
     assert _is_git_tracked_path(ROOT, tracked_output) is True

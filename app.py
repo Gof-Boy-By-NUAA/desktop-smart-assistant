@@ -133,6 +133,12 @@ class ChannelManager:
         except Exception as e:
             logger.error(f"[ChannelManager] Channel '{name}' startup error: {e}")
             logger.exception(e)
+            # A desktop backend without its private Web transport must never
+            # remain alive as a partially initialized process. Electron will
+            # fail closed on its control-pipe timeout/exit and cannot attach to
+            # an arbitrary listener as a fallback.
+            if DESKTOP_MODE and name == "web":
+                os._exit(1)
 
     def stop(self, channel_name: str = None):
         """

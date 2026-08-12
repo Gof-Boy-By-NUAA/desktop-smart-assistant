@@ -2,10 +2,12 @@ import json
 import os
 import time
 import threading
+from contextlib import nullcontext
 
 from common.log import logger
 from agent.protocol.models import LLMRequest, LLMModel
 from agent.protocol.agent_stream import AgentStreamExecutor
+from agent.protocol.cancel import AgentCancelledError
 from agent.protocol.result import AgentAction, AgentActionType, ToolResult, AgentResult
 from agent.tools.base_tool import BaseTool, ToolStage
 
@@ -421,42 +423,79 @@ class Agent:
         elif message:
             logger.info(message)
 
-    def _execute_post_process_tools(self):
-        """Execute all post-process stage tools"""
-        # Get all post-process stage tools
-        post_process_tools = [tool for tool in self.tools if tool.stage == ToolStage.POST_PROCESS]
+    def _execute_post_process_tools(
+        self,
+        *,
+        tool_execution_guard=None,
+        cancel_event=None,
+    ):
+        """Execute automatic tools under the same request-scoped authority fence.
 
-        # Execute each tool
+        POST_PROCESS tools run after the stream executor returns. They used to
+        bypass the durable Web tool fence, which let cancellation or lease loss
+        race an automatic side effect after the normal tool loop had stopped
+        checking. The optional guard is supplied per invocation and is never
+        stored on this cached Agent instance.
+        """
+
+        post_process_tools = [
+            tool for tool in self.tools if tool.stage == ToolStage.POST_PROCESS
+        ]
         for tool in post_process_tools:
-            # Set tool context
+            if cancel_event is not None and cancel_event.is_set():
+                raise AgentCancelledError("cancelled before post-process tool execution")
+
+            # Only request metadata is assigned before the guard. The guard is
+            # still the final authority boundary before the tool can act.
+            previous_cancel_event = getattr(tool, "cancel_event", None)
             tool.context = self
-
-            # Record start time for execution timing
+            tool.model = self.model
+            tool.cancel_event = cancel_event
             start_time = time.time()
-
-            # Execute tool (with empty parameters, tool will extract needed info from context)
-            result = tool.execute({})
-
-            # Calculate execution time
-            execution_time = time.time() - start_time
-
-            # Capture tool use for tracking
-            self.capture_tool_use(
-                tool_name=tool.name,
-                input_params={},  # Post-process tools typically don't take parameters
-                output=result.result,
-                status=result.status,
-                error_message=str(result.result) if result.status == "error" else None,
-                execution_time=execution_time
+            guard = (
+                tool_execution_guard()
+                if tool_execution_guard is not None
+                else nullcontext()
             )
+            try:
+                with guard:
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise AgentCancelledError(
+                            "cancelled before post-process tool execution"
+                        )
+                    # POST_PROCESS tools extract input from Agent context.
+                    result = tool.execute({})
+                if result is None or not hasattr(result, "status"):
+                    raise RuntimeError(
+                        f"post-process tool {tool.name} returned no ToolResult"
+                    )
+                execution_time = time.time() - start_time
 
-            # Log result
-            if result.status == "success":
-                # Print tool execution result in the desired format
-                self.output(f"\n🛠️ {tool.name}: {json.dumps(result.result)}")
-            else:
-                # Print failure in print mode
-                self.output(f"\n🛠️ {tool.name}: {json.dumps({'status': 'error', 'message': str(result.result)})}")
+                # Capture only after guard exit. A cancellation/lease loss that
+                # becomes visible after a side effect escapes as an exception;
+                # it is never recorded as an ordinary successful post-process.
+                self.capture_tool_use(
+                    tool_name=tool.name,
+                    input_params={},
+                    output=result.result,
+                    status=result.status,
+                    error_message=(
+                        str(result.result) if result.status == "error" else None
+                    ),
+                    execution_time=execution_time,
+                )
+
+                if result.status == "success":
+                    self.output(f"\n{tool.name}: {json.dumps(result.result)}")
+                else:
+                    self.output(
+                        f"\n{tool.name}: "
+                        f"{json.dumps({'status': 'error', 'message': str(result.result)})}"
+                    )
+            finally:
+                # A cached Agent/tool instance must not retain the cancellation
+                # event from this request into a later user turn.
+                tool.cancel_event = previous_cancel_event
 
     def capture_tool_use(self, tool_name, input_params, output, status, thought=None, error_message=None,
                          execution_time=0.0):
@@ -493,7 +532,8 @@ class Agent:
         return action
 
     def run_stream(self, user_message: str, on_event=None, clear_history: bool = False,
-                   skill_filter=None, cancel_event=None, steer_inbox=None) -> str:
+                   skill_filter=None, cancel_event=None, steer_inbox=None,
+                   tool_execution_guard=None) -> str:
         """
         Execute single agent task with streaming (based on tool-call)
 
@@ -518,6 +558,9 @@ class Agent:
                 (tool_use/tool_result pairs preserved).
             steer_inbox: Optional SteerInbox drained at safe checkpoints. New
                 instructions guide this run without entering the normal queue.
+            tool_execution_guard: Optional request-scoped context-manager
+                factory used to renew/fence durable authority around every tool
+                side effect. It is never stored on the shared Agent instance.
 
         Returns:
             Final response text
@@ -565,6 +608,7 @@ class Agent:
             cancel_event=cancel_event,
             steer_inbox=steer_inbox,
             skill_filter=skill_filter,
+            tool_execution_guard=tool_execution_guard,
         )
 
         # Execute
@@ -593,8 +637,12 @@ class Agent:
         # Store executor reference for agent_bridge to access files_to_send
         self.stream_executor = executor
 
-        # Execute all post-process tools
-        self._execute_post_process_tools()
+        # Automatic tools are external-effect boundaries too. Reuse the
+        # request-scoped durable tool fence supplied by AgentBridge.
+        self._execute_post_process_tools(
+            tool_execution_guard=tool_execution_guard,
+            cancel_event=cancel_event,
+        )
 
         return response
 

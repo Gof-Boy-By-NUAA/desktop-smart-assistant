@@ -1,17 +1,44 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
 contextBridge.exposeInMainWorld('electronAPI', {
-  getBackendPort: () => ipcRenderer.invoke('get-backend-port'),
   getBackendStatus: () => ipcRenderer.invoke('get-backend-status'),
   restartBackend: () => ipcRenderer.invoke('restart-backend'),
+  forgetDesktopDeviceIdentity: () => ipcRenderer.invoke('desktop-forget-device-identity') as Promise<boolean>,
+  backendRequest: (request: {
+    path: string
+    method?: string
+    headers?: Record<string, string>
+    body?: string | Uint8Array
+  }) => ipcRenderer.invoke('desktop-backend-request', request),
+  openBackendStream: (request: { streamId: string; path: string }) =>
+    ipcRenderer.invoke('desktop-backend-stream-open', request),
+  closeBackendStream: (streamId: string) =>
+    ipcRenderer.invoke('desktop-backend-stream-close', streamId),
+  onBackendStream: (callback: (event: {
+    streamId: string
+    kind: 'message' | 'error' | 'closed'
+    data?: string
+    lastEventId?: string
+    error?: string
+  }) => void) => {
+    const handler = (_event: unknown, event: {
+      streamId: string
+      kind: 'message' | 'error' | 'closed'
+      data?: string
+      lastEventId?: string
+      error?: string
+    }) => callback(event)
+    ipcRenderer.on('desktop-backend-stream', handler)
+    return () => ipcRenderer.removeListener('desktop-backend-stream', handler)
+  },
   selectDirectory: () => ipcRenderer.invoke('select-directory'),
   selectFile: (filters?: Electron.FileFilter[]) => ipcRenderer.invoke('select-file', filters),
   openPath: (targetPath: string) => ipcRenderer.invoke('open-path', targetPath) as Promise<string>,
 
   // Each listener registrar returns an unsubscribe fn so renderers can clean
   // up on unmount / effect re-run and avoid accumulating duplicate handlers.
-  onBackendStatus: (callback: (data: { status: string; port?: number; error?: string }) => void) => {
-    const handler = (_event: unknown, data: { status: string; port?: number; error?: string }) => callback(data)
+  onBackendStatus: (callback: (data: { status: string; generation?: number; error?: string }) => void) => {
+    const handler = (_event: unknown, data: { status: string; generation?: number; error?: string }) => callback(data)
     ipcRenderer.on('backend-status', handler)
     return () => ipcRenderer.removeListener('backend-status', handler)
   },

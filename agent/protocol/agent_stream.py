@@ -6,6 +6,7 @@ Provides streaming output, event system, and complete tool-call loop
 import json
 import re
 import time
+from contextlib import nullcontext
 from typing import List, Dict, Any, Optional, Callable, Tuple
 
 from agent.protocol.cancel import AgentCancelledError
@@ -20,6 +21,11 @@ from agent.protocol.message_utils import (
 from agent.tools.base_tool import BaseTool, ToolResult
 from common.log import logger
 from common.i18n import t as _t
+
+
+class AgentExecutionFenceLostError(RuntimeError):
+    """A durable request lost authority while a tool side effect was guarded."""
+
 
 # Optional: repair malformed JSON args from non-strict providers (e.g. unescaped quotes in long content).
 try:
@@ -333,6 +339,7 @@ class AgentStreamExecutor:
             cancel_event=None,
             steer_inbox=None,
             skill_filter=None,
+            tool_execution_guard=None,
     ):
         """
         Initialize stream executor
@@ -364,6 +371,10 @@ class AgentStreamExecutor:
         self.cancel_event = cancel_event
         self.steer_inbox = steer_inbox
         self.skill_filter = skill_filter
+        # Optional request-scoped context-manager factory.  Durable Web runs
+        # use it to renew their lease before and throughout every tool side
+        # effect; ordinary channels keep the null-context behavior.
+        self.tool_execution_guard = tool_execution_guard
 
         # Message history - use provided messages or create new list
         self.messages = messages if messages is not None else []
@@ -1985,18 +1996,15 @@ class AgentStreamExecutor:
             self._shadow_record_tool_result(tool_call, result)
             return result
 
-        self._emit_event("tool_execution_start", {
-            "tool_call_id": tool_id,
-            "tool_name": tool_name,
-            "arguments": arguments
-        })
-
         try:
             tool = self.tools.get(tool_name)
             if not tool:
                 raise ValueError(self._build_tool_not_found_message(tool_name))
 
-            # Set tool context
+            # Set tool context before the guard.  The guard itself is the last
+            # durable authority boundary before tool code can cause a side
+            # effect, and a heartbeat keeps long-running tools from silently
+            # outliving their lease.
             tool.model = self.model
             tool.context = self.agent
             tool.cancel_event = self.cancel_event
@@ -2009,10 +2017,20 @@ class AgentStreamExecutor:
                 }
             )
 
-            # Execute tool
+            guard = (
+                self.tool_execution_guard()
+                if self.tool_execution_guard is not None
+                else nullcontext()
+            )
             start_time = time.time()
             try:
-                result: ToolResult = tool.execute_tool(arguments)
+                with guard:
+                    self._emit_event("tool_execution_start", {
+                        "tool_call_id": tool_id,
+                        "tool_name": tool_name,
+                        "arguments": arguments
+                    })
+                    result: ToolResult = tool.execute_tool(arguments)
             finally:
                 tool.progress_callback = None
                 tool.cancel_event = None
@@ -2024,11 +2042,9 @@ class AgentStreamExecutor:
                 "execution_time": execution_time
             }
 
-            # Record tool result for failure tracking
             success = result.status == "success"
             self._record_tool_result(tool_name, arguments, success)
 
-            # Auto-refresh skills after skill creation
             if tool_name == "bash" and result.status == "success":
                 command = arguments.get("command", "")
                 if "init_skill.py" in command and self.agent.skill_manager:
@@ -2045,6 +2061,16 @@ class AgentStreamExecutor:
             self._shadow_record_tool_result(tool_call, result_dict)
             return result_dict
 
+        except AgentCancelledError:
+            # A durable cancellation intent was observed at a tool-safe
+            # checkpoint. It must exit the agent loop rather than become a
+            # model-visible tool error that could be retried.
+            raise
+        except AgentExecutionFenceLostError:
+            # This is not a tool-level recoverable failure. The bridge must
+            # mark the request in_doubt and stop the run, because a stale holder
+            # may have crossed an external side-effect boundary.
+            raise
         except Exception as e:
             logger.error(f"Tool execution error: {e}")
             error_result = {

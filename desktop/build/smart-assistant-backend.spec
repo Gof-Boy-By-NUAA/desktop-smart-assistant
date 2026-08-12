@@ -92,6 +92,14 @@ hiddenimports += collect_submodules('dashscope')
 hiddenimports += [
     'tiktoken_ext',
     'tiktoken_ext.openai_public',
+    # COW_DESKTOP creates a one-launch TLS leaf in web.desktop_protocol. Keep
+    # its Python modules and native bindings in the frozen backend rather than
+    # silently downgrading the desktop transport when cryptography is absent.
+    'cryptography',
+    'cryptography.x509',
+    'cryptography.hazmat.primitives.hashes',
+    'cryptography.hazmat.primitives.serialization',
+    'cryptography.hazmat.primitives.asymmetric.rsa',
 ]
 
 # Document parsing libs. The read / web_fetch tools import these lazily inside

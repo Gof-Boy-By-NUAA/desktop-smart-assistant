@@ -16,7 +16,7 @@ const I18N = {
         nav_chat: '对话', nav_manage: '管理', nav_monitor: '监控',
         menu_chat: '对话', menu_config: '配置', menu_models: '模型', menu_skills: '技能',
         menu_memory: '记忆', menu_knowledge: '知识', menu_channels: '通道', menu_tasks: '定时',
-        menu_logs: '日志',
+        menu_logs: '日志', menu_delivery: '交付验收',
         models_title: '模型管理',
         models_desc: '统一管理对话、图像、语音、向量、搜索能力',
         models_section_vendors: '厂商凭据',
@@ -229,6 +229,21 @@ const I18N = {
         task_run_failed: '执行失败',
         logs_title: '日志', logs_desc: '实时日志输出 (run.log)',
         logs_live: '实时', logs_coming_msg: '日志流即将在此提供。将连接 run.log 实现类似 tail -f 的实时输出。',
+        delivery_title: '交付与验收证据',
+        delivery_desc: '只读查看发布门禁、正式报告和当前不可声明项。缺失、过期或无效证据绝不会显示为 PASS。',
+        delivery_refresh: '刷新', delivery_loading: '正在验证交付证据…',
+        delivery_passed: '所有当前门禁已通过',
+        delivery_passed_desc: '证据链完整，可以进入客户验收。',
+        delivery_blocked: '尚未达到交付边界',
+        delivery_blocked_desc: '此页面不会把缺失、过期或无效证据转换为 PASS；请完成并独立验证列出的阻断条件。',
+        delivery_formal_gates: '正式门禁', delivery_reports: '报告状态',
+        delivery_hard_denials: '不可声明清单', delivery_verification: '证据验证',
+        delivery_integrity: '清单完整性验证', delivery_release_result: '交付结果',
+        delivery_response_status: '响应状态', delivery_no_details: '没有可验证的明细；这不是 PASS。',
+        delivery_manifest_absent: '发布证据清单不存在。',
+        delivery_invalid: '证据无效或响应不完整。',
+        delivery_load_error: '交付证据加载失败。', delivery_stale: '过期',
+        delivery_pass_value: 'PASS', delivery_blocked_value: 'BLOCKED',
         new_chat: '新对话',
         session_history: '历史会话',
         ws_toggle: '工作空间', ws_tab_preview: '预览', ws_tab_files: '文件',
@@ -273,6 +288,8 @@ const I18N = {
         confirm_yes: '确认',
         confirm_cancel: '取消',
         error_send: '发送失败，请稍后再试。', error_timeout: '请求超时，请再试一次。',
+        execution_queued: '已排队，正在等待前序任务…',
+        execution_queued_position: '已排队，第 {position} 位，正在等待前序任务…',
         thinking_in_progress: '思考中...', thinking_done: '已深度思考', thinking_duration: '耗时',
         edit_message: '编辑消息',
         regenerate_response: '重新生成',
@@ -286,7 +303,7 @@ const I18N = {
         nav_chat: '對話', nav_manage: '管理', nav_monitor: '監控',
         menu_chat: '對話', menu_config: '設定', menu_models: '模型', menu_skills: '技能',
         menu_memory: '記憶', menu_knowledge: '知識', menu_channels: '管道', menu_tasks: '定時',
-        menu_logs: '日誌',
+        menu_logs: '日誌', menu_delivery: '交付驗收',
         models_title: '模型管理',
         models_desc: '統一管理對話、影像、語音、向量、搜尋能力',
         models_section_vendors: '廠商憑據',
@@ -499,6 +516,21 @@ const I18N = {
         task_run_failed: '執行失敗',
         logs_title: '日誌', logs_desc: '實時日誌輸出 (run.log)',
         logs_live: '實時', logs_coming_msg: '日誌流即將在此提供。將連線 run.log 實現類似 tail -f 的實時輸出。',
+        delivery_title: '交付與驗收證據',
+        delivery_desc: '唯讀檢視發佈閘門、正式報告與目前不可宣告項目。缺失、過期或無效證據絕不會顯示為 PASS。',
+        delivery_refresh: '重新整理', delivery_loading: '正在驗證交付證據…',
+        delivery_passed: '所有目前閘門已通過',
+        delivery_passed_desc: '證據鏈完整，可以進入客戶驗收。',
+        delivery_blocked: '尚未達到交付邊界',
+        delivery_blocked_desc: '此頁面不會將缺失、過期或無效證據轉換為 PASS；請完成並獨立驗證列出的阻斷條件。',
+        delivery_formal_gates: '正式閘門', delivery_reports: '報告狀態',
+        delivery_hard_denials: '不可宣告清單', delivery_verification: '證據驗證',
+        delivery_integrity: '清單完整性驗證', delivery_release_result: '交付結果',
+        delivery_response_status: '回應狀態', delivery_no_details: '沒有可驗證的明細；這不是 PASS。',
+        delivery_manifest_absent: '發佈證據清單不存在。',
+        delivery_invalid: '證據無效或回應不完整。',
+        delivery_load_error: '交付證據載入失敗。', delivery_stale: '過期',
+        delivery_pass_value: 'PASS', delivery_blocked_value: 'BLOCKED',
         new_chat: '新對話',
         session_history: '歷史會話',
         ws_toggle: '工作空間', ws_tab_preview: '預覽', ws_tab_files: '檔案',
@@ -539,6 +571,8 @@ const I18N = {
         confirm_yes: '確認',
         confirm_cancel: '取消',
         error_send: '傳送失敗，請稍後再試。', error_timeout: '請求超時，請再試一次。',
+        execution_queued: '已排隊，正在等待前序任務…',
+        execution_queued_position: '已排隊，第 {position} 位，正在等待前序任務…',
         thinking_in_progress: '思考中...', thinking_done: '已深度思考', thinking_duration: '耗時',
         edit_message: '編輯訊息',
         regenerate_response: '重新生成',
@@ -551,7 +585,7 @@ const I18N = {
         nav_chat: 'Chat', nav_manage: 'Management', nav_monitor: 'Monitor',
         menu_chat: 'Chat', menu_config: 'Config', menu_models: 'Models', menu_skills: 'Skills',
         menu_memory: 'Memory', menu_knowledge: 'Knowledge', menu_channels: 'Channels', menu_tasks: 'Tasks',
-        menu_logs: 'Logs',
+        menu_logs: 'Logs', menu_delivery: 'Delivery',
         models_title: 'Models',
         models_desc: 'Manage chat, image, voice, embedding and search capabilities in one place',
         models_section_vendors: 'Provider Credentials',
@@ -764,6 +798,21 @@ const I18N = {
         task_run_failed: 'Run failed',
         logs_title: 'Logs', logs_desc: 'Real-time log output (run.log)',
         logs_live: 'Live', logs_coming_msg: 'Log streaming will be available here. Connects to run.log for real-time output similar to tail -f.',
+        delivery_title: 'Delivery & acceptance evidence',
+        delivery_desc: 'Read-only release gates, formal reports, and current hard denials. Missing, stale, or invalid evidence is never shown as PASS.',
+        delivery_refresh: 'Refresh', delivery_loading: 'Verifying delivery evidence…',
+        delivery_passed: 'All current gates passed',
+        delivery_passed_desc: 'The evidence chain is complete and customer acceptance may begin.',
+        delivery_blocked: 'Release boundary not reached',
+        delivery_blocked_desc: 'This page never converts missing, stale, or invalid evidence into PASS; complete and independently verify every blocker listed below.',
+        delivery_formal_gates: 'Formal gates', delivery_reports: 'Report status',
+        delivery_hard_denials: 'Hard denials', delivery_verification: 'Evidence verification',
+        delivery_integrity: 'Manifest integrity verification', delivery_release_result: 'Delivery result',
+        delivery_response_status: 'Response status', delivery_no_details: 'No verifiable details are available; this is not a PASS.',
+        delivery_manifest_absent: 'The release evidence manifest is absent.',
+        delivery_invalid: 'Evidence is invalid or the response is incomplete.',
+        delivery_load_error: 'Failed to load delivery evidence.', delivery_stale: 'STALE',
+        delivery_pass_value: 'PASS', delivery_blocked_value: 'BLOCKED',
         new_chat: 'New Chat',
         session_history: 'History',
         ws_toggle: 'Workspace', ws_tab_preview: 'Preview', ws_tab_files: 'Files',
@@ -808,6 +857,8 @@ const I18N = {
         confirm_yes: 'Confirm',
         confirm_cancel: 'Cancel',
         error_send: 'Failed to send. Please try again.', error_timeout: 'Request timeout. Please try again.',
+        execution_queued: 'Queued; waiting for the earlier task…',
+        execution_queued_position: 'Queued at position {position}; waiting for the earlier task…',
         thinking_in_progress: 'Thinking...', thinking_done: 'Thought', thinking_duration: 'Duration',
         edit_message: 'Edit message',
         regenerate_response: 'Regenerate',
@@ -1022,6 +1073,9 @@ function rerenderDynamicViews() {
     if (currentView === 'config') {
         loadConfigView();
     }
+    if (currentView === 'delivery') {
+        renderDeliveryEvidence(deliveryEvidenceData);
+    }
 }
 
 // Floating tooltip portal for [data-tip-key] elements. Tooltip nodes are
@@ -1111,6 +1165,7 @@ const VIEW_META = {
     channels: { group: 'nav_manage',  page: 'menu_channels' },
     tasks:    { group: 'nav_manage',  page: 'menu_tasks' },
     logs:     { group: 'nav_monitor', page: 'menu_logs' },
+    delivery: { group: 'nav_monitor', page: 'menu_delivery' },
 };
 
 let currentView = 'chat';
@@ -1294,22 +1349,51 @@ const VIDEO_EXT_RE = /\.(?:mp4|webm|mov|avi|mkv)$/i;  // tested against URL with
 const IMAGE_EXT_RE = /\.(?:jpg|jpeg|png|gif|webp|bmp|svg)$/i;  // tested against URL without query string
 
 function _toWebUrl(url) {
-    if (/^https?:\/\//i.test(url) || /^\/file\//.test(url) || /^\/preview\//.test(url)) {
-        return url;
+    // Every SSE field is untrusted display data, including values generated by
+    // a tool. Normalize it before assigning it to href/src or interpolating it
+    // into the small amount of media HTML still needed by markdown transforms.
+    if (typeof url !== 'string') return '';
+    const raw = url.trim();
+    if (!raw || raw.length > 4096) return '';
+    try {
+        if (/^\/(?:file|preview)\//.test(raw)) {
+            const parsed = new URL(raw, window.location.origin);
+            // `raw` has to begin with one of our relative capability routes;
+            // this excludes scheme-relative //host paths and raw file paths.
+            if (parsed.origin !== window.location.origin) return '';
+            return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+        }
+        const parsed = new URL(raw);
+        if ((parsed.protocol === 'http:' || parsed.protocol === 'https:') && parsed.hostname) {
+            return parsed.href;
+        }
+    } catch (_) {
+        // A malformed URL is not a file attachment.
     }
     // A local raw path must be converted by an authenticated API response
-    // before it reaches markup.  Never turn it into a bearer-authorized URL.
+    // before it reaches markup. Never turn it into a bearer-authorized URL.
     return '';
+}
+
+function _safeFileDisplayName(value, fallback = 'file') {
+    const candidate = typeof value === 'string' ? value : fallback;
+    // DOM text nodes are the XSS boundary; this cap and control-character
+    // removal additionally prevent a hostile tool result from making the UI
+    // unusable or spoofing a multi-line prompt.
+    const cleaned = candidate.replace(/[\u0000-\u001F\u007F]/g, '').trim().slice(0, 255);
+    return cleaned || fallback;
 }
 
 function _buildVideoHtml(url) {
     const webUrl = _toWebUrl(url);
-    const fileName = url.split('/').pop().split('?')[0];
+    if (!webUrl) return '';
+    const fileName = _safeFileDisplayName(webUrl.split('/').pop().split('?')[0]);
+    const safeUrl = escapeHtml(webUrl);
     return `<div style="margin:10px 0;">` +
         `<video controls preload="metadata" ` +
         `style="max-width:100%;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.15);display:block;">` +
-        `<source src="${webUrl}"></video>` +
-        `<a href="${webUrl}" target="_blank" ` +
+        `<source src="${safeUrl}"></video>` +
+        `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer" ` +
         `style="display:inline-flex;align-items:center;gap:4px;margin-top:4px;font-size:12px;color:#8b8fa8;text-decoration:none;">` +
         `<i class="fas fa-download"></i> ${escapeHtml(fileName)}</a></div>`;
 }
@@ -2124,7 +2208,8 @@ function requestCancel() {
     })
     .then(async response => {
         const data = await response.json();
-        if (!response.ok || data.status !== 'success' || Number(data.cancelled || 0) < 1) {
+        const cancellationAccepted = Number(data.cancelled || 0) + Number(data.cancellation_requested || 0);
+        if (!response.ok || data.status !== 'success' || cancellationAccepted < 1) {
             throw new Error(data.message || `HTTP ${response.status}`);
         }
         // This only confirms that the backend accepted the request. The actual
@@ -2802,6 +2887,11 @@ function sendVoiceMessage(text, audioUrl) {
                     loadingEl.remove();
                     addBotMessage(data.inline_reply, new Date());
                 } else if (data.stream) {
+                    setLoadingExecutionState(
+                        loadingEl,
+                        data.execution_state || (data.queued ? 'queued' : ''),
+                        data.queue_position
+                    );
                     setSendBtnCancelMode(data.request_id);
                     startSSE(data.request_id, loadingEl, timestamp, titleInfo);
                 } else {
@@ -3017,6 +3107,11 @@ async function regenerateResponse(botMsgEl) {
                     loadingEl.remove();
                     addBotMessage(data.inline_reply, new Date());
                 } else if (data.stream) {
+                    setLoadingExecutionState(
+                        loadingEl,
+                        data.execution_state || (data.queued ? 'queued' : ''),
+                        data.queue_position
+                    );
                     setSendBtnCancelMode(data.request_id);
                     startSSE(data.request_id, loadingEl, timestamp, null);
                 } else {
@@ -3127,6 +3222,11 @@ function sendMessage() {
                     loadingEl.remove();
                     addBotMessage(data.inline_reply, new Date());
                 } else if (data.stream) {
+                    setLoadingExecutionState(
+                        loadingEl,
+                        data.execution_state || (data.queued ? 'queued' : ''),
+                        data.queue_position
+                    );
                     setSendBtnCancelMode(data.request_id);
                     startSSE(data.request_id, loadingEl, timestamp, titleInfo);
                 } else {
@@ -3431,8 +3531,17 @@ function startSSE(requestId, loadingEl, timestamp, titleInfo, replayItems) {
 
             } else if (item.type === 'image') {
                 ensureBotEl();
+                const imageUrl = _toWebUrl(item.content);
+                if (!imageUrl) {
+                    const warning = document.createElement('div');
+                    warning.className = 'text-xs text-red-500 my-2';
+                    warning.textContent = 'Blocked unsafe image URL';
+                    mediaEl.appendChild(warning);
+                    scrollChatToBottom();
+                    return;
+                }
                 const imgEl = document.createElement('img');
-                imgEl.src = item.content;
+                imgEl.src = imageUrl;
                 imgEl.alt = 'screenshot';
                 imgEl.style.cssText = 'max-width:600px;border-radius:8px;margin:8px 0;cursor:zoom-in;box-shadow:0 1px 4px rgba(0,0,0,0.1);';
                 imgEl.onclick = () => _openImageLightbox(imgEl.src);
@@ -3450,21 +3559,47 @@ function startSSE(requestId, loadingEl, timestamp, titleInfo, replayItems) {
 
             } else if (item.type === 'video') {
                 ensureBotEl();
+                const videoHtml = _buildVideoHtml(item.content);
+                if (!videoHtml) {
+                    const warning = document.createElement('div');
+                    warning.className = 'text-xs text-red-500 my-2';
+                    warning.textContent = 'Blocked unsafe video URL';
+                    mediaEl.appendChild(warning);
+                    scrollChatToBottom();
+                    return;
+                }
                 const wrapper = document.createElement('div');
-                wrapper.innerHTML = _buildVideoHtml(item.content);
+                wrapper.innerHTML = videoHtml;
                 mediaEl.appendChild(wrapper.firstElementChild || wrapper);
                 scrollChatToBottom();
 
             } else if (item.type === 'file') {
                 ensureBotEl();
-                const fileName = item.file_name || item.content.split('/').pop();
+                const fileUrl = _toWebUrl(item.content);
+                if (!fileUrl) {
+                    const warning = document.createElement('div');
+                    warning.className = 'text-xs text-red-500 my-2';
+                    warning.textContent = 'Blocked unsafe file URL';
+                    mediaEl.appendChild(warning);
+                    scrollChatToBottom();
+                    return;
+                }
+                const fileName = _safeFileDisplayName(
+                    item.file_name,
+                    _safeFileDisplayName(fileUrl.split('/').pop().split('?')[0])
+                );
                 const fileEl = document.createElement('a');
-                fileEl.href = item.content;
+                fileEl.href = fileUrl;
                 fileEl.download = fileName;
                 fileEl.target = '_blank';
+                fileEl.rel = 'noopener noreferrer';
                 fileEl.className = 'file-attachment';
                 fileEl.style.cssText = 'display:inline-flex;align-items:center;gap:6px;padding:8px 14px;margin:8px 0;border-radius:8px;background:var(--bg-secondary,#f3f4f6);color:var(--text-primary,#374151);text-decoration:none;font-size:14px;border:1px solid var(--border-color,#e5e7eb);';
-                fileEl.innerHTML = `<i class="fas fa-file-download" style="color:#6b7280;"></i> ${fileName}`;
+                const icon = document.createElement('i');
+                icon.className = 'fas fa-file-download';
+                icon.style.color = '#6b7280';
+                fileEl.appendChild(icon);
+                fileEl.appendChild(document.createTextNode(` ${fileName}`));
                 mediaEl.appendChild(fileEl);
                 scrollChatToBottom();
 
@@ -4355,16 +4490,39 @@ function loadHistory(page) {
         .finally(() => { historyLoading = false; });
 }
 
+function formatQueuedExecutionStatus(queuePosition) {
+    const position = Number(queuePosition);
+    if (Number.isSafeInteger(position) && position > 0) {
+        return t('execution_queued_position').replace('{position}', String(position));
+    }
+    return t('execution_queued');
+}
+
+function setLoadingExecutionState(loadingEl, executionState, queuePosition) {
+    if (!loadingEl || executionState !== 'queued') return;
+    const dots = loadingEl.querySelector('.loading-dots');
+    const status = loadingEl.querySelector('.loading-status');
+    if (dots) dots.classList.add('hidden');
+    if (status) {
+        status.textContent = formatQueuedExecutionStatus(queuePosition);
+        status.classList.remove('hidden');
+    }
+    loadingEl.dataset.executionState = 'queued';
+}
+
 function addLoadingIndicator() {
     const el = document.createElement('div');
     el.className = 'flex gap-3 px-4 sm:px-6 py-3';
     el.innerHTML = `
         <img src="assets/logo.jpg" alt="SmartAssistant" class="w-8 h-8 rounded-lg flex-shrink-0">
         <div class="bg-white dark:bg-[#1A1A1A] border border-slate-200 dark:border-white/10 rounded-2xl px-4 py-3">
-            <div class="flex items-center gap-1.5">
-                <span class="w-2 h-2 rounded-full bg-primary-400 animate-pulse-dot" style="animation-delay: 0s"></span>
-                <span class="w-2 h-2 rounded-full bg-primary-400 animate-pulse-dot" style="animation-delay: 0.2s"></span>
-                <span class="w-2 h-2 rounded-full bg-primary-400 animate-pulse-dot" style="animation-delay: 0.4s"></span>
+            <div class="flex items-center gap-2">
+                <div class="loading-dots flex items-center gap-1.5" aria-hidden="true">
+                    <span class="w-2 h-2 rounded-full bg-primary-400 animate-pulse-dot" style="animation-delay: 0s"></span>
+                    <span class="w-2 h-2 rounded-full bg-primary-400 animate-pulse-dot" style="animation-delay: 0.2s"></span>
+                    <span class="w-2 h-2 rounded-full bg-primary-400 animate-pulse-dot" style="animation-delay: 0.4s"></span>
+                </div>
+                <span class="loading-status hidden text-xs text-slate-600 dark:text-slate-300" role="status" aria-live="polite"></span>
             </div>
         </div>
     `;
@@ -8828,6 +8986,237 @@ function stopLogStream() {
 }
 
 // =====================================================================
+// Delivery Evidence View
+// =====================================================================
+// A delivery display is deliberately less permissive than the API contract.
+// A stale request, malformed response, or a schema added by an unreviewed
+// server change must show BLOCKED rather than inheriting a prior PASS.
+let deliveryEvidenceData = null;
+let deliveryRequestGeneration = 0;
+
+function deliveryElement(tag, className, text) {
+    const element = document.createElement(tag);
+    if (className) element.className = className;
+    if (text !== undefined) element.textContent = text;
+    return element;
+}
+
+function deliveryStateText(passed) {
+    return passed ? t('delivery_pass_value') : t('delivery_blocked_value');
+}
+
+function addDeliveryRow(container, label, value, passed) {
+    const row = deliveryElement(
+        'div',
+        'flex items-center justify-between gap-4 px-4 py-2.5 text-sm border-t border-slate-100 dark:border-white/5'
+    );
+    row.appendChild(deliveryElement(
+        'span',
+        'font-mono text-xs text-slate-500 dark:text-slate-400 break-all',
+        label
+    ));
+    const valueEl = deliveryElement(
+        'span',
+        `inline-flex items-center gap-1.5 font-mono text-xs break-all text-right ${passed ? 'text-primary-500' : 'text-red-500'}`,
+        value
+    );
+    if (!passed) {
+        const icon = deliveryElement('i', 'fas fa-triangle-exclamation text-[11px] flex-shrink-0');
+        valueEl.prepend(icon);
+    }
+    row.appendChild(valueEl);
+    container.appendChild(row);
+}
+
+function addDeliverySection(parent, title, rows) {
+    const section = deliveryElement(
+        'section',
+        'bg-white dark:bg-[#1A1A1A] rounded-xl border border-slate-200 dark:border-white/10 overflow-hidden'
+    );
+    section.appendChild(deliveryElement(
+        'h3',
+        'px-4 py-3 text-sm font-semibold text-slate-800 dark:text-slate-100',
+        title
+    ));
+    if (rows.length === 0) {
+        section.appendChild(deliveryElement(
+            'p',
+            'px-4 py-3 text-sm text-red-500 border-t border-slate-100 dark:border-white/5',
+            t('delivery_no_details')
+        ));
+    } else {
+        rows.forEach((row) => addDeliveryRow(section, row.label, row.value, row.passed));
+    }
+    parent.appendChild(section);
+}
+
+function renderDeliveryLoadState(message, isError) {
+    const content = document.getElementById('delivery-content');
+    if (!content) return;
+    content.replaceChildren();
+    const box = deliveryElement(
+        'div',
+        `rounded-xl border p-4 flex items-start gap-3 ${isError
+            ? 'border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-900/15'
+            : 'border-slate-200 dark:border-white/10 bg-white dark:bg-[#1A1A1A]'}`
+    );
+    box.appendChild(deliveryElement(
+        'i',
+        isError
+            ? 'fas fa-shield-halved text-red-500 mt-0.5'
+            : 'fas fa-spinner fa-spin text-primary-500 mt-0.5'
+    ));
+    box.appendChild(deliveryElement(
+        'p',
+        isError ? 'text-sm text-red-500 break-words' : 'text-sm text-slate-500 dark:text-slate-400',
+        message
+    ));
+    content.appendChild(box);
+}
+
+function renderDeliveryEvidence(evidence) {
+    const content = document.getElementById('delivery-content');
+    if (!content) return;
+    if (!evidence) {
+        renderDeliveryLoadState(t('delivery_loading'), false);
+        return;
+    }
+
+    content.replaceChildren();
+    const isPassed = evidence.passed === true;
+    const banner = deliveryElement(
+        'section',
+        `rounded-xl border p-4 flex items-start gap-3 ${isPassed
+            ? 'border-primary-200 dark:border-primary-800 bg-primary-50 dark:bg-primary-900/15'
+            : 'border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-900/15'}`
+    );
+    banner.appendChild(deliveryElement(
+        'i',
+        isPassed
+            ? 'fas fa-circle-check text-primary-500 mt-0.5'
+            : 'fas fa-shield-halved text-red-500 mt-0.5'
+    ));
+    const bannerBody = deliveryElement('div', 'min-w-0');
+    bannerBody.appendChild(deliveryElement(
+        'h3',
+        'font-semibold text-slate-800 dark:text-slate-100',
+        isPassed ? t('delivery_passed') : t('delivery_blocked')
+    ));
+    bannerBody.appendChild(deliveryElement(
+        'p',
+        'text-sm text-slate-600 dark:text-slate-300 mt-1',
+        isPassed ? t('delivery_passed_desc') : t('delivery_blocked_desc')
+    ));
+    if (evidence.message) {
+        bannerBody.appendChild(deliveryElement(
+            'p',
+            'text-xs text-red-500 mt-2 break-words',
+            evidence.message
+        ));
+    } else if (evidence.status === 'not_available') {
+        bannerBody.appendChild(deliveryElement(
+            'p',
+            'text-xs text-red-500 mt-2',
+            t('delivery_manifest_absent')
+        ));
+    } else if (evidence.status === 'invalid_evidence') {
+        bannerBody.appendChild(deliveryElement(
+            'p',
+            'text-xs text-red-500 mt-2',
+            t('delivery_invalid')
+        ));
+    }
+    banner.appendChild(bannerBody);
+    content.appendChild(banner);
+
+    const sections = deliveryElement('div', 'grid gap-5 mt-5');
+    addDeliverySection(sections, t('delivery_verification'), [
+        {
+            label: t('delivery_integrity'),
+            value: deliveryStateText(evidence.verification && evidence.verification.integrityPassed === true),
+            passed: evidence.verification && evidence.verification.integrityPassed === true,
+        },
+        {
+            label: t('delivery_release_result'),
+            value: deliveryStateText(isPassed),
+            passed: isPassed,
+        },
+        {
+            label: t('delivery_response_status'),
+            value: evidence.status || 'invalid_evidence',
+            passed: evidence.status === 'completed' && isPassed,
+        },
+    ]);
+
+    const requiredRows = Object.entries(evidence.requiredConditions || {}).map(([label, passed]) => ({
+        label,
+        value: deliveryStateText(passed === true),
+        passed: passed === true,
+    }));
+    addDeliverySection(sections, t('delivery_formal_gates'), requiredRows);
+
+    const reportRows = Object.entries(evidence.reports || {}).map(([label, report]) => ({
+        label,
+        value: `${report.status || 'ABSENT'}${report.fresh === false ? ` · ${t('delivery_stale')}` : ''}`,
+        passed: report.passed === true && report.fresh !== false,
+    }));
+    addDeliverySection(sections, t('delivery_reports'), reportRows);
+
+    const denialRows = Object.entries(evidence.hardDenials || {}).map(([label, value]) => ({
+        label,
+        value,
+        passed: value === 'YES',
+    }));
+    addDeliverySection(sections, t('delivery_hard_denials'), denialRows);
+    content.appendChild(sections);
+}
+
+async function loadDeliveryEvidence() {
+    const requestGeneration = ++deliveryRequestGeneration;
+    const content = document.getElementById('delivery-content');
+    const refreshButton = document.getElementById('delivery-refresh-btn');
+    if (content) content.setAttribute('aria-busy', 'true');
+    if (refreshButton) refreshButton.disabled = true;
+    deliveryEvidenceData = null;
+    renderDeliveryEvidence(null);
+    try {
+        const response = await fetch('/api/release/evidence', {
+            cache: 'no-store',
+            headers: { Accept: 'application/json' },
+        });
+        // 422/500 are intentional fail-closed evidence responses.  Parse the
+        // structured body so a user sees the missing/invalid state instead of
+        // an ambiguous transport error; every other non-2xx remains an error.
+        if (!response.ok && response.status !== 422 && response.status !== 500) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText || 'Request failed'}`);
+        }
+        const payload = await response.json();
+        if (requestGeneration !== deliveryRequestGeneration) return;
+        const normalizer = window.CowDeliveryEvidence && window.CowDeliveryEvidence.normalizeEvidence;
+        if (typeof normalizer !== 'function') {
+            throw new Error('release-evidence display contract is unavailable');
+        }
+        deliveryEvidenceData = normalizer(payload);
+        renderDeliveryEvidence(deliveryEvidenceData);
+    } catch (error) {
+        if (requestGeneration !== deliveryRequestGeneration) return;
+        deliveryEvidenceData = null;
+        const detail = String(error && error.message ? error.message : error).slice(0, 512);
+        renderDeliveryLoadState(`${t('delivery_load_error')} ${detail}`, true);
+    } finally {
+        if (requestGeneration === deliveryRequestGeneration) {
+            if (content) content.setAttribute('aria-busy', 'false');
+            if (refreshButton) refreshButton.disabled = false;
+        }
+    }
+}
+
+const deliveryRefreshButton = document.getElementById('delivery-refresh-btn');
+if (deliveryRefreshButton) {
+    deliveryRefreshButton.addEventListener('click', () => { void loadDeliveryEvidence(); });
+}
+
+// =====================================================================
 // View Navigation Hook
 // =====================================================================
 const _origNavigateTo = navigateTo;
@@ -8850,6 +9239,7 @@ navigateTo = function(viewId) {
     else if (viewId === 'channels') loadChannelsView();
     else if (viewId === 'tasks') loadTasksView();
     else if (viewId === 'logs') startLogStream();
+    else if (viewId === 'delivery') void loadDeliveryEvidence();
 };
 
 // =====================================================================

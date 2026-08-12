@@ -147,6 +147,28 @@ const App: React.FC = () => {
     }
   }, [authRequired])
 
+  const handleForgetDeviceIdentity = useCallback(async () => {
+    const forgetIdentity = window.electronAPI?.forgetDesktopDeviceIdentity
+    if (!forgetIdentity || !window.confirm(t('auth_forget_device_identity_confirm'))) return
+
+    try {
+      await apiClient.authLogout()
+    } catch {}
+
+    let forgetFailed = false
+    try {
+      await forgetIdentity()
+    } catch {
+      forgetFailed = true
+    } finally {
+      useChatStore.getState().reset()
+      useSessionStore.getState().reset()
+      setProductAuthed(false)
+      setAuthState(authRequired ? 'need_login' : 'ok')
+    }
+    if (forgetFailed) window.alert(t('auth_forget_device_identity_error'))
+  }, [authRequired])
+
   if (backend.status !== 'ready') {
     return <StatusScreen status={backend.status} error={backend.error} onRetry={backend.restart} />
   }
@@ -185,7 +207,11 @@ const App: React.FC = () => {
   return (
     <div className="flex h-screen overflow-hidden bg-base text-content">
       {onboardingOpen && <OnboardingWizard onDone={handleLangChange} />}
-      <NavRail onLangChange={handleLangChange} onLogout={authRequired ? handleLogout : undefined} />
+      <NavRail
+        onLangChange={handleLangChange}
+        onLogout={authRequired ? handleLogout : undefined}
+        onForgetDeviceIdentity={authRequired && window.electronAPI?.forgetDesktopDeviceIdentity ? handleForgetDeviceIdentity : undefined}
+      />
 
       {showSessions && <SessionList />}
 

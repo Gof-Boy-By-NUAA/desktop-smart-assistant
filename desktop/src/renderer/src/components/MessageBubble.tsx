@@ -137,6 +137,7 @@ const MessageBubble: React.FC<MessageBubbleProps> = ({ message, onRegenerate, on
   const showCursor =
     message.isStreaming &&
     !message.isStreamInterrupted &&
+    !message.isQueued &&
     !message.content &&
     (!message.steps || message.steps.length === 0)
 
@@ -254,6 +255,14 @@ const MessageBubble: React.FC<MessageBubbleProps> = ({ message, onRegenerate, on
                   </button>
                 )
               )}
+            </div>
+          )}
+
+          {message.isQueued && (
+            <div className="text-xs text-content-secondary mt-1" role="status" aria-live="polite">
+              {message.queuePosition
+                ? t('msg_queued_position').replace('{position}', String(message.queuePosition))
+                : t('msg_queued')}
             </div>
           )}
 

@@ -4,7 +4,9 @@ Agent Bridge - Integrates Agent system with existing COW bridge
 
 import os
 import threading
+import time
 import uuid
+from contextlib import contextmanager
 from typing import Optional, List
 
 from agent.protocol import (
@@ -24,6 +26,113 @@ from common.log import logger
 from common.utils import expand_path
 from config import conf
 from models.openai_compatible_bot import OpenAICompatibleBot
+from agent.protocol.agent_stream import AgentExecutionFenceLostError
+from agent.protocol.cancel import AgentCancelledError
+
+
+class _DurableWebExecutionFenceGuard:
+    """Renew one Web lease across LLM work and guarded tool invocations."""
+
+    def __init__(self, store, execution: dict, cancel_event=None):
+        self._store = store
+        self._execution = execution
+        self._cancel_event = cancel_event
+        self._stop = threading.Event()
+        self._thread = None
+        self._lock = threading.Lock()
+        self._lost_error = None
+
+    def bind_cancel_event(self, cancel_event) -> None:
+        """Attach the in-process event after the request registry is created."""
+
+        with self._lock:
+            self._cancel_event = cancel_event
+        # A cancellation may have been accepted by another process before this
+        # worker registered locally. Observe it immediately rather than waiting
+        # for the first heartbeat.
+        self.verify_now()
+
+    def _observe_durable_cancellation(self) -> bool:
+        requested = self._store.cancellation_requested_for_fence(
+            self._execution["request_id"],
+            self._execution["owner_id"],
+            self._execution["session_id"],
+            self._execution["lease_token"],
+            self._execution["runner_id"],
+            self._execution["session_fence_token"],
+        )
+        if requested:
+            with self._lock:
+                event = self._cancel_event
+            if event is not None:
+                event.set()
+        return requested
+
+    def verify_now(self) -> None:
+        with self._lock:
+            if self._lost_error is not None:
+                raise AgentExecutionFenceLostError("durable Web execution lease was lost") from self._lost_error
+        try:
+            self._store.verify_session_execution_fence(
+                self._execution["request_id"],
+                self._execution["owner_id"],
+                self._execution["session_id"],
+                self._execution["lease_token"],
+                self._execution["runner_id"],
+                self._execution["session_fence_token"],
+            )
+            self._observe_durable_cancellation()
+        except Exception as exc:
+            with self._lock:
+                self._lost_error = exc
+            raise AgentExecutionFenceLostError("durable Web execution lease is no longer owned") from exc
+
+    def start_heartbeat(self) -> None:
+        if self._thread is not None:
+            return
+        self.verify_now()
+        interval = max(1.0, min(10.0, self._store._lease_seconds() / 3.0))
+
+        def renew() -> None:
+            while not self._stop.wait(interval):
+                try:
+                    self.verify_now()
+                except AgentExecutionFenceLostError:
+                    return
+
+        self._thread = threading.Thread(
+            target=renew, name="smart-assistant-web-execution-lease", daemon=True
+        )
+        self._thread.start()
+
+    def stop_heartbeat(self, *, verify: bool) -> None:
+        self._stop.set()
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=max(1.0, self._store._lease_seconds() / 3.0))
+        self._thread = None
+        if verify:
+            self.verify_now()
+
+    @contextmanager
+    def tool_scope(self):
+        self.verify_now()
+        with self._lock:
+            cancel_event = self._cancel_event
+        if cancel_event is not None and cancel_event.is_set():
+            raise AgentCancelledError("durable Web cancellation requested before tool execution")
+        try:
+            yield
+        except BaseException:
+            # Do not convert a tool failure (which may follow a side effect) into
+            # a benign cancellation. The bridge will retain its in_doubt path.
+            raise
+        else:
+            self.verify_now()
+            with self._lock:
+                cancel_event = self._cancel_event
+            if cancel_event is not None and cancel_event.is_set():
+                raise AgentCancelledError("durable Web cancellation requested after tool execution")
 
 
 def add_openai_compatible_support(bot_instance):
@@ -690,6 +799,8 @@ class AgentBridge:
         web_execution_settled = False
         web_execution_settlement_attempted = False
         web_session_fence_token = None
+        web_execution_guard = None
+        web_execution_heartbeat_started = False
         agent_run_entered = False
 
         def settle_web_execution(outcome: str, detail: str) -> None:
@@ -712,8 +823,32 @@ class AgentBridge:
                 web_execution["runner_id"],
                 outcome=outcome,
                 detail=detail,
+                fence_token=web_execution["session_fence_token"],
             )
             web_execution_settled = True
+
+        def reject_web_execution_before_agent(detail: str) -> bool:
+            """Release only the exact active lease when Agent never began."""
+
+            nonlocal web_execution_settled
+            nonlocal web_execution_settlement_attempted
+            if (
+                web_execution is None
+                or web_execution_store is None
+                or web_execution_settled
+            ):
+                return False
+            web_execution_settlement_attempted = True
+            rejected = web_execution_store.reject_execution_before_agent(
+                web_execution["request_id"],
+                web_execution["owner_id"],
+                web_execution["session_id"],
+                web_execution["lease_token"],
+                web_execution["runner_id"],
+                detail=detail,
+            )
+            web_execution_settled = bool(rejected)
+            return bool(rejected)
 
         try:
             # Extract session_id from context for user isolation
@@ -734,14 +869,10 @@ class AgentBridge:
                 )
                 web_execution_store = candidate_store
                 web_session_fence_token = web_execution["session_fence_token"]
-                candidate_store.verify_session_execution_fence(
-                    web_execution["request_id"],
-                    web_execution["owner_id"],
-                    web_execution["session_id"],
-                    web_execution["lease_token"],
-                    web_execution["runner_id"],
-                    web_session_fence_token,
+                web_execution_guard = _DurableWebExecutionFenceGuard(
+                    candidate_store, web_execution
                 )
+                web_execution_guard.verify_now()
 
             # Register a cancel token. Prefer per-turn request_id (web),
             # fall back to session_id (IM channels). The Event is polled by
@@ -762,6 +893,8 @@ class AgentBridge:
                 cancel_event = registry.register(
                     token_key, session_id=session_id, owner_id=cancel_owner_id
                 )
+            if web_execution_guard is not None:
+                web_execution_guard.bind_cancel_event(cancel_event)
 
             # Register the request before waiting so `/cancel` can target a
             # queued turn. Once it owns the session lock, a cancelled queued
@@ -847,6 +980,10 @@ class AgentBridge:
                     registry.unregister(token_key)
                 return Reply(ReplyType.ERROR, "Request cancelled before execution")
 
+            if web_execution_guard is not None:
+                web_execution_guard.start_heartbeat()
+                web_execution_heartbeat_started = True
+
             # Eagerly persist the user message BEFORE running the agent so the
             # session and the user's bubble are immediately visible — even if
             # the user switches away or refreshes before the reply finishes.
@@ -881,31 +1018,23 @@ class AgentBridge:
                     and web_execution_store is not None
                     and web_session_fence_token is not None
                 ):
-                    # Revalidate at the last durable boundary before the Agent
-                    # can persist a turn or invoke a tool.  A local process
-                    # lock only serializes this worker; this database-backed
-                    # token fences all workers sharing the Web data root.
-                    web_execution_store.verify_session_execution_fence(
-                        web_execution["request_id"],
-                        web_execution["owner_id"],
-                        web_execution["session_id"],
-                        web_execution["lease_token"],
-                        web_execution["runner_id"],
-                        web_session_fence_token,
-                    )
+                    web_execution_guard.verify_now()
                 # Use agent's run_stream method with event handler
                 # The durable Web claim is already in ``running`` state. Set
                 # this marker immediately before entering the Agent executor so
                 # every crash/exception after this instruction is treated as
                 # an externally observable outcome that must not be retried.
                 agent_run_entered = True
-                response = agent.run_stream(
-                    user_message=query,
-                    on_event=event_handler.handle_event,
-                    clear_history=clear_history,
-                    cancel_event=cancel_event,
-                    steer_inbox=steer_inbox,
-                )
+                run_stream_kwargs = {
+                    "user_message": query,
+                    "on_event": event_handler.handle_event,
+                    "clear_history": clear_history,
+                    "cancel_event": cancel_event,
+                    "steer_inbox": steer_inbox,
+                }
+                if web_execution_guard is not None:
+                    run_stream_kwargs["tool_execution_guard"] = web_execution_guard.tool_scope
+                response = agent.run_stream(**run_stream_kwargs)
                 if not isinstance(response, str) or not response.strip():
                     # A blank return after Agent execution may follow a tool
                     # side effect, but it cannot be represented as a completed
@@ -915,6 +1044,24 @@ class AgentBridge:
                     raise RuntimeError(
                         "Agent returned no final response after execution"
                     )
+            except AgentCancelledError:
+                # AgentStream normally converts a user cancellation to a
+                # partial response. POST_PROCESS tools execute after that loop,
+                # however, so their request-scoped durable guard can surface a
+                # cancellation here. It is a known cancellation, not an
+                # unknown crash and must never become a completed result.
+                try:
+                    settle_web_execution(
+                        "cancelled",
+                        "Agent execution cancelled during guarded post-processing",
+                    )
+                except Exception as settle_exc:
+                    logger.error(
+                        "[AgentBridge] failed to mark guarded post-process "
+                        f"cancellation: {settle_exc}"
+                    )
+                    raise
+                return Reply(ReplyType.ERROR, "Request cancelled during execution")
             except BaseException:
                 # Exception is intentionally not narrow: SystemExit or another
                 # process-loss injection after a tool boundary must leave a
@@ -953,6 +1100,9 @@ class AgentBridge:
                         pass
                 if session_id and steer_inbox is not None:
                     get_steer_registry().unregister(session_id, steer_inbox)
+
+            if web_execution_guard is not None:
+                web_execution_guard.verify_now()
 
             # Persist new messages generated during this run
             if session_id:
@@ -1012,6 +1162,10 @@ class AgentBridge:
             # changes take effect on the user's next message.
             self._schedule_mcp_hot_reload(agent)
 
+            if web_execution_guard is not None and web_execution_heartbeat_started:
+                web_execution_guard.stop_heartbeat(verify=True)
+                web_execution_heartbeat_started = False
+
             # Only after the Agent returns and every user-visible generated
             # message has been durably appended may this Web request cease to
             # be uncertain. A cancellation can still be a known terminal
@@ -1049,14 +1203,15 @@ class AgentBridge:
                 and not web_execution_settlement_attempted
             ):
                 try:
-                    settle_web_execution(
-                        "in_doubt" if agent_run_entered else "failed_safe",
-                        (
-                            "Agent execution failed after it began"
-                            if agent_run_entered
-                            else "Web request failed before Agent execution"
-                        ),
-                    )
+                    if agent_run_entered:
+                        settle_web_execution(
+                            "in_doubt",
+                            "Agent execution failed after it began",
+                        )
+                    else:
+                        reject_web_execution_before_agent(
+                            "Web request failed before Agent execution"
+                        )
                 except Exception as settle_exc:
                     logger.error(
                         "[AgentBridge] failed to durably settle failed Web "
@@ -1079,6 +1234,12 @@ class AgentBridge:
                     pass
             return Reply(ReplyType.ERROR, f"Agent error: {str(e)}")
         finally:
+            if web_execution_guard is not None and web_execution_heartbeat_started:
+                try:
+                    web_execution_guard.stop_heartbeat(verify=False)
+                except Exception:
+                    pass
+                web_execution_heartbeat_started = False
             self._release_session_run_lock(session_id, session_run_lock)
     
     def _schedule_mcp_hot_reload(self, agent):

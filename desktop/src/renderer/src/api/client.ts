@@ -31,54 +31,215 @@ interface ApiResult {
   }
 }
 
-const AUTH_TOKEN_KEY = 'cow_auth_token'
-const AUTH_SUBJECT_TOKEN_KEY = 'cow_auth_subject_token'
+const BACKEND_ORIGIN = 'smart_assistant://backend'
 
-class ApiClient {
-  private baseUrl = 'http://127.0.0.1:9876'
-  // Bearer token for web_password-protected backends. The desktop renderer
-  // runs from a file:// origin, where cross-origin cookies to http://127.0.0.1
-  // aren't sent reliably, so we authenticate via an Authorization header
-  // instead. Persisted in localStorage so it survives reloads.
-  private authToken: string | null =
-    typeof localStorage !== 'undefined' ? localStorage.getItem(AUTH_TOKEN_KEY) : null
-  private authSubjectToken: string | null =
-    typeof localStorage !== 'undefined' ? localStorage.getItem(AUTH_SUBJECT_TOKEN_KEY) : null
+/** Minimum EventSource surface used by the desktop UI. */
+export interface BackendEventSource {
+  onmessage: ((event: MessageEvent<string>) => void) | null
+  onerror: ((event: Event) => void) | null
+  close: () => void
+}
 
-  setBaseUrl(url: string) {
-    this.baseUrl = url
+function newStreamId(): string {
+  const uuid = globalThis.crypto?.randomUUID?.()
+  return `desktop_${uuid || `${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`}`
+}
+
+/**
+ * An EventSource-shaped IPC facade. The renderer has no network endpoint or
+ * bearer; Electron main owns the pinned TLS connection and forwards frames.
+ */
+class IpcBackendEventSource implements BackendEventSource {
+  private readonly streamId = newStreamId()
+  private closed = false
+  private unsubscribe: (() => void) | null = null
+  private queuedMessages: string[] = []
+  private queuedErrors: string[] = []
+  private messageHandler: ((event: MessageEvent<string>) => void) | null = null
+  private errorHandler: ((event: Event) => void) | null = null
+
+  constructor(path: string) {
+    const api = window.electronAPI
+    if (!api) {
+      queueMicrotask(() => this.dispatchError('Trusted desktop bridge unavailable'))
+      return
+    }
+    this.unsubscribe = api.onBackendStream((event) => {
+      if (event.streamId !== this.streamId || this.closed) return
+      if (event.kind === 'message' && typeof event.data === 'string') {
+        this.dispatchMessage(event.data)
+      } else if (event.kind === 'error') {
+        this.dispatchError(event.error || 'Backend stream failed')
+      } else if (event.kind === 'closed') {
+        this.dispatchError(event.error || 'Backend stream closed')
+      }
+    })
+    void api.openBackendStream({ streamId: this.streamId, path }).catch((error: unknown) => {
+      this.dispatchError(error instanceof Error ? error.message : 'Backend stream failed')
+    })
   }
 
-  getBaseUrl() {
-    return this.baseUrl
+  get onmessage() {
+    return this.messageHandler
   }
 
-  setAuthToken(token: string | null) {
-    this.authToken = token
-    try {
-      if (token) localStorage.setItem(AUTH_TOKEN_KEY, token)
-      else localStorage.removeItem(AUTH_TOKEN_KEY)
-    } catch {
-      // localStorage may be unavailable; in-memory token still works this session
+  set onmessage(handler: ((event: MessageEvent<string>) => void) | null) {
+    this.messageHandler = handler
+    if (!handler || !this.queuedMessages.length) return
+    const queued = this.queuedMessages.splice(0)
+    for (const data of queued) handler({ data } as MessageEvent<string>)
+  }
+
+  get onerror() {
+    return this.errorHandler
+  }
+
+  set onerror(handler: ((event: Event) => void) | null) {
+    this.errorHandler = handler
+    if (!handler || !this.queuedErrors.length) return
+    this.queuedErrors.length = 0
+    handler(new Event('error'))
+  }
+
+  close = () => {
+    if (this.closed) return
+    this.closed = true
+    this.unsubscribe?.()
+    this.unsubscribe = null
+    void window.electronAPI?.closeBackendStream(this.streamId)
+  }
+
+  private dispatchMessage(data: string) {
+    if (this.closed) return
+    if (this.messageHandler) {
+      this.messageHandler({ data } as MessageEvent<string>)
+    } else {
+      this.queuedMessages.push(data)
     }
   }
 
-  private async authenticatedFetch(path: string, options?: RequestInit): Promise<Response> {
+  private dispatchError(message: string) {
+    if (this.closed) return
+    if (this.errorHandler) {
+      this.errorHandler(new Event('error'))
+    } else {
+      this.queuedErrors.push(message)
+    }
+  }
+}
+
+function base64ToBytes(value: string): Uint8Array {
+  if (typeof value !== 'string' || value.length > 64 * 1024 * 1024) {
+    throw new Error('Invalid desktop backend response')
+  }
+  try {
+    const binary = atob(value)
+    const output = new Uint8Array(binary.length)
+    for (let index = 0; index < binary.length; index += 1) output[index] = binary.charCodeAt(index)
+    return output
+  } catch {
+    throw new Error('Invalid desktop backend response encoding')
+  }
+}
+
+function concatBytes(parts: Uint8Array[]): Uint8Array {
+  const total = parts.reduce((size, part) => size + part.byteLength, 0)
+  const output = new Uint8Array(total)
+  let offset = 0
+  for (const part of parts) {
+    output.set(part, offset)
+    offset += part.byteLength
+  }
+  return output
+}
+
+function safeMultipartHeader(value: string): string {
+  return value.replace(/[\r\n]/g, '').replace(/"/g, '%22')
+}
+
+async function serializeFormData(body: FormData, headers: Headers): Promise<Uint8Array> {
+  const boundary = `----smart-assistant-${newStreamId().replace(/[^A-Za-z0-9]/g, '')}`
+  if (!headers.has('Content-Type')) headers.set('Content-Type', `multipart/form-data; boundary=${boundary}`)
+  const encoder = new TextEncoder()
+  const parts: Uint8Array[] = []
+  for (const [name, value] of body.entries()) {
+    let disposition = `--${boundary}\r\nContent-Disposition: form-data; name="${safeMultipartHeader(name)}"`
+    if (typeof value === 'string') {
+      parts.push(encoder.encode(`${disposition}\r\n\r\n${value}\r\n`))
+      continue
+    }
+    const filename = typeof File !== 'undefined' && value instanceof File ? value.name : 'blob'
+    const contentType = value.type || 'application/octet-stream'
+    disposition += `; filename="${safeMultipartHeader(filename)}"\r\nContent-Type: ${safeMultipartHeader(contentType)}\r\n\r\n`
+    parts.push(encoder.encode(disposition), new Uint8Array(await value.arrayBuffer()), encoder.encode('\r\n'))
+  }
+  parts.push(encoder.encode(`--${boundary}--\r\n`))
+  return concatBytes(parts)
+}
+
+async function serializeBody(body: BodyInit | null | undefined, headers: Headers): Promise<string | Uint8Array | undefined> {
+  if (body == null) return undefined
+  if (typeof body === 'string') return body
+  if (body instanceof FormData) return serializeFormData(body, headers)
+  if (body instanceof URLSearchParams) {
+    if (!headers.has('Content-Type')) headers.set('Content-Type', 'application/x-www-form-urlencoded;charset=UTF-8')
+    return body.toString()
+  }
+  if (body instanceof Blob) return new Uint8Array(await body.arrayBuffer())
+  if (body instanceof ArrayBuffer) return new Uint8Array(body)
+  if (ArrayBuffer.isView(body)) return new Uint8Array(body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength))
+  throw new Error('Unsupported desktop request body')
+}
+
+function backendResourceUrl(value: string, prefix: '/file/' | '/preview/'): string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 8192 || !value.startsWith('/')) return ''
+  try {
+    const parsed = new URL(value, 'https://smart_assistant.invalid')
+    if (parsed.origin !== 'https://smart_assistant.invalid' || !parsed.pathname.startsWith(prefix)) return ''
+    return `${BACKEND_ORIGIN}${parsed.pathname}${parsed.search}`
+  } catch {
+    return ''
+  }
+}
+
+class ApiClient {
+  // Compatibility for pages that still receive the opaque backend origin.
+  // Never accept a mutable HTTP origin in the renderer.
+  setBaseUrl(_url: string) {}
+
+  getBaseUrl() {
+    return BACKEND_ORIGIN
+  }
+
+  private async authenticatedFetch(
+    path: string,
+    options?: RequestInit,
+    acceptedErrorStatuses: readonly number[] = [],
+  ): Promise<Response> {
+    const api = window.electronAPI
+    if (!api) throw new Error('Trusted desktop bridge unavailable')
     const headers = new Headers(options?.headers)
-    if (this.authToken) headers.set('Authorization', `Bearer ${this.authToken}`)
-    // Let the browser add the multipart boundary for FormData. JSON callers pass
-    // a string body and receive the shared content type automatically.
+    // Electron main, not the renderer, attaches the backend bearer after the
+    // request traverses the pinned TLS channel.  Let multipart serialization
+    // set its own boundary; JSON callers receive the shared content type.
     if (typeof options?.body === 'string' && !headers.has('Content-Type')) {
       headers.set('Content-Type', 'application/json')
     }
-    const res = await fetch(`${this.baseUrl}${path}`, {
-      ...options,
-      // Cookies still work for browser access; the desktop app relies on the
-      // Authorization header above.
-      credentials: 'include',
-      headers,
+    const response = await api.backendRequest({
+      path,
+      method: options?.method || 'GET',
+      headers: Object.fromEntries(headers.entries()),
+      body: await serializeBody(options?.body, headers),
     })
-    if (!res.ok) {
+    if (!Number.isInteger(response.status) || response.status < 100 || response.status > 599) {
+      throw new Error('Invalid desktop backend response')
+    }
+    const res = new Response(base64ToBytes(response.bodyBase64), {
+      status: response.status,
+      statusText: response.statusText || '',
+      headers: response.headers,
+    })
+    if (!res.ok && !acceptedErrorStatuses.includes(res.status)) {
       let detail = ''
       try {
         const payload = await res.clone().json() as { message?: string; error?: string; error_code?: string }
@@ -112,7 +273,15 @@ class ApiClient {
       lang?: string
       idempotencyKey?: string
     }
-  ): Promise<{ status: string; request_id: string; stream: boolean; inline_reply?: string }> {
+  ): Promise<{
+    status: string
+    request_id: string
+    stream: boolean
+    inline_reply?: string
+    execution_state?: 'queued' | 'running' | 'completed' | 'cancelled' | 'failed_safe' | 'in_doubt'
+    queued?: boolean
+    queue_position?: number
+  }> {
     return this.request('/message', {
       method: 'POST',
       body: JSON.stringify({
@@ -140,14 +309,14 @@ class ApiClient {
     })
   }
 
-  async cancel(opts: { requestId?: string; sessionId?: string; lang?: string }): Promise<{ status: string; cancelled: number }> {
+  async cancel(opts: { requestId?: string; sessionId?: string; lang?: string }): Promise<{ status: string; cancelled: number; cancellation_requested?: number; cancellation_accepted?: number; message?: string }> {
     return this.request('/cancel', {
       method: 'POST',
       body: JSON.stringify({ request_id: opts.requestId, session_id: opts.sessionId, lang: opts.lang }),
     })
   }
 
-  async createSSEStream(requestId: string, afterEventId = 0): Promise<EventSource> {
+  async createSSEStream(requestId: string, afterEventId = 0): Promise<BackendEventSource> {
     const ticket = await this.request<{ status: string; ticket?: string }>('/stream/ticket', {
       method: 'POST',
       body: JSON.stringify({ request_id: requestId, after_event_id: afterEventId }),
@@ -155,8 +324,8 @@ class ApiClient {
     if (ticket.status !== 'success' || !ticket.ticket) {
       throw new Error('SSE authorization ticket was not issued')
     }
-    return new EventSource(
-      `${this.baseUrl}/stream?request_id=${encodeURIComponent(requestId)}&ticket=${encodeURIComponent(ticket.ticket)}`
+    return new IpcBackendEventSource(
+      `/stream?request_id=${encodeURIComponent(requestId)}&ticket=${encodeURIComponent(ticket.ticket)}`,
     )
   }
 
@@ -203,7 +372,7 @@ class ApiClient {
     // New backend responses use an expiring, path/owner-bound `/file/...`
     // capability. Do not append the long-lived bearer to a URL that may enter
     // browser history, proxy logs, or a copied link.
-    if (previewUrl.startsWith('/file/')) return `${this.baseUrl}${previewUrl}`
+    if (previewUrl.startsWith('/file/')) return backendResourceUrl(previewUrl, '/file/')
     // Callers must obtain a fresh owner/path-bound capability from their
     // authenticated API response.  Refuse legacy raw paths rather than putting
     // a bearer credential into a URL.
@@ -230,7 +399,7 @@ class ApiClient {
    *  what authorizes it, so no auth token is appended. */
   getPreviewUrl(previewPath: string): string {
     if (/^https?:\/\//.test(previewPath)) return previewPath
-    return `${this.baseUrl}${previewPath}`
+    return backendResourceUrl(previewPath, '/preview/')
   }
 
   // ---------------------------------------------------------
@@ -490,23 +659,31 @@ class ApiClient {
   // ---------------------------------------------------------
 
   async getReleaseEvidence(): Promise<Record<string, unknown>> {
-    return this.request('/api/release/evidence')
+    // A delivery result must never be rendered from an HTTP cache.  The
+    // backend independently verifies the manifest on every request and sends
+    // no-store too; keep the client-side request equally explicit.
+    const res = await this.authenticatedFetch(
+      '/api/release/evidence',
+      { cache: 'no-store' },
+      // Invalid evidence must use a failing HTTP status for non-UI callers,
+      // while the delivery page still needs the structured fail-closed body.
+      [422, 500],
+    )
+    return res.json()
   }
 
   // ---------------------------------------------------------
   // Logs / version
   // ---------------------------------------------------------
 
-  async createLogStream(): Promise<EventSource> {
+  async createLogStream(): Promise<BackendEventSource> {
     const ticket = await this.request<{ status: string; ticket?: string }>('/api/logs/ticket', {
       method: 'POST',
     })
     if (ticket.status !== 'success' || !ticket.ticket) {
       throw new Error('Log-stream authorization ticket was not issued')
     }
-    return new EventSource(
-      `${this.baseUrl}/api/logs?ticket=${encodeURIComponent(ticket.ticket)}`
-    )
+    return new IpcBackendEventSource(`/api/logs?ticket=${encodeURIComponent(ticket.ticket)}`)
   }
 
   async getVersion(): Promise<string> {
@@ -515,40 +692,25 @@ class ApiClient {
   }
 
   // ---------------------------------------------------------
-  // Auth (web_password) — placeholder for future use
+  // Auth (web_password). Credentials are delivered once over the IPC broker;
+  // bearer and subject capabilities remain exclusively in Electron main memory.
   // ---------------------------------------------------------
 
   async authCheck(): Promise<{ status: string; auth_required: boolean; authenticated?: boolean }> {
     return this.request('/auth/check')
   }
 
-  async authLogin(password: string): Promise<ApiResult & { token?: string; subject_token?: string }> {
-    const res = await this.request<ApiResult & { token?: string; subject_token?: string }>('/auth/login', {
+  async authLogin(password: string): Promise<ApiResult> {
+    return this.request<ApiResult>('/auth/login', {
       method: 'POST',
-      body: JSON.stringify({ password, subject_token: this.authSubjectToken }),
+      body: JSON.stringify({ password }),
     })
-    if (res.status === 'success' && res.token) {
-      this.setAuthToken(res.token)
-      if (res.subject_token) {
-        this.authSubjectToken = res.subject_token
-        try {
-          localStorage.setItem(AUTH_SUBJECT_TOKEN_KEY, res.subject_token)
-        } catch {
-          // In-memory subject still preserves ownership for this renderer session.
-        }
-      }
-    }
-    return res
   }
 
   async authLogout(): Promise<ApiResult> {
-    // Revoke while the bearer is still attached; always clear the local copy
-    // even if the backend is unreachable or the credential already expired.
-    try {
-      return await this.request<ApiResult>('/auth/logout', { method: 'POST' })
-    } finally {
-      this.setAuthToken(null)
-    }
+    // Electron main revokes and clears its in-memory bearer even if the trusted
+    // channel fails. The renderer never receives a copy to clear.
+    return this.request<ApiResult>('/auth/logout', { method: 'POST' })
   }
 }
 

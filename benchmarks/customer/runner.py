@@ -10,7 +10,7 @@ import random
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
 from agent.skills.governance import (
     GovernedSkillRepository,
@@ -62,6 +62,7 @@ class ControlledCustomerAcceptanceRunner:
         judge: Optional[CustomerCaseJudge] = None,
         *,
         execution_ledger_path: Path,
+        fault_injector: Callable[[str], None] | None = None,
     ) -> None:
         self.repository = repository
         self.tenant_id = clean_text(tenant_id, "tenant_id")
@@ -70,6 +71,13 @@ class ControlledCustomerAcceptanceRunner:
         self.executor = executor
         self.judge = judge
         self.execution_ledger_path = Path(execution_ledger_path)
+        self._fault_injector = fault_injector
+
+    def _inject_fault(self, point: str) -> None:
+        """Invoke deterministic test-only crash injection at a durable boundary."""
+
+        if self._fault_injector is not None:
+            self._fault_injector(point)
 
     def run(
         self,
@@ -134,7 +142,7 @@ class ControlledCustomerAcceptanceRunner:
                     "completed customer report failed independent verification"
                 )
             return completed_report
-        if run_claim["claim_status"] != "claimed":
+        if run_claim["claim_status"] not in {"claimed", "resumable"}:
             ledger_record = ledger.describe_run(
                 customer_package.manifest_sha256,
                 customer_package.cases_sha256,
@@ -234,7 +242,11 @@ class ControlledCustomerAcceptanceRunner:
                         arm,
                         request_sha256,
                     )
-                    if operation_claim["claim_status"] != "claimed":
+                    operation_state = operation_claim["state"]
+                    if operation_claim["claim_status"] != "claimed" and (
+                        operation_state
+                        not in {"execution_receipt", "completed"}
+                    ):
                         ledger.mark_run_in_doubt(
                             customer_package.manifest_sha256,
                             customer_package.cases_sha256,
@@ -249,65 +261,99 @@ class ControlledCustomerAcceptanceRunner:
                                 customer_package.cases_sha256,
                             ),
                         )
+                    recovered_receipts = None
+                    if operation_claim["claim_status"] != "claimed":
+                        recovered_receipts = ledger.load_operation_receipts(
+                            customer_package.manifest_sha256,
+                            customer_package.cases_sha256,
+                            run_id,
+                            case.case_id,
+                            arm,
+                            request_sha256,
+                        )
                     try:
-                        result = self.executor.execute(request)
-                        _validate_execution_result(
-                            result, request, customer_package
-                        )
-                        ledger.record_execution_receipt(
-                            customer_package.manifest_sha256,
-                            customer_package.cases_sha256,
-                            run_id,
-                            case.case_id,
-                            arm,
-                            request_sha256,
-                            receipt=_execution_receipt(result),
-                        )
-                        if arm == "candidate":
-                            self._assert_skill_unchanged(skill)
-                        ledger.begin_judgment(
-                            customer_package.manifest_sha256,
-                            customer_package.cases_sha256,
-                            run_id,
-                            case.case_id,
-                            arm,
-                            request_sha256,
-                        )
-                        judgment = judge.judge(
-                            CustomerJudgmentRequest(
-                                run_id=run_id,
-                                case_id=case.case_id,
-                                arm_label=blind_labels[arm],
-                                oracle_id=customer_package.oracle_id,
-                                oracle=case.oracle,
-                                output=result.output,
+                        if recovered_receipts is None:
+                            self._inject_fault("before_effect")
+                            result = self.executor.execute(request)
+                            self._inject_fault("after_effect_before_receipt")
+                            _validate_execution_result(
+                                result, request, customer_package
                             )
-                        )
-                        if not isinstance(judgment, CustomerJudgment):
-                            raise CustomerPackageError(
-                                "independent judge must return CustomerJudgment"
+                            ledger.record_execution_receipt(
+                                customer_package.manifest_sha256,
+                                customer_package.cases_sha256,
+                                run_id,
+                                case.case_id,
+                                arm,
+                                request_sha256,
+                                receipt=_execution_receipt(result),
                             )
-                        if not isinstance(judgment.success, bool):
-                            raise CustomerPackageError(
-                                "independent judge success must be boolean"
+                        else:
+                            result = _execution_result_from_receipt(
+                                recovered_receipts["execution_receipt"]
                             )
-                        canonical_json_bytes(judgment.evidence)
-                        _validate_judgment(
-                            judgment,
-                            request,
-                            blind_labels[arm],
-                            customer_package,
-                            result,
-                        )
-                        ledger.record_completed_operation(
-                            customer_package.manifest_sha256,
-                            customer_package.cases_sha256,
-                            run_id,
-                            case.case_id,
-                            arm,
-                            request_sha256,
-                            judgment_receipt=_judgment_receipt(judgment),
-                        )
+                            _validate_execution_result(
+                                result, request, customer_package
+                            )
+
+                        if recovered_receipts is not None and operation_state == "completed":
+                            judgment = _judgment_from_receipt(
+                                recovered_receipts["judgment_receipt"]
+                            )
+                            _validate_judgment(
+                                judgment,
+                                request,
+                                blind_labels[arm],
+                                customer_package,
+                                result,
+                            )
+                        else:
+                            if arm == "candidate":
+                                self._assert_skill_unchanged(skill)
+                            ledger.begin_judgment(
+                                customer_package.manifest_sha256,
+                                customer_package.cases_sha256,
+                                run_id,
+                                case.case_id,
+                                arm,
+                                request_sha256,
+                            )
+                            judgment = judge.judge(
+                                CustomerJudgmentRequest(
+                                    run_id=run_id,
+                                    case_id=case.case_id,
+                                    arm_label=blind_labels[arm],
+                                    oracle_id=customer_package.oracle_id,
+                                    oracle=case.oracle,
+                                    output=result.output,
+                                )
+                            )
+                            if not isinstance(judgment, CustomerJudgment):
+                                raise CustomerPackageError(
+                                    "independent judge must return CustomerJudgment"
+                                )
+                            if not isinstance(judgment.success, bool):
+                                raise CustomerPackageError(
+                                    "independent judge success must be boolean"
+                                )
+                            canonical_json_bytes(judgment.evidence)
+                            _validate_judgment(
+                                judgment,
+                                request,
+                                blind_labels[arm],
+                                customer_package,
+                                result,
+                            )
+                            ledger.record_completed_operation(
+                                customer_package.manifest_sha256,
+                                customer_package.cases_sha256,
+                                run_id,
+                                case.case_id,
+                                arm,
+                                request_sha256,
+                                judgment_receipt=_judgment_receipt(judgment),
+                            )
+                        self._inject_fault("after_receipt_before_chain")
                     except BaseException as error:
                         try:
                             ledger.mark_case_in_doubt(
@@ -370,6 +416,7 @@ class ControlledCustomerAcceptanceRunner:
                 raise CustomerPackageError(
                     "generated customer report failed independent verification"
                 )
+            self._inject_fault("before_final_report_commit")
             ledger.complete_run(
                 customer_package.manifest_sha256,
                 customer_package.cases_sha256,
@@ -379,12 +426,17 @@ class ControlledCustomerAcceptanceRunner:
             return report
         except BaseException as error:
             try:
-                ledger.mark_run_in_doubt(
+                if not ledger.is_recoverable_run(
                     customer_package.manifest_sha256,
                     customer_package.cases_sha256,
                     run_id,
-                    type(error).__name__,
-                )
+                ):
+                    ledger.mark_run_in_doubt(
+                        customer_package.manifest_sha256,
+                        customer_package.cases_sha256,
+                        run_id,
+                        type(error).__name__,
+                    )
             except CustomerPackageError:
                 pass
             raise
@@ -675,11 +727,11 @@ def _in_doubt_customer_report(
 
 
 def _execution_receipt(result: CustomerExecutionResult) -> Dict[str, Any]:
-    """Persist only a digest-bound receipt, never raw customer output."""
+    """Persist the verified result required to recover without an executor call."""
 
     return {
-        "schema_version": 1,
-        "output_sha256": sha256_json(result.output),
+        "schema_version": 2,
+        "output": result.output,
         "latency_ms": float(result.latency_ms),
         "cpu_time_ms": float(result.cpu_time_ms),
         "peak_rss_bytes": result.peak_rss_bytes,
@@ -697,15 +749,69 @@ def _execution_receipt(result: CustomerExecutionResult) -> Dict[str, Any]:
 
 
 def _judgment_receipt(judgment: CustomerJudgment) -> Dict[str, Any]:
-    """Persist only judgement identity and evidence digest."""
+    """Persist the verified judgment required to rebuild the event chain."""
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "success": judgment.success,
-        "evidence_sha256": sha256_json(judgment.evidence),
+        "evidence": judgment.evidence,
         "judge_artifact_sha256": judgment.judge_artifact_sha256,
         "attestation_signature": judgment.attestation_signature,
     }
+
+
+def _execution_result_from_receipt(receipt: Any) -> CustomerExecutionResult:
+    if not isinstance(receipt, dict) or set(receipt) != {
+        "schema_version",
+        "output",
+        "latency_ms",
+        "cpu_time_ms",
+        "peak_rss_bytes",
+        "input_tokens",
+        "output_tokens",
+        "execution_snapshot_sha256",
+        "request_sha256",
+        "requested_release_identity_sha256",
+        "observed_release_identity_sha256",
+        "executor_artifact_sha256",
+        "attestation_signature",
+    } or receipt["schema_version"] != 2:
+        raise CustomerPackageError("customer execution receipt is invalid")
+    return CustomerExecutionResult(
+        output=receipt["output"],
+        latency_ms=receipt["latency_ms"],
+        cpu_time_ms=receipt["cpu_time_ms"],
+        peak_rss_bytes=receipt["peak_rss_bytes"],
+        input_tokens=receipt["input_tokens"],
+        output_tokens=receipt["output_tokens"],
+        execution_snapshot_sha256=receipt["execution_snapshot_sha256"],
+        request_sha256=receipt["request_sha256"],
+        requested_release_identity_sha256=receipt[
+            "requested_release_identity_sha256"
+        ],
+        observed_release_identity_sha256=receipt[
+            "observed_release_identity_sha256"
+        ],
+        executor_artifact_sha256=receipt["executor_artifact_sha256"],
+        attestation_signature=receipt["attestation_signature"],
+    )
+
+
+def _judgment_from_receipt(receipt: Any) -> CustomerJudgment:
+    if not isinstance(receipt, dict) or set(receipt) != {
+        "schema_version",
+        "success",
+        "evidence",
+        "judge_artifact_sha256",
+        "attestation_signature",
+    } or receipt["schema_version"] != 2:
+        raise CustomerPackageError("customer judgment receipt is invalid")
+    return CustomerJudgment(
+        success=receipt["success"],
+        evidence=receipt["evidence"],
+        judge_artifact_sha256=receipt["judge_artifact_sha256"],
+        attestation_signature=receipt["attestation_signature"],
+    )
 
 
 def _case_event_payload(

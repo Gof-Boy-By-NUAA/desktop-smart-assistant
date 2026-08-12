@@ -131,15 +131,22 @@ def test_alternate_publication_workflows_are_fail_closed_without_protected_gate(
     assert "if: ${{ false }}" in publish
 
 
-def test_desktop_multipart_requests_share_bearer_authenticated_transport():
+def test_desktop_multipart_requests_use_main_owned_trusted_transport():
     client = (
         ROOT / "desktop/src/renderer/src/api/client.ts"
     ).read_text(encoding="utf-8")
+    main = (ROOT / "desktop/src/main/index.ts").read_text(encoding="utf-8-sig")
     assert "private async authenticatedFetch" in client
-    assert "headers.set('Authorization', `Bearer ${this.authToken}`)" in client
+    assert "api.backendRequest" in client
+    assert "serializeFormData" in client
+    assert "localStorage" not in client
+    assert "authToken" not in client
+    assert "desktopAuthToken" in main
+    assert "headers.Authorization = `Bearer ${desktopAuthToken}`" in main
     for endpoint in ("/upload", "/api/knowledge/import", "/api/voice/asr"):
         assert f"this.authenticatedFetch('{endpoint}'" in client
         assert f"fetch(`${{this.baseUrl}}{endpoint}`" not in client
+    assert "http://127.0.0.1" not in client
 
 
 def test_desktop_sse_uses_request_bound_ticket_not_bearer_query_string():
@@ -187,7 +194,12 @@ def test_cancel_ui_requires_backend_or_sse_confirmation_before_cancelled_label()
         ROOT / "channel/web/static/js/console.js"
     ).read_text(encoding="utf-8")
     assert "isCancelPending: true" in desktop_store
-    assert "result.cancelled < 1" in desktop_store
+    # A running request can only confirm receipt of the cancellation signal,
+    # not a terminal cancellation. The UI must accept either durable count but
+    # must reject a zero-count response before it labels anything cancelled.
+    assert "Number(result.cancelled || 0)" in desktop_store
+    assert "Number(result.cancellation_requested || 0)" in desktop_store
+    assert "cancellationAccepted < 1" in desktop_store
     assert "Deliberately retain requestId" in desktop_store
     request_block = web_console[
         web_console.index("function requestCancel()"):
@@ -216,6 +228,7 @@ def test_auth_check_failure_is_fail_closed_in_desktop_and_web():
 def test_desktop_logout_revokes_backend_credential_and_clears_renderer_state():
     app = (ROOT / "desktop/src/renderer/src/App.tsx").read_text(encoding="utf-8")
     client = (ROOT / "desktop/src/renderer/src/api/client.ts").read_text(encoding="utf-8")
+    main = (ROOT / "desktop/src/main/index.ts").read_text(encoding="utf-8-sig")
     sessions = (ROOT / "desktop/src/renderer/src/store/sessionStore.ts").read_text(encoding="utf-8")
     chat = (ROOT / "desktop/src/renderer/src/store/chatStore.ts").read_text(encoding="utf-8")
     nav = (ROOT / "desktop/src/renderer/src/layout/NavRail.tsx").read_text(encoding="utf-8")
@@ -223,10 +236,53 @@ def test_desktop_logout_revokes_backend_credential_and_clears_renderer_state():
     assert "useChatStore.getState().reset()" in app
     assert "useSessionStore.getState().reset()" in app
     assert "this.request<ApiResult>('/auth/logout'" in client
-    assert "this.setAuthToken(null)" in client
+    assert "clearDesktopAuthentication()" in main
+    assert "desktopAuthToken = null" in main
+    assert "localStorage" not in client
     assert "localStorage.removeItem(ACTIVE_KEY)" in sessions
     assert "set({ sessions: {} })" in chat
     assert "menu_logout" in nav
+
+
+def test_desktop_device_identity_survives_logout_and_is_explicitly_forgettable():
+    main = (ROOT / "desktop/src/main/index.ts").read_text(encoding="utf-8-sig")
+    preload = (ROOT / "desktop/src/main/preload.ts").read_text(encoding="utf-8-sig")
+    app = (ROOT / "desktop/src/renderer/src/App.tsx").read_text(encoding="utf-8")
+    nav = (ROOT / "desktop/src/renderer/src/layout/NavRail.tsx").read_text(encoding="utf-8")
+    types = (ROOT / "desktop/src/renderer/src/types.ts").read_text(encoding="utf-8")
+
+    assert "function clearDesktopAuthentication() {\n  clearDesktopBearer()\n}" in main
+    assert "ipcMain.handle('desktop-forget-device-identity'" in main
+    assert "forgetDesktopDeviceIdentity" in preload
+    assert "forgetDesktopDeviceIdentity" in types
+    assert "onForgetDeviceIdentity" in app
+    assert "window.confirm(t('auth_forget_device_identity_confirm'))" in app
+    assert "menu_forget_device_identity" in nav
+
+
+def test_desktop_loopback_transport_fails_closed_without_port_or_renderer_credential():
+    manager = (ROOT / "desktop/src/main/python-manager.ts").read_text(encoding="utf-8-sig")
+    main = (ROOT / "desktop/src/main/index.ts").read_text(encoding="utf-8-sig")
+    preload = (ROOT / "desktop/src/main/preload.ts").read_text(encoding="utf-8-sig")
+    hook = (ROOT / "desktop/src/renderer/src/hooks/useBackend.ts").read_text(encoding="utf-8-sig")
+    server = (ROOT / "channel/web/web_channel.py").read_text(encoding="utf-8-sig")
+
+    assert "COW_WEB_PORT: '0'" in manager
+    assert "COW_DESKTOP_CONTROL_FD" in manager
+    assert "checkServerIdentity" in manager
+    assert "X-Cow-Desktop-Mac" in manager
+    assert "DESKTOP_BACKEND_PORT" not in manager
+    assert "get-backend-port" not in main
+    assert "getBackendPort" not in preload
+    assert "fetch(`http://127.0.0.1" not in hook
+    assert "backendRequest" in preload
+    assert "isTrustedRenderer(event.sender)" in main
+    assert "will-navigate" in main
+    assert "contextIsolation: true" in main
+    assert "sandbox: true" in main
+    assert "DesktopRequestAuthMiddleware" in server
+    assert "create_ephemeral_tls_material" in server
+    assert "server.prepare()" in server
 
 
 def test_authenticated_web_agent_never_runs_after_persistence_precondition_failure():

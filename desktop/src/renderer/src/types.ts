@@ -1,11 +1,19 @@
-﻿// ============================================================
+// ============================================================
 // Electron bridge
 // ============================================================
 
 export interface ElectronAPI {
-  getBackendPort: () => Promise<number | null>
   getBackendStatus: () => Promise<string>
   restartBackend: () => Promise<boolean>
+  forgetDesktopDeviceIdentity?: () => Promise<boolean>
+  /**
+   * Invoke a request over Electron main's pinned desktop-backend channel.
+   * The renderer must never learn the loopback endpoint or an auth bearer.
+   */
+  backendRequest: (request: DesktopBackendRequest) => Promise<DesktopBackendResponse>
+  openBackendStream: (request: DesktopBackendStreamOpen) => Promise<void>
+  closeBackendStream: (streamId: string) => Promise<void>
+  onBackendStream: (callback: (event: DesktopBackendStreamEvent) => void) => () => void
   selectDirectory: () => Promise<string | null>
   selectFile: (filters?: { name: string; extensions: string[] }[]) => Promise<string | null>
   /** Open a local file with the OS default app. Resolves to '' on success. */
@@ -56,8 +64,39 @@ export type UpdateStatus =
   | { state: 'error'; message: string }
 
 export interface BackendStatusEvent {
-  status: 'ready' | 'error' | 'starting'
-  port?: number
+  status: 'ready' | 'error' | 'starting' | 'stopped'
+  /** Monotonically changes when the trusted backend is replaced or stops. */
+  generation?: number
+  error?: string
+}
+
+/** Serialized across the context-isolated renderer/main IPC boundary. */
+export interface DesktopBackendRequest {
+  path: string
+  method?: string
+  headers?: Record<string, string>
+  /** UTF-8 text or a serialized multipart/binary body. */
+  body?: string | Uint8Array
+}
+
+export interface DesktopBackendResponse {
+  status: number
+  statusText?: string
+  headers: Record<string, string>
+  /** Base64 response bytes; never a backend URL or credential. */
+  bodyBase64: string
+}
+
+export interface DesktopBackendStreamOpen {
+  streamId: string
+  path: string
+}
+
+export interface DesktopBackendStreamEvent {
+  streamId: string
+  kind: 'message' | 'error' | 'closed'
+  data?: string
+  lastEventId?: string
   error?: string
 }
 
@@ -104,6 +143,10 @@ export interface ChatMessage {
   kind?: 'evolution' | 'divider'
   extras?: Record<string, unknown>
   isStreaming?: boolean
+  /** The durable backend accepted this turn but has not claimed it for execution. */
+  isQueued?: boolean
+  /** One-based durable queue position when the server was able to provide it. */
+  queuePosition?: number
   isCancelled?: boolean
   isCancelPending?: boolean
   isCancelUnconfirmed?: boolean

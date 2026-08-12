@@ -199,13 +199,18 @@
                         <span data-i18n="nav_monitor">监控</span>
                     </button>
                     <div class="menu-group-items pl-2">
-                        <a class="sidebar-item flex items-center gap-3 px-3 py-2 rounded-lg cursor-pointer transition-all duration-150 hover:bg-white/5 hover:text-neutral-200 text-[14px]"
-                           data-view="logs">
-                            <i class="fas fa-terminal item-icon text-xs w-5 text-center"></i>
-                            <span data-i18n="menu_logs">日志</span>
-                        </a>
-                    </div>
-                </div>
+                         <a class="sidebar-item flex items-center gap-3 px-3 py-2 rounded-lg cursor-pointer transition-all duration-150 hover:bg-white/5 hover:text-neutral-200 text-[14px]"
+                            data-view="logs">
+                             <i class="fas fa-terminal item-icon text-xs w-5 text-center"></i>
+                             <span data-i18n="menu_logs">日志</span>
+                         </a>
+                         <a class="sidebar-item flex items-center gap-3 px-3 py-2 rounded-lg cursor-pointer transition-all duration-150 hover:bg-white/5 hover:text-neutral-200 text-[14px]"
+                            data-view="delivery">
+                             <i class="fas fa-clipboard-check item-icon text-xs w-5 text-center"></i>
+                             <span data-i18n="menu_delivery">交付验收</span>
+                         </a>
+                     </div>
+                 </div>
             </nav>
 
             <!-- Sidebar Footer -->
@@ -1212,6 +1217,30 @@
                     </div>
                 </div>
 
+                <!-- ====================================================== -->
+                <!-- VIEW: Delivery evidence (strictly read-only)           -->
+                <!-- ====================================================== -->
+                <div id="view-delivery" class="view">
+                    <div class="flex-1 overflow-y-auto p-6">
+                        <div class="max-w-5xl mx-auto">
+                            <div class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-6">
+                                <div>
+                                    <h2 class="text-xl font-bold text-slate-800 dark:text-slate-100" data-i18n="delivery_title">交付与验收证据</h2>
+                                    <p class="text-sm text-slate-500 dark:text-slate-400 mt-1" data-i18n="delivery_desc">只读查看发布门禁、正式报告和当前不可声明项。</p>
+                                </div>
+                                <button id="delivery-refresh-btn" type="button"
+                                        class="inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg border border-slate-200 dark:border-white/10 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-white/5 text-sm font-medium cursor-pointer transition-colors disabled:opacity-60 disabled:cursor-wait">
+                                    <i class="fas fa-rotate-right text-xs"></i>
+                                    <span data-i18n="delivery_refresh">刷新</span>
+                                </button>
+                            </div>
+                            <!-- Rendered with textContent only in console.js.  This endpoint can
+                                 report invalid local evidence, so never interpolate its fields as HTML. -->
+                            <div id="delivery-content" aria-live="polite" aria-busy="false"></div>
+                        </div>
+                    </div>
+                </div>
+
             </div><!-- /content-area -->
         </div><!-- /main-content -->
     </div><!-- /app -->
@@ -1603,6 +1632,7 @@
         </div>
     </div>
 
+    <script defer src="assets/js/release-evidence.js"></script>
     <script defer src="assets/js/console.js"></script>
     <script defer src="assets/js/workspace.js"></script>
 </body>

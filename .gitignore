@@ -95,3 +95,5 @@ desktop/resources/.icon-work/
 desktop/resources/bin/
 
 .wrangler/
+
+/web_sse_journal.sqlite3

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { t } from '../i18n'
-import apiClient from '../api/client'
+import apiClient, { type BackendEventSource } from '../api/client'
 
 interface LogsPageProps {
   baseUrl: string
@@ -14,7 +14,7 @@ const LogsPage: React.FC<LogsPageProps> = ({ baseUrl }) => {
   useEffect(() => {
     apiClient.setBaseUrl(baseUrl)
     let closed = false
-    let es: EventSource | null = null
+    let es: BackendEventSource | null = null
 
     void apiClient.createLogStream().then((stream) => {
       if (closed) {

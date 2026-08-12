@@ -32,6 +32,9 @@ legacy-cgi; python_version >= "3.13"
 multipart>=0.2.4
 more-itertools>=2.6
 cheroot>=6.0.0
+# COW_DESKTOP uses a per-launch self-signed certificate pinned by Electron
+# main; this is a runtime security dependency, not an optional feature.
+cryptography>=41.0
 
 # ---- AI model SDKs ----
 zai-sdk

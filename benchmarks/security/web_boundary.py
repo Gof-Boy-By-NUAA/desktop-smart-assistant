@@ -1051,6 +1051,14 @@ def run_checks(root: Path | None = None) -> List[Dict[str, Any]]:
             else:
                 raise AssertionError("mutated idempotency retry was accepted")
 
+            lease_token = claim["lease_token"]
+            fence_token = claim["session_fence_token"]
+            durable_writer = {
+                "lease_token": lease_token,
+                "runner_id": ledger_runner,
+                "fence_token": fence_token,
+            }
+
             try:
                 ledger.finish_execution(
                     claim["request_id"],
@@ -1059,17 +1067,45 @@ def run_checks(root: Path | None = None) -> List[Dict[str, Any]]:
                     "forged-lease",
                     ledger_runner,
                     outcome="completed",
+                    fence_token=fence_token,
                 )
             except RuntimeError:
                 pass
             else:
                 raise AssertionError("forged execution lease settled a request")
 
+            # An authenticated producer without the exact durable fence must be
+            # rejected before its payload is evaluated. A forged fence must be
+            # indistinguishable from a stale worker and also be rejected.
             try:
                 ledger.append(
                     claim["request_id"],
                     1,
                     {"type": "done", "content": "false success"},
+                )
+            except PermissionError:
+                pass
+            else:
+                raise AssertionError("unfenced authenticated writer emitted done")
+            try:
+                ledger.append(
+                    claim["request_id"],
+                    1,
+                    {"type": "phase", "content": "forged writer"},
+                    lease_token=lease_token,
+                    runner_id=ledger_runner,
+                    fence_token="forged-fence",
+                )
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("forged execution fence appended an event")
+            try:
+                ledger.append(
+                    claim["request_id"],
+                    1,
+                    {"type": "done", "content": "false success"},
+                    **durable_writer,
                 )
             except RuntimeError:
                 pass
@@ -1080,6 +1116,7 @@ def run_checks(root: Path | None = None) -> List[Dict[str, Any]]:
                 claim["request_id"],
                 1,
                 {"type": "phase", "content": "still running"},
+                **durable_writer,
             )
             if (
                 ledger.mark_interrupted_execution(
@@ -1093,19 +1130,45 @@ def run_checks(root: Path | None = None) -> List[Dict[str, Any]]:
                 != "running"
             ):
                 raise AssertionError("foreign fence changed request state")
-            fenced = ledger.mark_interrupted_execution(claim["request_id"], ledger_owner)
+
+            # Durable recovery must never let a second owner-side observer kill
+            # a live peer. It may transition only after that peer's lease has
+            # actually expired.
+            live = ledger.mark_interrupted_execution(claim["request_id"], ledger_owner)
+            if live is None or live["execution_state"] != "running":
+                raise AssertionError("owner recovery killed a live peer worker")
+            fenced = ledger.mark_interrupted_execution(
+                claim["request_id"],
+                ledger_owner,
+                now=float(claim["lease_expires_at"]) + 1.0,
+            )
             if fenced is None or fenced["execution_state"] != "in_doubt":
-                raise AssertionError("interrupted worker was not fail-closed")
+                raise AssertionError("expired worker was not fail-closed")
             try:
                 ledger.append(
                     claim["request_id"],
                     2,
                     {"type": "done", "content": "false success after interruption"},
+                    **durable_writer,
                 )
             except RuntimeError:
                 pass
             else:
                 raise AssertionError("in-doubt request emitted done")
+            try:
+                ledger.finish_execution(
+                    claim["request_id"],
+                    ledger_owner,
+                    ledger_session,
+                    lease_token,
+                    ledger_runner,
+                    outcome="completed",
+                    fence_token=fence_token,
+                )
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("expired fence settled an in-doubt request")
             if ledger.reap(now=time.time() + ledger._RETENTION_SECONDS + 1) != 0:
                 raise AssertionError("in-doubt execution evidence was reaped")
 

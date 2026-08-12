@@ -152,10 +152,16 @@ def source_fingerprint(root: Path) -> str:
 
 
 def _git_state(root: Path) -> dict[str, Any]:
+    # Git rejects a checkout when a sandbox/test runner uses a different SID
+    # from the checkout owner. Trust only this resolved repository for this one
+    # subprocess invocation; never mutate global/system Git configuration.
+    safe_directory = root.resolve().as_posix()
+    git_command = ["git", "-c", f"safe.directory={safe_directory}"]
+
     def run(*args: str) -> str | None:
         try:
             result = subprocess.run(
-                ["git", *args],
+                [*git_command, *args],
                 cwd=root,
                 check=True,
                 capture_output=True,
@@ -170,7 +176,7 @@ def _git_state(root: Path) -> dict[str, Any]:
 
         try:
             result = subprocess.run(
-                ["git", *args],
+                [*git_command, *args],
                 cwd=root,
                 check=True,
                 capture_output=True,
@@ -233,8 +239,17 @@ def _is_git_tracked_path(root: Path, path: Path) -> bool:
     except ValueError:
         return False
     try:
+        safe_directory = root.resolve().as_posix()
         result = subprocess.run(
-            ["git", "ls-files", "--error-unmatch", "--", relative.as_posix()],
+            [
+                "git",
+                "-c",
+                f"safe.directory={safe_directory}",
+                "ls-files",
+                "--error-unmatch",
+                "--",
+                relative.as_posix(),
+            ],
             cwd=root,
             check=False,
             capture_output=True,

@@ -53,3 +53,46 @@ def test_readiness_reports_dependency_failure_with_503(monkeypatch, tmp_path):
     assert response["status"] == "not_ready"
     assert response["checks"]["conversation_store"] is False
     assert web_channel.web.ctx.status == "503 Service Unavailable"
+
+
+
+def test_environment_secret_overrides_never_reach_startup_logs(monkeypatch, tmp_path):
+    """No config startup logger may disclose an env-provided credential."""
+    import config as config_module
+
+    api_sentinel = "API_SENTINEL_7f5e0d9c"
+    password_sentinel = "PASSWORD_SENTINEL_7f5e0d9c"
+    token_sentinel = "TOKEN_SENTINEL_7f5e0d9c"
+    (tmp_path / "config.json").write_text(
+        json.dumps({"cow_lang": "en", "agent": False, "debug": False}),
+        encoding="utf-8",
+    )
+    records: list[str] = []
+    original_config = config_module.config
+
+    def capture(message, *args, **_kwargs):
+        records.append(message % args if args else str(message))
+
+    monkeypatch.setattr(config_module, "get_data_root", lambda: str(tmp_path))
+    monkeypatch.setattr(config_module, "get_resource_root", lambda: str(tmp_path))
+    monkeypatch.setattr(config_module.os, "environ", {
+        "OPEN_AI_API_KEY": api_sentinel,
+        "WEB_PASSWORD": password_sentinel,
+        "WEIXIN_TOKEN": token_sentinel,
+    })
+    monkeypatch.setattr(config_module.logger, "info", capture)
+    monkeypatch.setattr(config_module.logger, "debug", capture)
+    monkeypatch.setattr(config_module.Config, "load_user_datas", lambda _self: None)
+    monkeypatch.setattr(config_module, "config", original_config)
+
+    try:
+        config_module.load_config()
+        joined = "\n".join(records)
+        assert api_sentinel not in joined
+        assert password_sentinel not in joined
+        assert token_sentinel not in joined
+        assert "open_ai_api_key=<redacted>" in joined
+        assert "web_password=<redacted>" in joined
+        assert "weixin_token=<redacted>" in joined
+    finally:
+        config_module.config = original_config

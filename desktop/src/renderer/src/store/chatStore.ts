@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import apiClient from '../api/client'
+import apiClient, { type BackendEventSource } from '../api/client'
 import { useWorkspaceStore } from './workspaceStore'
 import {
   isUserFacingPath,
@@ -12,7 +12,7 @@ import type { Artifact, ChatMessage, MessageStep, Attachment, StreamEvent, Histo
 /**
  * Per-session chat state. Supports parallel sessions: each session keeps its
  * own message list and active stream, so switching sessions never interrupts a
- * background run. The active EventSource lives in `streams` (outside React).
+ * background run. The active trusted stream facade lives in `streams` (outside React).
  */
 
 interface SessionRuntime {
@@ -45,8 +45,8 @@ interface ChatState {
   reset: () => void
 }
 
-// EventSource instances kept outside the store (not serializable).
-const streams: Record<string, EventSource> = {}
+// Trusted stream facades are kept outside the store (not serializable).
+const streams: Record<string, BackendEventSource> = {}
 
 /** Keep recovery handles outside Zustand alongside their non-serializable EventSources. */
 interface StreamController {
@@ -255,7 +255,13 @@ export const useChatStore = create<ChatState>((set, get) => {
       if (get().sessions[sid]?.requestId === requestId) {
         patchSession(sid, { isStreaming: false, requestId: null })
       }
-      updateMsg(sid, botId, (m) => ({ ...m, isStreaming: false, isStreamInterrupted: false }))
+      updateMsg(sid, botId, (m) => ({
+        ...m,
+        isStreaming: false,
+        isStreamInterrupted: false,
+        isQueued: false,
+        queuePosition: undefined,
+      }))
     }
 
     const finishStream = () => {
@@ -276,6 +282,13 @@ export const useChatStore = create<ChatState>((set, get) => {
       } catch {
         return // keepalive
       }
+
+      // `queued` is returned only by POST. Any durable SSE payload is emitted
+      // after the backend has claimed or safely settled the turn, so it is the
+      // first observable proof that this bubble is no longer merely queued.
+      updateMsg(sid, botId, (m) =>
+        m.isQueued ? { ...m, isQueued: false, queuePosition: undefined } : m
+      )
 
       switch (data.type) {
         case 'reasoning':
@@ -476,7 +489,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         }, delayMs)
       })
 
-    const reconnect = async (failed?: EventSource) => {
+    const reconnect = async (failed?: BackendEventSource) => {
       if (terminal || mainReplyDone || reconnecting || get().sessions[sid]?.requestId !== requestId) return
       reconnecting = true
       if (failed) {
@@ -513,7 +526,7 @@ export const useChatStore = create<ChatState>((set, get) => {
       }
     }
 
-    const bindStream = (next: EventSource) => {
+    const bindStream = (next: BackendEventSource) => {
       es = next
       streams[sid] = next
       next.onmessage = onMessage
@@ -588,6 +601,18 @@ export const useChatStore = create<ChatState>((set, get) => {
           idempotencyKey,
         })
         if (res.status === 'success' && res.stream && res.request_id) {
+          const isQueued = res.execution_state === 'queued' || res.queued === true
+          const queuePosition =
+            typeof res.queue_position === 'number' &&
+            Number.isSafeInteger(res.queue_position) &&
+            res.queue_position > 0
+              ? res.queue_position
+              : undefined
+          updateMsg(sid, botId, (m) => ({
+            ...m,
+            isQueued,
+            queuePosition: isQueued ? queuePosition : undefined,
+          }))
           patchSession(sid, { requestId: res.request_id })
           await attachStream(sid, res.request_id, botId)
         } else if (res.inline_reply) {
@@ -625,8 +650,9 @@ export const useChatStore = create<ChatState>((set, get) => {
       })
       try {
         const result = await apiClient.cancel({ requestId, sessionId: sid })
-        if (result.status !== 'success' || result.cancelled < 1) {
-          throw new Error('backend did not confirm cancellation')
+        const cancellationAccepted = Number(result.cancelled || 0) + Number(result.cancellation_requested || 0)
+        if (result.status !== 'success' || cancellationAccepted < 1) {
+          throw new Error(result.message || 'backend did not confirm cancellation')
         }
         // REST acceptance only proves the signal was delivered. The task can
         // still emit tool/output events, so retain the SSE and request id until
