@@ -161,6 +161,8 @@ def test_desktop_sse_uses_request_bound_ticket_not_bearer_query_string():
     assert "after_event_id" in server[server.index("class StreamTicketHandler"):server.index("class ChatHandler")]
     assert "SSE_RECONNECT_ATTEMPTS = 3" in desktop_store
     assert "createSSEStream(requestId, lastEventId)" in desktop_store
+    assert "lastEventId: event.lastEventId" in client
+    assert "receivedEventId <= lastEventId" in desktop_store
     assert "void reconnect(next)" in desktop_store
     assert "isStreamInterrupted: true" in desktop_store
 

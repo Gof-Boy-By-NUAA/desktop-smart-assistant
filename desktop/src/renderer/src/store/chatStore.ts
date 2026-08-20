@@ -231,7 +231,7 @@ export const useChatStore = create<ChatState>((set, get) => {
   /** Attach an EventSource for a request and wire all SSE events to a bot message. */
   const attachStream = async (sid: string, requestId: string, botId: string) => {
     streamControllers[sid]?.dispose()
-    let es: EventSource | null = null
+    let es: BackendEventSource | null = null
     let tailTimer: ReturnType<typeof setTimeout> | null = null
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null
     let reconnecting = false
@@ -272,9 +272,14 @@ export const useChatStore = create<ChatState>((set, get) => {
     }
 
     const onMessage = (event: MessageEvent<string>) => {
-      const receivedEventId = Number(event.lastEventId)
-      if (Number.isSafeInteger(receivedEventId) && receivedEventId >= lastEventId) {
-        lastEventId = receivedEventId
+      if (event.lastEventId) {
+        const receivedEventId = Number(event.lastEventId)
+        if (Number.isSafeInteger(receivedEventId)) {
+          if (receivedEventId <= lastEventId) {
+            return // duplicate or replayed frame already applied to this bubble
+          }
+          lastEventId = receivedEventId
+        }
       }
       let data: StreamEvent
       try {

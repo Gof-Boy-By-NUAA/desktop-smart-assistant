@@ -2,6 +2,7 @@
   "dataset": {
     "actual_sha256": "ed5587e918854a32e8ee143550f2ef88e841bf311a3efbc3eb43c756edf889d8",
     "expected_sha256": "ed5587e918854a32e8ee143550f2ef88e841bf311a3efbc3eb43c756edf889d8",
+    "label_tier": "deterministic_silver",
     "path": "C:\\Users\\UnlimitedPower\\Documents\\桌面智能助手\\SmartAssistant\\benchmarks\\skills\\github_issue_skill_selection.json",
     "provenance_complete": false
   },
@@ -9,12 +10,31 @@
     "message": "source.provenance_complete 缺失，抓取来源证明不完整",
     "type": "SkillSelectionDatasetError"
   },
-  "generated_at": "2026-08-01T16:27:39.821015+00:00",
+  "generated_at": "2026-08-17T11:53:14.174982+00:00",
+  "implementation_files": [
+    "agent/skills/governance/contracts.py",
+    "agent/skills/governance/repository.py",
+    "agent/skills/governance/service.py",
+    "agent/skills/locks.py",
+    "agent/skills/manager.py",
+    "agent/skills/formatter.py",
+    "agent/skills/retrieval/contracts.py",
+    "agent/skills/retrieval/runtime.py",
+    "agent/retrieval/lexical.py",
+    "benchmarks/skills/dataset.py",
+    "benchmarks/skills/metrics.py",
+    "benchmarks/skills/runner.py"
+  ],
+  "implementation_sha256": "cd2f233cb4223b095bd9e7df643c778e950aecce72b15d3be4a38c6d07e8241f",
   "limitations": {
+    "body_or_comments_included": false,
     "customer_success_rate_measured": false,
+    "customer_tasks_included": false,
+    "gold_dataset_valid": false,
     "governed_subset_only": true,
     "label_rule_leakage": true,
-    "production_gate_eligible": false
+    "production_gate_eligible": false,
+    "public_github_issue_titles_are_silver_labels": true
   },
   "metrics": null,
   "passed": false,

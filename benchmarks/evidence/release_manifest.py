@@ -69,6 +69,7 @@ EXCLUDED_FILENAMES = {
     "nohup.out",
     "plugins.json",
     "user_datas.pkl",
+    "web_sse_journal.sqlite3",
 }
 
 

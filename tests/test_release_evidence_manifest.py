@@ -36,6 +36,7 @@ def test_release_source_fingerprint_covers_full_delivery_control_plane():
     } <= source_paths
     assert "benchmarks/results/release-evidence-manifest.json" not in source_paths
     assert ".preview_secret" not in source_paths
+    assert "web_sse_journal.sqlite3" not in source_paths
     assert not any(path.startswith("tmp/") for path in source_paths)
 
 
@@ -59,6 +60,29 @@ def test_git_binding_uses_unquoted_non_ascii_paths(tmp_path: Path):
     state = _git_state(repository)
     assert state["all_source_paths_tracked"] is True
     assert state["source_file_count"] == state["tracked_source_count"] == 1
+    assert state["commit_bound"] is True
+
+
+def test_git_binding_excludes_known_runtime_sse_database(tmp_path: Path):
+    repository = tmp_path / "runtime-state-repository"
+    repository.mkdir()
+    (repository / ".gitignore").write_text(
+        "web_sse_journal.sqlite3\n", encoding="utf-8"
+    )
+    (repository / "source.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (repository / "web_sse_journal.sqlite3").write_bytes(b"runtime state")
+    for command in (
+        ["git", "init"],
+        ["git", "config", "user.email", "release-test@example.invalid"],
+        ["git", "config", "user.name", "Release Test"],
+        ["git", "add", "--", ".gitignore", "source.py"],
+        ["git", "commit", "-m", "runtime state fixture"],
+    ):
+        subprocess.run(command, cwd=repository, check=True, capture_output=True)
+
+    state = _git_state(repository)
+    assert state["source_file_count"] == state["tracked_source_count"] == 2
+    assert state["all_source_paths_tracked"] is True
     assert state["commit_bound"] is True
 
 def test_release_manifest_is_an_ignored_generated_artifact_not_tracked_source(
@@ -112,12 +136,13 @@ def test_release_manifest_is_explicitly_fail_closed_on_missing_external_gates():
     assert manifest["required_conditions"]["external_verifier_attestation"] is False
     assert manifest["required_conditions"]["fde_case_evidence"] is False
     assert manifest["required_conditions"]["skills_formal_gate"] is False
-    assert manifest["required_conditions"]["skills_local_report_contract"] is False
+    assert manifest["required_conditions"]["skills_local_report_contract"] is True
     assert manifest["required_conditions"]["skills_pinned_dataset"] is True
-    assert manifest["reports"]["skills_selection"]["contract_valid"] is False
+    assert manifest["hard_denials"]["SKILLS_LOCAL_REPORT_CONTRACT"] == "YES"
+    assert manifest["reports"]["skills_selection"]["contract_valid"] is True
     assert (
         manifest["reports"]["skills_selection"]["status"]
-        == "INVALID_REPORT_CONTRACT"
+        == "blocked_invalid_dataset"
     )
 
 
@@ -217,7 +242,9 @@ def test_release_manifest_verifier_rejects_every_hard_denial_mutation():
 def test_release_manifest_verifier_rejects_forged_skills_contract_or_dataset_pin():
     manifest = generate_manifest(ROOT)
     contract_flip = copy.deepcopy(manifest)
-    contract_flip["reports"]["skills_selection"]["contract_valid"] = True
+    contract_flip["reports"]["skills_selection"]["contract_valid"] = not bool(
+        manifest["reports"]["skills_selection"]["contract_valid"]
+    )
     pin_flip = copy.deepcopy(manifest)
     pin_flip["datasets"]["skills_selection"]["expected_sha256"] = "0" * 64
 

@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react'
+import { RefreshCw } from 'lucide-react'
 import { t } from '../i18n'
 import apiClient, { type BackendEventSource } from '../api/client'
 
@@ -6,13 +7,19 @@ interface LogsPageProps {
   baseUrl: string
 }
 
+type LogConnectionState = 'connecting' | 'live' | 'disconnected'
+
 const LogsPage: React.FC<LogsPageProps> = ({ baseUrl }) => {
   const [logs, setLogs] = useState<string[]>([])
   const [autoScroll, setAutoScroll] = useState(true)
+  const [connectionState, setConnectionState] = useState<LogConnectionState>('connecting')
+  const [connectionAttempt, setConnectionAttempt] = useState(0)
+  const [lastEventAt, setLastEventAt] = useState<Date | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     apiClient.setBaseUrl(baseUrl)
+    setConnectionState('connecting')
     let closed = false
     let es: BackendEventSource | null = null
 
@@ -23,6 +30,8 @@ const LogsPage: React.FC<LogsPageProps> = ({ baseUrl }) => {
       }
       es = stream
       es.onmessage = (event) => {
+        setConnectionState('live')
+        setLastEventAt(new Date())
         try {
           const data = JSON.parse(event.data)
           if (data.type === 'init' && data.content) {
@@ -36,16 +45,21 @@ const LogsPage: React.FC<LogsPageProps> = ({ baseUrl }) => {
           }
         } catch { /* ignore */ }
       }
+      es.onerror = () => {
+        if (closed) return
+        setConnectionState('disconnected')
+        es?.close()
+        es = null
+      }
     }).catch(() => {
-      // Keep the existing connecting state instead of silently falling back to
-      // a bearer query URL. A page revisit obtains a fresh ticket.
+      if (!closed) setConnectionState('disconnected')
     })
 
     return () => {
       closed = true
       es?.close()
     }
-  }, [baseUrl])
+  }, [baseUrl, connectionAttempt])
 
   useEffect(() => {
     if (autoScroll && containerRef.current) {
@@ -88,8 +102,30 @@ const LogsPage: React.FC<LogsPageProps> = ({ baseUrl }) => {
             <span className="text-xs text-slate-400 ml-2 font-mono">run.log</span>
             <div className="flex-1" />
             <div className="flex items-center gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-              <span className="text-xs text-slate-500">{t('logs_live')}</span>
+              <span className={`w-2 h-2 rounded-full ${
+                connectionState === 'live'
+                  ? 'bg-emerald-500 animate-pulse'
+                  : connectionState === 'disconnected'
+                    ? 'bg-red-500'
+                    : 'bg-amber-500 animate-pulse'
+              }`} />
+              <span className="text-xs text-slate-400">
+                {connectionState === 'live'
+                  ? t('logs_live')
+                  : connectionState === 'disconnected'
+                    ? t('logs_disconnected')
+                    : t('logs_connecting_short')}
+              </span>
+              {connectionState === 'disconnected' && (
+                <button
+                  type="button"
+                  onClick={() => setConnectionAttempt((value) => value + 1)}
+                  className="ml-1 inline-flex items-center gap-1 rounded border border-slate-600 px-1.5 py-0.5 text-xs text-slate-300 hover:bg-slate-700"
+                >
+                  <RefreshCw size={11} />
+                  {t('logs_retry')}
+                </button>
+              )}
             </div>
           </div>
 
@@ -105,7 +141,14 @@ const LogsPage: React.FC<LogsPageProps> = ({ baseUrl }) => {
                 <div key={i} className={getLogColor(line)}>{line}</div>
               ))
             ) : (
-              <p className="text-slate-500">{t('logs_connecting')}</p>
+              <p className={connectionState === 'disconnected' ? 'text-red-400' : 'text-slate-500'}>
+                {connectionState === 'disconnected' ? t('logs_unavailable') : t('logs_connecting')}
+              </p>
+            )}
+            {lastEventAt && (
+              <p className="mt-3 text-[11px] text-slate-600">
+                {t('logs_last_event')}: {lastEventAt.toLocaleTimeString()}
+              </p>
             )}
           </div>
         </div>

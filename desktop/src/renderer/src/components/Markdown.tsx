@@ -85,7 +85,7 @@ md.core.ruler.after('fix_greedy_linkify', 'link_governed_citations', (state) => 
           ['data-governed-citation', 'v3'],
         ]
         const label = new state.Token('text', '', 0)
-        label.content = '📎 Verified source'
+        label.content = '📎 Source'
         const close = new state.Token('link_close', 'a', -1)
         output.push(open, label, close)
         cursor = index + match[0].length

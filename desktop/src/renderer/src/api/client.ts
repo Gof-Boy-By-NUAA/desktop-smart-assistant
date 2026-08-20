@@ -1,4 +1,4 @@
-﻿import type {
+import type {
   ConfigData,
   ChannelInfo,
   ChannelAction,
@@ -53,7 +53,7 @@ class IpcBackendEventSource implements BackendEventSource {
   private readonly streamId = newStreamId()
   private closed = false
   private unsubscribe: (() => void) | null = null
-  private queuedMessages: string[] = []
+  private queuedMessages: Array<{ data: string; lastEventId?: string }> = []
   private queuedErrors: string[] = []
   private messageHandler: ((event: MessageEvent<string>) => void) | null = null
   private errorHandler: ((event: Event) => void) | null = null
@@ -67,7 +67,9 @@ class IpcBackendEventSource implements BackendEventSource {
     this.unsubscribe = api.onBackendStream((event) => {
       if (event.streamId !== this.streamId || this.closed) return
       if (event.kind === 'message' && typeof event.data === 'string') {
-        this.dispatchMessage(event.data)
+        // Forward the SSE cursor so the store can resume after a reconnect
+        // instead of silently restarting the stream from event 0.
+        this.dispatchMessage({ data: event.data, lastEventId: event.lastEventId })
       } else if (event.kind === 'error') {
         this.dispatchError(event.error || 'Backend stream failed')
       } else if (event.kind === 'closed') {
@@ -87,7 +89,7 @@ class IpcBackendEventSource implements BackendEventSource {
     this.messageHandler = handler
     if (!handler || !this.queuedMessages.length) return
     const queued = this.queuedMessages.splice(0)
-    for (const data of queued) handler({ data } as MessageEvent<string>)
+    for (const message of queued) handler(message as MessageEvent<string>)
   }
 
   get onerror() {
@@ -109,12 +111,12 @@ class IpcBackendEventSource implements BackendEventSource {
     void window.electronAPI?.closeBackendStream(this.streamId)
   }
 
-  private dispatchMessage(data: string) {
+  private dispatchMessage(message: { data: string; lastEventId?: string }) {
     if (this.closed) return
     if (this.messageHandler) {
-      this.messageHandler({ data } as MessageEvent<string>)
+      this.messageHandler(message as MessageEvent<string>)
     } else {
-      this.queuedMessages.push(data)
+      this.queuedMessages.push(message)
     }
   }
 
@@ -128,7 +130,7 @@ class IpcBackendEventSource implements BackendEventSource {
   }
 }
 
-function base64ToBytes(value: string): Uint8Array {
+function base64ToBytes(value: string): Uint8Array<ArrayBuffer> {
   if (typeof value !== 'string' || value.length > 64 * 1024 * 1024) {
     throw new Error('Invalid desktop backend response')
   }
@@ -716,4 +718,3 @@ class ApiClient {
 
 export const apiClient = new ApiClient()
 export default apiClient
-

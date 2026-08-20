@@ -1319,7 +1319,7 @@ function createMd() {
                         ['data-governed-citation', 'v3']
                     ];
                     var label = new state.Token('text', '', 0);
-                    label.content = '📎 Verified source';
+                    label.content = '📎 Source';
                     output.push(citationOpen, label, new state.Token('link_close', 'a', -1));
                     cursor = index + match[0].length;
                 }
@@ -1926,7 +1926,7 @@ async function resolveKnowledgeCitation(uri, anchor) {
     card.style.cssText = 'margin-top:10px;padding:10px;border:1px solid var(--border-color,#d1d5db);border-radius:10px;background:var(--bg-secondary,#f8fafc);font-size:12px;';
     var title = document.createElement('div');
     title.style.fontWeight = '600';
-    title.textContent = 'Verified source / 已核验来源';
+    title.textContent = 'Source / 来源';
     var body = document.createElement('div');
     body.style.marginTop = '6px';
     body.textContent = 'Verifying current access and integrity…';
@@ -1943,6 +1943,7 @@ async function resolveKnowledgeCitation(uri, anchor) {
         var result = await response.json();
         body.replaceChildren();
         if (result.status !== 'success' || !result.citation) {
+            title.textContent = 'Verification failed / 核验失败';
             var error = document.createElement('div');
             error.style.color = 'var(--danger-color,#dc2626)';
             error.textContent = result.message || 'Citation cannot be resolved; search again.';
@@ -1954,6 +1955,7 @@ async function resolveKnowledgeCitation(uri, anchor) {
             body.append(error, retry);
             return;
         }
+        title.textContent = 'Verified source / 已核验来源';
         var citation = result.citation;
         var source = document.createElement('div');
         source.style.wordBreak = 'break-all';
@@ -1966,6 +1968,7 @@ async function resolveKnowledgeCitation(uri, anchor) {
         quote.textContent = citation.quote;
         body.append(source, meta, quote);
     } catch (_) {
+        title.textContent = 'Verification failed / 核验失败';
         body.textContent = 'Citation verification failed; retry or search again.';
         var retry = document.createElement('button');
         retry.type = 'button';
@@ -10707,4 +10710,3 @@ document.getElementById('task-edit-modal-delete').addEventListener('click', dele
 document.getElementById('task-edit-modal-overlay').addEventListener('click', function(e) {
     if (e.target === this) closeTaskEditModal();
 });
-

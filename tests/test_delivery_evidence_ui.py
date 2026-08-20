@@ -225,3 +225,40 @@ def test_web_and_desktop_delivery_views_are_reachable_read_only_and_xss_safe():
     helper_source = HELPER.read_text(encoding="utf-8")
     for report in REPORTS:
         assert f"'{report}'" in helper_source
+
+
+def test_citation_ui_never_claims_verified_before_resolution():
+    web_console = CONSOLE.read_text(encoding="utf-8")
+    desktop_markdown = (
+        ROOT / "desktop/src/renderer/src/components/Markdown.tsx"
+    ).read_text(encoding="utf-8")
+    desktop_bubble = (
+        ROOT / "desktop/src/renderer/src/components/MessageBubble.tsx"
+    ).read_text(encoding="utf-8")
+
+    assert "label.content = '📎 Source'" in web_console
+    assert "label.content = '📎 Source'" in desktop_markdown
+    assert "label.content = '📎 Verified source'" not in web_console
+    assert "label.content = '📎 Verified source'" not in desktop_markdown
+    assert "citationView.state === 'resolved'" in desktop_bubble
+    assert "Verification failed / 核验失败" in desktop_bubble
+    assert "title.textContent = 'Source / 来源'" in web_console
+    assert "title.textContent = 'Verified source / 已核验来源'" in web_console
+    assert "title.textContent = 'Verification failed / 核验失败'" in web_console
+
+
+def test_desktop_logs_do_not_claim_live_after_stream_failure():
+    logs_page = (
+        ROOT / "desktop/src/renderer/src/pages/LogsPage.tsx"
+    ).read_text(encoding="utf-8")
+    i18n = (ROOT / "desktop/src/renderer/src/i18n.ts").read_text(
+        encoding="utf-8"
+    )
+
+    assert "type LogConnectionState = 'connecting' | 'live' | 'disconnected'" in logs_page
+    assert "es.onerror" in logs_page
+    assert "setConnectionState('disconnected')" in logs_page
+    assert "connectionState === 'live'" in logs_page
+    assert "setConnectionAttempt((value) => value + 1)" in logs_page
+    assert "logs_disconnected" in i18n
+    assert "logs_retry" in i18n

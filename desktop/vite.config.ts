@@ -1,16 +1,19 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import path from 'path'
+import { fileURLToPath } from 'url'
+
+const projectDir = path.dirname(fileURLToPath(import.meta.url))
 
 // '@product' resolves to the built-in default (empty). An alternate build
 // can set COW_PRODUCT_DIR to point at another module instead.
 const productDir =
-  process.env.COW_PRODUCT_DIR || path.resolve(__dirname, 'src/renderer/src/product/default')
+  process.env.COW_PRODUCT_DIR || path.resolve(projectDir, 'src/renderer/src/product/default')
 
 // When '@product' points outside this project, its files can't resolve shared
 // deps from their own tree. Alias the shared runtime deps to this project's
 // node_modules so an out-of-tree product module imports the same instances.
-const nodeModules = path.resolve(__dirname, 'node_modules')
+const nodeModules = path.resolve(projectDir, 'node_modules')
 const sharedDepAliases = process.env.COW_PRODUCT_DIR
   ? {
       react: path.join(nodeModules, 'react'),
@@ -23,11 +26,11 @@ const sharedDepAliases = process.env.COW_PRODUCT_DIR
 
 export default defineConfig({
   plugins: [react()],
-  root: path.resolve(__dirname, 'src/renderer'),
+  root: path.resolve(projectDir, 'src/renderer'),
   base: './',
-  publicDir: path.resolve(__dirname, '../channel/web/static'),
+  publicDir: path.resolve(projectDir, '../channel/web/static'),
   build: {
-    outDir: path.resolve(__dirname, 'dist/renderer'),
+    outDir: path.resolve(projectDir, 'dist/renderer'),
     emptyOutDir: true,
   },
   server: {
@@ -35,7 +38,7 @@ export default defineConfig({
   },
   resolve: {
     alias: {
-      '@': path.resolve(__dirname, 'src/renderer/src'),
+      '@': path.resolve(projectDir, 'src/renderer/src'),
       '@product': productDir,
       ...sharedDepAliases,
     },

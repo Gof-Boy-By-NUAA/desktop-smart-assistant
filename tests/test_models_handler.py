@@ -20,6 +20,9 @@ if "web" not in sys.modules:
     web_stub.notfound = lambda *args, **kwargs: Exception("notfound")
     web_stub.badrequest = lambda *args, **kwargs: Exception("badrequest")
     web_stub.application = lambda *args, **kwargs: types.SimpleNamespace(wsgifunc=lambda: None)
+    # Other web handler tests patch web.ctx/web.ctx.env; the stub must expose
+    # the attribute or subset runs that collect this module first break them.
+    web_stub.ctx = types.SimpleNamespace(env={})
     web_stub.httpserver = types.SimpleNamespace(
         LogMiddleware=type("LogMiddleware", (), {"log": lambda *args, **kwargs: None}),
         StaticMiddleware=lambda app: app,

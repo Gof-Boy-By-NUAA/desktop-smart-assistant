@@ -183,7 +183,13 @@ const MessageBubble: React.FC<MessageBubbleProps> = ({ message, onRegenerate, on
 
           {citationView.state !== 'idle' && (
             <section className="mt-3 rounded-xl border border-default bg-surface-2 p-3 text-xs" aria-live="polite">
-              <div className="font-medium text-content">Verified source / 已核验来源</div>
+              <div className="font-medium text-content">
+                {citationView.state === 'resolved'
+                  ? 'Verified source / 已核验来源'
+                  : citationView.state === 'error'
+                    ? 'Verification failed / 核验失败'
+                    : 'Source / 来源'}
+              </div>
               {citationView.state === 'loading' && (
                 <div className="mt-1 text-content-tertiary">Verifying current access and integrity…</div>
               )}
@@ -311,4 +317,3 @@ const MessageBubble: React.FC<MessageBubbleProps> = ({ message, onRegenerate, on
 }
 
 export default MessageBubble
-
