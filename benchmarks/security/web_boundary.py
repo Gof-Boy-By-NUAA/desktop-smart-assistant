@@ -1395,9 +1395,8 @@ def main(arguments: list[str] | None = None) -> int:
     report = generate_report()
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(
-        json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
+    output.write_bytes(
+        (json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
     )
     return 0 if report["passed"] else 1
 

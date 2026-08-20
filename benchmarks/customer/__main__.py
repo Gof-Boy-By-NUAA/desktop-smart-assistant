@@ -141,7 +141,7 @@ def _render_report(report, output: Optional[Path]) -> None:
     print(rendered)
     if output is not None:
         output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(rendered + "\n", encoding="utf-8")
+        output.write_bytes((rendered + "\n").encode("utf-8"))
 
 
 if __name__ == "__main__":

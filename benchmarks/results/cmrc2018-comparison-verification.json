@@ -7,8 +7,8 @@
       "passed": true
     },
     {
-      "actual": "9ca3e066755cae87cf339702bbe938d78b3d07a0416fe0e928f6855293f35d6d",
-      "expected": "9ca3e066755cae87cf339702bbe938d78b3d07a0416fe0e928f6855293f35d6d",
+      "actual": "947b7f17505fb77990562af699e1d3bbb91c9108f16cf599720ee35e748ed75a",
+      "expected": "947b7f17505fb77990562af699e1d3bbb91c9108f16cf599720ee35e748ed75a",
       "name": "comparison_implementation_sha256",
       "passed": true
     },
@@ -115,11 +115,11 @@
       "passed": true
     }
   ],
-  "comparison_implementation_sha256": "9ca3e066755cae87cf339702bbe938d78b3d07a0416fe0e928f6855293f35d6d",
+  "comparison_implementation_sha256": "947b7f17505fb77990562af699e1d3bbb91c9108f16cf599720ee35e748ed75a",
   "dataset_path": "benchmarks\\.cache\\cmrc2018-source\\data\\cmrc2018_dev.json",
   "dataset_sha256": "5cfe4414c28a8ecbb51670f78c0dc7d1049f286c2d5769b52f1f94bcc0752cf1",
   "passed": true,
   "report_path": "benchmarks\\results\\cmrc2018-comparison.json",
-  "report_sha256": "c6c4280b55905898c626faa1bf5ff4b9b9b2fe1e234496cb190ffaeb6a00a79f",
+  "report_sha256": "b02e6270a8110bfa0a80b70ec93dd34ac9a8fec60bfe80016b688f1beac12297",
   "schema_version": 1
 }

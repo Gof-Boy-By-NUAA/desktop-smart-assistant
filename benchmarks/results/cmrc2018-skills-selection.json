@@ -10,7 +10,7 @@
     "message": "source.provenance_complete 缺失，抓取来源证明不完整",
     "type": "SkillSelectionDatasetError"
   },
-  "generated_at": "2026-08-20T08:12:59.030877+00:00",
+  "generated_at": "2026-08-20T09:21:59.222015+00:00",
   "implementation_files": [
     "agent/skills/governance/contracts.py",
     "agent/skills/governance/repository.py",
@@ -25,7 +25,7 @@
     "benchmarks/skills/metrics.py",
     "benchmarks/skills/runner.py"
   ],
-  "implementation_sha256": "d82e7bfe53f570cc0caf656bfd9e93f5f84e9ddebce9bd368b2caafa977479ad",
+  "implementation_sha256": "4fd6a5985c6b12edf177a2a928238e5da2183017f5e7a441ddf039c17d02025a",
   "limitations": {
     "body_or_comments_included": false,
     "customer_success_rate_measured": false,

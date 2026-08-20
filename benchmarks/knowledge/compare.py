@@ -1,4 +1,4 @@
-﻿"""在同一份真实 CMRC 2018 数据上执行知识模块对比门禁。"""
+"""在同一份真实 CMRC 2018 数据上执行知识模块对比门禁。"""
 
 from __future__ import annotations
 
@@ -1927,7 +1927,7 @@ def main() -> int:
     print(rendered)
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(rendered + "\n", encoding="utf-8")
+        args.output.write_bytes((rendered + "\n").encode("utf-8"))
     return 0 if report["passed"] else 1
 
 
