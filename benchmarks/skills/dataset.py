@@ -16,8 +16,10 @@ from typing import Dict, Iterable, Optional, Tuple
 DEFAULT_DATASET_PATH = Path(__file__).with_name("github_issue_skill_selection.json")
 # Re-pinned 2026-08-20: the dataset bytes changed only by the mechanical
 # project rename (old pin ed5587e9…889d8); task content is identical.
+# Pin the canonical LF blob hash (an intermediate pin of a CRLF working-tree
+# copy, 015b1893…0bc661, was superseded the same day after LF normalization).
 EXPECTED_DATASET_SHA256 = (
-    "015b1893d3242234ee0cf31c835aae459007511f55557cc354c7ae890a0bc661"
+    "f987f22b034076b5daf14f5ef240130bb1d23f6f68bedb550d425dfdd185afc1"
 )
 _MAX_DATASET_BYTES = 2 * 1024 * 1024
 _MAX_RAW_RESPONSE_BYTES = 2 * 1024 * 1024
