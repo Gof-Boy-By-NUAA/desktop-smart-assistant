@@ -3747,7 +3747,7 @@
   "errors": [],
   "passed": true,
   "report_path": "benchmarks\\results\\cmrc2018-knowledge-comparison.json",
-  "report_sha256": "82de54a7b7be991baeda99328780c6facb73039c9131f6b5b85718358c6e34f1",
+  "report_sha256": "f9db4e571f809f9438d45be7a8dfdd4db9b38cd4cbfdcb2579676f641ca0cb1b",
   "schema_version": 1,
   "status": "completed"
 }

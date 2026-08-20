@@ -120,6 +120,6 @@
   "dataset_sha256": "5cfe4414c28a8ecbb51670f78c0dc7d1049f286c2d5769b52f1f94bcc0752cf1",
   "passed": true,
   "report_path": "benchmarks\\results\\cmrc2018-comparison.json",
-  "report_sha256": "ffb7e994d6cb55ca45e5085d83cc9c3258db17112d9be1ef528d581217684cac",
+  "report_sha256": "c6c4280b55905898c626faa1bf5ff4b9b9b2fe1e234496cb190ffaeb6a00a79f",
   "schema_version": 1
 }
