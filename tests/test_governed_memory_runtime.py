@@ -798,7 +798,11 @@ class GovernedMemoryRuntimeTest(unittest.TestCase):
         self.assertEqual("error", edit_result.status)
         self.assertEqual("error", direct_get.status)
         self.assertEqual("error", direct_search.status)
-        self.assertEqual(0, workspace_search.result["match_count"])
+        self.assertEqual(
+            0,
+            workspace_search.result["match_count"],
+            msg=f"governed content leaked into generic search: {workspace_search.result}",
+        )
 
 
 class GovernedMemoryToolInjectionTest(unittest.TestCase):

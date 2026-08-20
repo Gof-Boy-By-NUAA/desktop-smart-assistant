@@ -59,6 +59,12 @@ jobs:
           python -m pip install
           pytest regex requests PyYAML python-dotenv croniter cryptography
 
+      - name: Fetch pinned CMRC 2018 dataset
+        run: >-
+          python -c
+          "from benchmarks.retrieval.dataset import ensure_cmrc2018_dev;
+          print(ensure_cmrc2018_dev())"
+
       - name: Run retrieval unit tests
         run: >-
           python -m pytest

@@ -33,9 +33,23 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install pytest
           python -m pip install -r requirements.txt
+          python -m pip install pypdf
 
       - name: Verify dependency closure
         run: python -m pip check
+
+      - name: Fetch pinned CMRC 2018 dataset
+        run: >-
+          python -c
+          "from benchmarks.retrieval.dataset import ensure_cmrc2018_dev;
+          print(ensure_cmrc2018_dev())"
+
+      - name: Generate release evidence manifest (exit 1 is the fail-closed expected result)
+        shell: bash
+        run: >-
+          python -m benchmarks.evidence.release_manifest
+          --output benchmarks/results/release-evidence-manifest.json
+          || test $? -eq 1
 
       - name: Verify real web dependencies import
         run: >-

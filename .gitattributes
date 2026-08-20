@@ -1,0 +1,3 @@
+# Force LF checkouts on every platform so committed evidence fingerprints
+# (SHA-256 over source bytes) verify identically on Windows, macOS and Linux.
+* text=auto eol=lf
