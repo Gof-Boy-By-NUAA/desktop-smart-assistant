@@ -14,8 +14,10 @@ from typing import Dict, Iterable, Optional, Tuple
 
 
 DEFAULT_DATASET_PATH = Path(__file__).with_name("github_issue_skill_selection.json")
+# Re-pinned 2026-08-20: the dataset bytes changed only by the mechanical
+# project rename (old pin ed5587e9…889d8); task content is identical.
 EXPECTED_DATASET_SHA256 = (
-    "ed5587e918854a32e8ee143550f2ef88e841bf311a3efbc3eb43c756edf889d8"
+    "015b1893d3242234ee0cf31c835aae459007511f55557cc354c7ae890a0bc661"
 )
 _MAX_DATASET_BYTES = 2 * 1024 * 1024
 _MAX_RAW_RESPONSE_BYTES = 2 * 1024 * 1024

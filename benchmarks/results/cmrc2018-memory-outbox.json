@@ -79,43 +79,43 @@
       "passed": true
     },
     {
-      "actual": 1.578875,
+      "actual": 1.9394549999999997,
       "expected": 100.0,
       "name": "performance.fact_write_p95_ms",
       "passed": true
     },
     {
-      "actual": 28.36410037696558,
+      "actual": 39.59511917502859,
       "expected": 20.0,
       "name": "performance.initial_recovery_throughput",
       "passed": true
     },
     {
-      "actual": 92.93295092043583,
+      "actual": 92.94919044043601,
       "expected": 20.0,
       "name": "performance.revoke_recovery_throughput",
       "passed": true
     }
   ],
-  "generated_at": "2026-08-01T16:23:00.981644+00:00",
-  "implementation_sha256": "4257912c14fbbb913afb5587b14f9e2566906f5128ce48fd12372ee30003d70b",
+  "generated_at": "2026-08-20T05:58:09.501278+00:00",
+  "implementation_sha256": "4b0946f435890e0045d1a6bc7504ce29bbe039a8d50efa9686f0e19ab11ab053",
   "metrics": {
-    "fact_write_latency_ms_mean": 1.2302693396226414,
-    "fact_write_latency_ms_p50": 1.13285,
-    "fact_write_latency_ms_p95": 1.578875,
+    "fact_write_latency_ms_mean": 1.3595365566037736,
+    "fact_write_latency_ms_p50": 1.21585,
+    "fact_write_latency_ms_p95": 1.9394549999999997,
     "final_active_count": 798,
     "final_index_matches": true,
     "initial_active_count": 848,
     "initial_index_matches": true,
     "initial_pending_job_count": 848,
     "initial_projection_match_count": 848,
-    "initial_recovery_documents_per_second": 28.36410037696558,
-    "initial_recovery_ms": 29896.9468,
+    "initial_recovery_documents_per_second": 39.59511917502859,
+    "initial_recovery_ms": 21416.7811,
     "pending_after_recovery": 0,
     "pending_before_revoke_recovery": 50,
     "revoke_count": 50,
-    "revoke_recovery_documents_per_second": 92.93295092043583,
-    "revoke_recovery_ms": 538.0223,
+    "revoke_recovery_documents_per_second": 92.94919044043601,
+    "revoke_recovery_ms": 537.9283,
     "revoked_index_count": 0,
     "revoked_projection_count": 0
   },

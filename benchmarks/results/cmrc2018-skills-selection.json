@@ -1,16 +1,16 @@
 {
   "dataset": {
-    "actual_sha256": "ed5587e918854a32e8ee143550f2ef88e841bf311a3efbc3eb43c756edf889d8",
-    "expected_sha256": "ed5587e918854a32e8ee143550f2ef88e841bf311a3efbc3eb43c756edf889d8",
+    "actual_sha256": "015b1893d3242234ee0cf31c835aae459007511f55557cc354c7ae890a0bc661",
+    "expected_sha256": "015b1893d3242234ee0cf31c835aae459007511f55557cc354c7ae890a0bc661",
     "label_tier": "deterministic_silver",
-    "path": "C:\\Users\\UnlimitedPower\\Documents\\桌面智能助手\\SmartAssistant\\benchmarks\\skills\\github_issue_skill_selection.json",
+    "path": "C:\\Users\\UnlimitedPower\\Documents\\桌面智能助手\\CowAgent\\benchmarks\\skills\\github_issue_skill_selection.json",
     "provenance_complete": false
   },
   "error": {
     "message": "source.provenance_complete 缺失，抓取来源证明不完整",
     "type": "SkillSelectionDatasetError"
   },
-  "generated_at": "2026-08-17T11:53:14.174982+00:00",
+  "generated_at": "2026-08-20T05:46:51.850175+00:00",
   "implementation_files": [
     "agent/skills/governance/contracts.py",
     "agent/skills/governance/repository.py",
@@ -25,7 +25,7 @@
     "benchmarks/skills/metrics.py",
     "benchmarks/skills/runner.py"
   ],
-  "implementation_sha256": "cd2f233cb4223b095bd9e7df643c778e950aecce72b15d3be4a38c6d07e8241f",
+  "implementation_sha256": "81248fb340659b7edaf3e2e2d8ba51bc8113bdf84a9b20aa6b00fe40f7592f70",
   "limitations": {
     "body_or_comments_included": false,
     "customer_success_rate_measured": false,
