@@ -14,7 +14,8 @@ def test_web_boundary_generator_runs_every_required_attack():
     report = generate_report(ROOT)
     assert report["passed"] is True
     assert [item["name"] for item in report["checks"]] == list(REQUIRED_CHECKS)
-    assert all(item["passed"] for item in report["checks"])
+    failed = [item for item in report["checks"] if not item["passed"]]
+    assert not failed, json.dumps(failed, ensure_ascii=False, indent=2)
     assert report["limitations"]["production_deployment_verified"] is False
     assert report["limitations"]["customer_execution_verified"] is False
 
@@ -23,8 +24,9 @@ def test_web_boundary_verifier_accepts_current_report():
     result = verify_report(
         ROOT / "benchmarks/results/web-boundary-security.json", ROOT
     )
-    assert result["passed"] is True
-    assert all(item["passed"] for item in result["checks"])
+    failed = [item for item in result["checks"] if not item["passed"]]
+    assert result["passed"] is True, json.dumps(failed, ensure_ascii=False, indent=2)
+    assert not failed
 
 
 def test_web_boundary_verifier_rejects_tampered_pass_claim(tmp_path):
