@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from typing import Dict, Any
+from typing import Dict, Any, Tuple
 
 from agent.tools.base_tool import BaseTool, ToolResult
 from agent.tools.bash import background, exit_codes
@@ -380,7 +380,7 @@ SAFETY:
             return ToolResult.fail(payload)
         return ToolResult.success(payload)
 
-    def _background_scope(self) -> tuple[object, object]:
+    def _background_scope(self) -> Tuple[object, object]:
         """Use identity already bound to the Agent, never model arguments."""
         agent = getattr(self, "context", None)
         return (

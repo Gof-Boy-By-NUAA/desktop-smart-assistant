@@ -6,7 +6,7 @@ import time
 import threading
 import uuid
 from datetime import datetime, timedelta
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
 from croniter import croniter
 from common.log import logger
 
@@ -480,7 +480,7 @@ class SchedulerService:
         
         return None
     
-    def _execute_task(self, task: dict) -> tuple[bool, Optional[str]]:
+    def _execute_task(self, task: dict) -> Tuple[bool, Optional[str]]:
         """
         Execute a task.
 

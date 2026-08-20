@@ -12,7 +12,7 @@ import time
 import uuid
 from datetime import datetime
 from contextlib import contextmanager
-from typing import Dict, Iterator, List, Optional
+from typing import Dict, Iterator, List, Optional, Tuple
 from pathlib import Path
 from common.utils import expand_path
 
@@ -291,7 +291,7 @@ class TaskStore:
         return ""
 
     @classmethod
-    def _ensure_execution_generation_unlocked(cls, task: dict) -> tuple[str, bool]:
+    def _ensure_execution_generation_unlocked(cls, task: dict) -> Tuple[str, bool]:
         """Return a server-generated lifetime identifier for this task record.
 
         A task id can be reused after deletion.  Binding the execution ledger

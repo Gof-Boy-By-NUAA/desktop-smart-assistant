@@ -14,7 +14,7 @@ import zipfile
 import tempfile
 import uuid
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from common.log import logger
 from agent.skills.types import Skill, SkillEntry
 from agent.skills.locks import skill_root_lock
@@ -45,7 +45,7 @@ class SkillService:
         self._mutation_lock = skill_root_lock(self.manager.custom_dir)
 
     @staticmethod
-    def _relative_parts(value: str, label: str) -> tuple[str, ...]:
+    def _relative_parts(value: str, label: str) -> Tuple[str, ...]:
         """把可移植相对路径解析为不含穿越成分的路径片段。"""
 
         if not isinstance(value, str) or not value.strip():
