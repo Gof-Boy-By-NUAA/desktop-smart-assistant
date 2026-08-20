@@ -185,16 +185,20 @@ def is_governed_private_path(path: str, workspace: str) -> bool:
     projection_dir = _normalized(
         os.path.join(real_workspace, "memory", ".governed")
     )
-    governance_db = _normalized(
-        os.path.join(real_workspace, "memory", "long-term", "governance.db")
+    # The whole long-term directory is machine-owned: index.db,
+    # governance.db, retrieval-v2.db and their -wal/-shm sidecars all hold
+    # governed plaintext and must never be readable through generic tools.
+    # (A WAL checkpoint race leaked retrieval-v2.db-wal content into generic
+    # search on CI; guard the directory, not individual filenames.)
+    long_term_dir = _normalized(
+        os.path.join(real_workspace, "memory", "long-term")
     )
     knowledge_system_dir = _normalized(
         os.path.join(real_workspace, "knowledge", ".system")
     )
     return (
         _is_same_or_child(real_path, projection_dir)
-        or real_path == governance_db
-        or real_path.startswith(governance_db + "-")
+        or _is_same_or_child(real_path, long_term_dir)
         or _is_same_or_child(real_path, knowledge_system_dir)
         or is_governed_skill_private_path(path, workspace)
     )
