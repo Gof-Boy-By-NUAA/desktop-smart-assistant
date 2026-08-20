@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import sys
 import tempfile
 from pathlib import Path
 from typing import Dict, Sequence
@@ -134,6 +135,15 @@ def implementation_fingerprint(
 def verify_original_memory_storage() -> Dict[str, object]:
     """核验基线调用到的类与原始 SmartAssistant ZIP 中的实现一致。"""
 
+    # ast.dump 输出随解释器版本变化（如 3.12 起 ClassDef 增加 type_params
+    # 字段）。冻结哈希是在 Python 3.11 下计算的；在其他版本下继续比较会
+    # 产生误导性失败，进而制造"重新冻结哈希以消红"的绕过压力。fail-closed：
+    # 版本不匹配时直接拒绝，而不是给出看似可修复的比较失败。
+    if sys.version_info[:2] != (3, 11):
+        raise RuntimeError(
+            "基线 AST 哈希仅在 Python 3.11 下有效；"
+            f"当前解释器为 {sys.version.split()[0]}，请使用受控验证环境"
+        )
     repository_root = Path(__file__).resolve().parents[2]
     source = (repository_root / "agent/memory/storage.py").read_text(
         encoding="utf-8"
