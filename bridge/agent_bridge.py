@@ -1156,7 +1156,7 @@ class AgentBridge:
                 except Exception:
                     pass
 
-            # Post-message hot-reload: detect edits to ~/cow/mcp.json and
+            # Post-message hot-reload: detect edits to the workspace mcp.json and
             # sync any new/removed MCP tools into the live agent in the
             # background. Off the critical path so user latency is unaffected;
             # changes take effect on the user's next message.
@@ -1744,7 +1744,7 @@ class AgentBridge:
         from config import conf
 
         # Reload environment variables from .env file
-        workspace_root = expand_path(conf().get("agent_workspace", "~/cow"))
+        workspace_root = expand_path(conf().get("agent_workspace", "./workspace"))
         env_file = os.path.join(workspace_root, '.env')
 
         if os.path.exists(env_file):

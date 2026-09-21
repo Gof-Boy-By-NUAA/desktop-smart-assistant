@@ -61,7 +61,7 @@ class AgentInitializer:
         from config import conf
         
         # Get workspace from config
-        workspace_root = expand_path(conf().get("agent_workspace", "~/cow"))
+        workspace_root = expand_path(conf().get("agent_workspace", "./workspace"))
         
         # Migrate API keys
         self._migrate_config_to_env(workspace_root)

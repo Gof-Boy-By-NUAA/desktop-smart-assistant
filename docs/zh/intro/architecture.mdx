@@ -36,10 +36,10 @@ SmartAssistant 的整体架构由以下核心模块组成：
 
 ## 工作空间
 
-Agent 的工作空间默认位于 `~/cow` 目录，用于存储系统提示词、记忆文件、技能文件等：
+Agent 的工作空间默认位于 `./workspace` 目录，用于存储系统提示词、记忆文件、技能文件等：
 
 ```
-~/cow/
+./workspace/
 ├── SYSTEM.md          # Agent system prompt
 ├── USER.md            # User profile
 ├── MEMORY.md          # Core memory
@@ -67,7 +67,7 @@ Agent 的工作空间默认位于 `~/cow` 目录，用于存储系统提示词�
 ```json
 {
   "agent": true,
-  "agent_workspace": "~/cow",
+  "agent_workspace": "./workspace",
   "agent_max_context_tokens": 40000,
   "agent_max_context_turns": 30,
   "agent_max_steps": 15,
@@ -79,7 +79,7 @@ Agent 的工作空间默认位于 `~/cow` 目录，用于存储系统提示词�
 | 参数 | 说明 | 默认值 |
 | --- | --- | --- |
 | `agent` | 是否启用 Agent 模式 | `true` |
-| `agent_workspace` | 工作空间路径 | `~/cow` |
+| `agent_workspace` | 工作空间路径 | `./workspace` |
 | `agent_max_context_tokens` | 最大上下文 token 数 | `50000` |
 | `agent_max_context_turns` | 最大上下文记忆轮次 | `20` |
 | `agent_max_steps` | 单次任务最大决策步数 | `20` |

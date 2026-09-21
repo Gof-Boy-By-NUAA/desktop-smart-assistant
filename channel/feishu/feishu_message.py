@@ -33,7 +33,7 @@ class FeishuMessage(ChatMessage):
             image_key = content.get("image_key")
             
             # 下载图片到工作空间临时目录
-            workspace_root = expand_path(conf().get("agent_workspace", "~/cow"))
+            workspace_root = expand_path(conf().get("agent_workspace", "./workspace"))
             tmp_dir = os.path.join(workspace_root, "tmp")
             os.makedirs(tmp_dir, exist_ok=True)
             image_path = os.path.join(tmp_dir, f"{image_key}.png")
@@ -99,7 +99,7 @@ class FeishuMessage(ChatMessage):
             
             if image_keys:
                 # 如果包含图片，下载并在文本中引用本地路径
-                workspace_root = expand_path(conf().get("agent_workspace", "~/cow"))
+                workspace_root = expand_path(conf().get("agent_workspace", "./workspace"))
                 tmp_dir = os.path.join(workspace_root, "tmp")
                 os.makedirs(tmp_dir, exist_ok=True)
                 
@@ -147,7 +147,7 @@ class FeishuMessage(ChatMessage):
 
             # 落到 agent_workspace/tmp 下（绝对路径），与图片处理一致；
             # 否则相对路径 ./tmp 在 agent 工作区里 read 时会找不到。
-            workspace_root = expand_path(conf().get("agent_workspace", "~/cow"))
+            workspace_root = expand_path(conf().get("agent_workspace", "./workspace"))
             tmp_dir = os.path.join(workspace_root, "tmp")
             os.makedirs(tmp_dir, exist_ok=True)
             self.content = os.path.join(
@@ -179,7 +179,7 @@ class FeishuMessage(ChatMessage):
             file_key = content.get("file_key")
 
             # 落到 agent_workspace/tmp 下（绝对路径），保证语音 STT 流程可读到
-            workspace_root = expand_path(conf().get("agent_workspace", "~/cow"))
+            workspace_root = expand_path(conf().get("agent_workspace", "./workspace"))
             tmp_dir = os.path.join(workspace_root, "tmp")
             os.makedirs(tmp_dir, exist_ok=True)
             self.content = os.path.join(tmp_dir, f"{file_key}.opus")

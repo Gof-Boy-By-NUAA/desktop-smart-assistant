@@ -7,13 +7,13 @@ from config import conf
 class TmpDir(object):
     """Temporary directory for transient artifacts (e.g. synthesized voice).
 
-    Resolves to ``<agent_workspace>/tmp`` (default ``~/cow/tmp``) so temp files
+    Resolves to ``<agent_workspace>/tmp`` (default ``./workspace/tmp``) so temp files
     land inside the agent workspace instead of a CWD-relative ``./tmp``, which
     is unreliable for the packaged desktop app where CWD is undefined.
     """
 
     def __init__(self):
-        ws_root = expand_path(conf().get("agent_workspace", "~/cow"))
+        ws_root = expand_path(conf().get("agent_workspace", "./workspace"))
         self.tmpFilePath = os.path.join(ws_root, "tmp")
         os.makedirs(self.tmpFilePath, exist_ok=True)
 

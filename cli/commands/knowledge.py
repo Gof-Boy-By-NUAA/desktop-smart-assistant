@@ -14,9 +14,9 @@ def _get_knowledge_dir():
         sys.path.insert(0, get_project_root())
         from config import conf
         from common.utils import expand_path
-        workspace = expand_path(conf().get("agent_workspace", "~/cow"))
+        workspace = expand_path(conf().get("agent_workspace", "./workspace"))
     except Exception:
-        workspace = os.path.expanduser("~/cow")
+        workspace = os.path.expanduser("./workspace")
     return os.path.join(workspace, "knowledge")
 
 
