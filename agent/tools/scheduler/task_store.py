@@ -739,6 +739,48 @@ class TaskStore:
         finally:
             connection.close()
 
+    def release_execution(
+        self,
+        task_id: str,
+        execution_id: str,
+        lease_token: str,
+    ) -> None:
+        """Abandon a claim that provably never started its side effect.
+
+        Deletes the exact lease-guarded 'running' row so the task's next
+        occurrence can be claimed again. Only callers that know nothing was
+        attempted (e.g. a failed pre-flight readiness probe) may use this;
+        an uncertain side effect must stay in_doubt instead.
+        """
+        if not task_id or not execution_id or not lease_token:
+            raise ValueError("task_id, execution_id, and lease_token are required")
+        connection = self._execution_connection()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                "DELETE FROM scheduler_executions "
+                "WHERE task_id = ? AND occurrence_id = ? AND lease_token = ? "
+                "AND status = 'running'",
+                (task_id, execution_id, lease_token),
+            )
+            if cursor.rowcount != 1:
+                connection.execute("ROLLBACK")
+                raise TaskExecutionStoreError(
+                    "Scheduler execution release was rejected "
+                    "(stale, missing, or non-running lease)"
+                )
+            connection.execute("COMMIT")
+        except sqlite3.Error as exc:
+            try:
+                connection.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise TaskExecutionStoreError(
+                f"Scheduler execution release failed: {exc}"
+            ) from exc
+        finally:
+            connection.close()
+
     def _latest_execution_states(self, task_ids: List[str]) -> Dict[str, dict]:
         if not task_ids:
             return {}

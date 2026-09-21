@@ -798,8 +798,11 @@ class MemoryManager:
                             "governed",
                             indexed_documents,
                         )
-                        if not self.lexical_index.matches_tenant(
-                            self.config.tenant_id, indexed_documents
+                        # 只校验 governed 集合本身：同一租户的索引库还承载
+                        # workspace 等其他集合的合法记录，全租户比对会把
+                        # 它们误判为不一致并阻断初始化。
+                        if not self.lexical_index.matches_collection(
+                            self.config.tenant_id, "governed", indexed_documents
                         ):
                             raise RuntimeError(
                                 "治理记忆索引重建后缺失或内容不一致"
