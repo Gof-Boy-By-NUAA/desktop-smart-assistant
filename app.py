@@ -323,14 +323,14 @@ def _warmup_scheduler():
 
 def _warn_if_legacy_workspace_data_exists():
     """
-    Warn if the hardcoded ~/cow default holds data that agent_workspace
+    Warn if the legacy ~/cow workspace holds data that agent_workspace
     doesn't - e.g. after changing agent_workspace without moving the old
     directory's contents over. The new workspace would otherwise look
     empty even though old data still exists, with no indication why.
     """
     try:
         from common.utils import expand_path
-        workspace_root = expand_path(conf().get("agent_workspace", "~/cow"))
+        workspace_root = expand_path(conf().get("agent_workspace", "./workspace"))
         legacy_root = expand_path("~/cow")
         # samefile checks filesystem identity, so case-insensitive filesystems
         # (default on Windows and macOS) are handled correctly - normcase
@@ -361,7 +361,7 @@ def _sync_builtin_skills():
     import shutil
     try:
         from common.utils import expand_path
-        workspace = expand_path(conf().get("agent_workspace", "~/cow"))
+        workspace = expand_path(conf().get("agent_workspace", "./workspace"))
         project_root = os.path.dirname(os.path.abspath(__file__))
         builtin_dir = os.path.join(project_root, "skills")
         custom_dir = os.path.join(workspace, "skills")

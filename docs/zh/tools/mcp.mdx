@@ -7,7 +7,7 @@ SmartAssistant 支持 [Model Context Protocol (MCP)](https://modelcontextprotoco
 
 ## 配置文件
 
-SmartAssistant 读取 `~/cow/mcp.json`。文件不存在时不会启用任何 MCP 工具，也不会报错。
+SmartAssistant 读取 `./workspace/mcp.json`。文件不存在时不会启用任何 MCP 工具，也不会报错。
 
 Docker 部署时，官方 `docker-compose.yml` 已经把宿主机 `./cow` 挂载到容器内 `/home/agent/cow`（即容器用户的 `~/cow`），把 `mcp.json` 放进宿主机 `./cow/` 目录即可生效。
 
@@ -70,7 +70,7 @@ SmartAssistant 自带 `read` / `write` / `edit` 工具，**直接把要装的 MC
 例如：
 
 ```markdown
-帮我把这个 MCP 加到 ~/cow/mcp.json 里：
+帮我把这个 MCP 加到 ./workspace/mcp.json 里：
 
 {"mcpServers":{"fetch":{"command":"uvx","args":["mcp-server-fetch"]}}}
 ```
@@ -119,7 +119,7 @@ server 首次加载遇到 `401` 时会自动发起授权：本机运行会**自�
 
 | 现象 | 排查方向 |
 | --- | --- |
-| 启动后 Agent 没有 MCP 工具 | 检查 `~/cow/mcp.json` 是否存在、JSON 格式是否合法 |
+| 启动后 Agent 没有 MCP 工具 | 检查 `./workspace/mcp.json` 是否存在、JSON 格式是否合法 |
 | 某个 server 加载失败 | 查看启动日志中的 `[MCP] Server 'xxx' load failed`，常见为依赖未装、API Key 缺失 |
 | 修改 `mcp.json` 没有生效 | 改动会在**下一条消息**生效；若 server 配置不变（如只改注释），不会触发重启 |
 | Docker 部署 | 确认宿主机 `./cow` 已挂载到容器内 `/home/agent/cow`，`mcp.json` 直接放进宿主机 `./cow/` 目录即可，或者直接对话 Agent 安装 |

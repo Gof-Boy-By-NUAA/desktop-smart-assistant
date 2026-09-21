@@ -10,7 +10,7 @@ from config import conf
 
 def _get_tmp_dir() -> str:
     """Return the workspace tmp directory (absolute path), creating it if needed."""
-    ws_root = expand_path(conf().get("agent_workspace", "~/cow"))
+    ws_root = expand_path(conf().get("agent_workspace", "./workspace"))
     tmp_dir = os.path.join(ws_root, "tmp")
     os.makedirs(tmp_dir, exist_ok=True)
     return tmp_dir

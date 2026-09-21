@@ -497,7 +497,7 @@ document.addEventListener('click', async (e) => {
 // Inline path chips: turn local paths mentioned in text into clickable chips
 // =====================================================================
 const WS_PATH_EXTS = Object.values(WS_KIND_BY_EXT).flat().join('|');
-// Absolute (/Users/..., C:\...), home-relative (~/cow/...) or workspace-relative
+// Absolute (/Users/..., C:\...), home-relative or workspace-relative
 // (websites/report.html) paths, always anchored on a known file extension and
 // containing at least one separator, which keeps prose like "see report.html"
 // from turning into chips. Excluding `:` and `/` before the match is what stops

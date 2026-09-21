@@ -7,7 +7,7 @@ SmartAssistant は [Model Context Protocol (MCP)](https://modelcontextprotocol.i
 
 ## 設定ファイル
 
-SmartAssistant は `~/cow/mcp.json` を読み込みます。ファイルが存在しない場合は MCP Tool は読み込まれず、エラーにもなりません。
+SmartAssistant は `./workspace/mcp.json` を読み込みます。ファイルが存在しない場合は MCP Tool は読み込まれず、エラーにもなりません。
 
 Docker デプロイの場合、公式の `docker-compose.yml` はホスト側の `./cow` をコンテナ内の `/home/agent/cow`（コンテナユーザーの `~/cow`）にマウント済みです。ホスト側の `./cow/` に `mcp.json` を置くだけで反映されます。
 
@@ -70,7 +70,7 @@ SmartAssistant には `read` / `write` / `edit` Tool が組み込まれている
 例：
 
 ```markdown
-この MCP を ~/cow/mcp.json に追加してください：
+この MCP を ./workspace/mcp.json に追加してください：
 
 {"mcpServers":{"fetch":{"command":"uvx","args":["mcp-server-fetch"]}}}
 ```
@@ -119,7 +119,7 @@ server の初回ロードで `401` が返ると、認可が自動的に開始さ
 
 | 症状 | 確認ポイント |
 | --- | --- |
-| 起動後に MCP Tool が一つもない | `~/cow/mcp.json` が存在し、JSON が正しいか確認 |
+| 起動後に MCP Tool が一つもない | `./workspace/mcp.json` が存在し、JSON が正しいか確認 |
 | 特定の server が読み込みに失敗する | 起動ログの `[MCP] Server 'xxx' load failed` を確認。多くは依存関係の不足や API Key 未設定 |
 | `mcp.json` の変更が反映されない | 変更は **次のメッセージ** から有効になる。server の設定が実質的に変わっていない（コメントだけ変更など）場合は再起動されない |
 | Docker デプロイ | ホストの `./cow` がコンテナ内の `/home/agent/cow` にマウントされていることを確認し、ホスト側の `./cow/` に `mcp.json` を配置。または Agent に直接インストールを依頼 |

@@ -256,7 +256,7 @@ available_setting = {
     "web_file_serve_root": "~",  # Root dir the /api/file endpoint may serve; "/" allows the whole filesystem
     "mcp_oauth_redirect_base": "",  # Base URL for MCP OAuth callback (e.g. http://your-ip:9899); empty uses local web console
     "agent": True,  # whether to enable Agent mode
-    "agent_workspace": "~/cow",  # agent workspace path, used to store skills, memory, etc.
+    "agent_workspace": "./workspace",  # SmartAssistant workspace path, used to store skills, memory, etc.
     "agent_max_context_tokens": 64000,  # max context tokens in Agent mode
     "agent_max_context_turns": 30,  # max context memory turns in Agent mode
     "agent_max_steps": 30,  # max decision steps per run in Agent mode
@@ -413,13 +413,8 @@ def drag_sensitive(config):
 def load_config():
     global config
 
-    # print ASCII logo
-    logger.info("  ____                _                    _   ")
-    logger.info(" / ___|_____      __ / \\   __ _  ___ _ __ | |_ ")
-    logger.info("| |   / _ \\ \\ /\\ / // _ \\ / _` |/ _ \\ '_ \\| __|")
-    logger.info("| |__| (_) \\ V  V // ___ \\ (_| |  __/ | | | |_ ")
-    logger.info(" \\____\\___/ \\_/\\_//_/   \\_\\__, |\\___|_| |_|\\__|")
-    logger.info("                          |___/                 ")
+    # print product name
+    logger.info("SmartAssistant")
     logger.info("")
     # User config lives in the data root: source deployments use CWD (./), while
     # the desktop build points COW_DATA_DIR at ~/.cow so config survives updates.
@@ -497,8 +492,8 @@ def load_config():
 
     # Agent mode info
     if config.get("agent", True):
-        workspace = config.get("agent_workspace", "~/cow")
-        logger.info("[INIT] Mode: Agent (workspace: {})".format(workspace))
+        workspace = config.get("agent_workspace", "./workspace")
+        logger.info("[INIT] Mode: Agent (workspace: SmartAssistant / {})".format(workspace))
     else:
         logger.info("[INIT] Mode: Chat (set \"agent\":true in config.json to enable Agent mode)")
 

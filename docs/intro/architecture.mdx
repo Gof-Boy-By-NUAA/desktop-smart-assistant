@@ -36,10 +36,10 @@ When Agent mode is enabled, SmartAssistant runs as an autonomous agent with the 
 
 ## Workspace Directory Structure
 
-The Agent workspace is located at `~/cow` by default and stores system prompts, memory files, and skill files:
+The Agent workspace is located at `./workspace` by default and stores system prompts, memory files, and skill files:
 
 ```
-~/cow/
+./workspace/
 ├── SYSTEM.md          # Agent system prompt
 ├── USER.md            # User profile
 ├── MEMORY.md          # Core memory
@@ -67,7 +67,7 @@ Configure Agent mode parameters in `config.json`:
 ```json
 {
   "agent": true,
-  "agent_workspace": "~/cow",
+  "agent_workspace": "./workspace",
   "agent_max_context_tokens": 50000,
   "agent_max_context_turns": 20,
   "agent_max_steps": 20,
@@ -79,7 +79,7 @@ Configure Agent mode parameters in `config.json`:
 | Parameter | Description | Default |
 | --- | --- | --- |
 | `agent` | Enable Agent mode | `true` |
-| `agent_workspace` | Workspace path | `~/cow` |
+| `agent_workspace` | Workspace path | `./workspace` |
 | `agent_max_context_tokens` | Max context tokens | `50000` |
 | `agent_max_context_turns` | Max context turns | `20` |
 | `agent_max_steps` | Max decision steps per task | `20` |

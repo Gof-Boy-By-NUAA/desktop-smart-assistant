@@ -14,7 +14,7 @@ from pathlib import Path
 def _default_workspace():
     """
     Resolve the default workspace from agent_workspace, falling back to
-    ~/cow. Reading the config here (instead of hardcoding ~/cow) keeps
+    ./workspace. Reading the config here (instead of hardcoding a legacy path) keeps
     every consumer of get_default_memory_config() - ConversationStore,
     the evolution executor, the evolution-undo tool - on the configured
     workspace without each entrypoint having to prime the singleton.
@@ -22,17 +22,17 @@ def _default_workspace():
     from common.utils import expand_path
     try:
         from config import conf
-        return expand_path(conf().get("agent_workspace") or "~/cow")
+        return expand_path(conf().get("agent_workspace") or "./workspace")
     except Exception:
-        # Config not importable/loaded yet: keep the historical default.
-        return expand_path("~/cow")
+        # Config not importable/loaded yet: use the project-local default.
+        return expand_path("./workspace")
 
 
 @dataclass
 class MemoryConfig:
     """Configuration for memory storage and search"""
     
-    # Storage paths (default: ~/cow)
+    # Storage paths (default: ./workspace)
     workspace_root: str = field(default_factory=_default_workspace)
     
     # Embedding config

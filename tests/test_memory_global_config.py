@@ -102,7 +102,7 @@ class TestMemoryGlobalConfigSync(unittest.TestCase):
             f"before the first agent init, not ~/cow",
         )
 
-    def test_falls_back_to_cow_when_agent_workspace_is_unset(self):
+    def test_falls_back_to_smartassistant_workspace_when_agent_workspace_is_unset(self):
         """
         Resolving from config must not change the default for anyone who
         never set agent_workspace.
@@ -113,8 +113,8 @@ class TestMemoryGlobalConfigSync(unittest.TestCase):
         conf().pop("agent_workspace", None)
         self.assertEqual(
             MemoryConfig().workspace_root,
-            expand_path("~/cow"),
-            "an unset agent_workspace should still resolve to the ~/cow default",
+            expand_path("./workspace"),
+            "an unset agent_workspace should resolve to the writable SmartAssistant workspace",
         )
 
 

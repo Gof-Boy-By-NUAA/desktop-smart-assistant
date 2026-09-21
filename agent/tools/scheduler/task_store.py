@@ -39,12 +39,13 @@ class TaskStore:
         Initialize task store
         
         Args:
-            store_path: Path to tasks.json file. Defaults to ~/cow/scheduler/tasks.json
+            store_path: Path to tasks.json file. Defaults to ./workspace/scheduler/tasks.json
         """
         if store_path is None:
-            # Default to ~/cow/scheduler/tasks.json
-            home = expand_path("~")
-            store_path = os.path.join(home, "cow", "scheduler", "tasks.json")
+            # Default to ./workspace/scheduler/tasks.json
+            store_path = os.path.join(
+                expand_path("./workspace"), "scheduler", "tasks.json"
+            )
         
         self.store_path = os.path.realpath(store_path)
         self.lock = self._lock_for_path(self.store_path)

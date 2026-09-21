@@ -142,7 +142,7 @@ sudo docker logs -f chatgpt-on-wechat
       "model": "deepseek-v4-flash",
       "deepseek_api_key": "",
       "agent": true,
-      "agent_workspace": "~/cow",
+      "agent_workspace": "./workspace",
       "agent_max_context_tokens": 40000,
       "agent_max_context_turns": 30,
       "agent_max_steps": 15,
@@ -171,7 +171,7 @@ sudo docker logs -f chatgpt-on-wechat
 | `channel_type` | `CHANNEL_TYPE` | 接入渠道类型 | `web` |
 | `model` | `MODEL` | 模型名称 | `deepseek-v4-flash` |
 | `agent` | `AGENT` | 是否启用 Agent 模式 | `true` |
-| `agent_workspace` | - | Agent 工作空间路径 | `~/cow` |
+| `agent_workspace` | - | Agent 工作空间路径 | `./workspace` |
 | `agent_max_context_tokens` | `AGENT_MAX_CONTEXT_TOKENS` | 最大上下文 tokens | `40000` |
 | `agent_max_context_turns` | `AGENT_MAX_CONTEXT_TURNS` | 最大上下文记忆轮次 | `30` |
 | `agent_max_steps` | `AGENT_MAX_STEPS` | 单次任务最大决策步数 | `15` |

@@ -426,7 +426,7 @@ class CowCliPlugin(Plugin):
             from agent.tools.scheduler.task_store import TaskStore
             from common.utils import expand_path
 
-            workspace = expand_path(conf().get("agent_workspace", "~/cow"))
+            workspace = expand_path(conf().get("agent_workspace", "./workspace"))
             task_store = TaskStore(os.path.join(workspace, "scheduler", "tasks.json"))
 
         channel_type = ""
@@ -1724,7 +1724,7 @@ class CowCliPlugin(Plugin):
         from bridge.bridge import Bridge
         from bridge.agent_bridge import AgentLLMModel
 
-        workspace = Path(expand_path(conf().get("agent_workspace", "~/cow")))
+        workspace = Path(expand_path(conf().get("agent_workspace", "./workspace")))
         flush_mgr = MemoryFlushManager(workspace_dir=workspace)
         flush_mgr.llm_model = AgentLLMModel(Bridge())
         return flush_mgr
@@ -1777,7 +1777,7 @@ class CowCliPlugin(Plugin):
         from config import conf
         from common.utils import expand_path
         knowledge_dir = os.path.join(
-            expand_path(conf().get("agent_workspace", "~/cow")),
+            expand_path(conf().get("agent_workspace", "./workspace")),
             "knowledge"
         )
         if not os.path.isdir(knowledge_dir):
@@ -1825,7 +1825,7 @@ class CowCliPlugin(Plugin):
         from config import conf
         from common.utils import expand_path
         knowledge_dir = os.path.join(
-            expand_path(conf().get("agent_workspace", "~/cow")),
+            expand_path(conf().get("agent_workspace", "./workspace")),
             "knowledge"
         )
         if not os.path.isdir(knowledge_dir):

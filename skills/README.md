@@ -80,7 +80,7 @@ Instructions, examples, and usage patterns...
 Skills are loaded from two locations (higher precedence overrides lower):
 
 1. **Builtin skills** (lower): `<project_root>/skills/` — shipped with the codebase
-2. **Custom skills** (higher): `~/cow/skills/` — installed via `cow skill install` or skill creator
+2. **Custom skills** (higher): `./workspace/skills/` — installed via the skill manager or skill creator
 
 Skills with the same name in the custom directory override builtin ones.
 

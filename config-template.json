@@ -35,6 +35,7 @@
   "web_host": "",
   "web_password": "",
   "agent": true,
+  "agent_workspace": "./workspace",
   "agent_max_context_tokens": 64000,
   "agent_max_context_turns": 30,
   "agent_max_steps": 30,

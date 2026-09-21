@@ -1178,7 +1178,7 @@ def _steer_reply_text(status, lang: str) -> str:
 
 def _get_upload_dir() -> str:
     from common.utils import expand_path
-    ws_root = expand_path(conf().get("agent_workspace", "~/cow"))
+    ws_root = expand_path(conf().get("agent_workspace", "./workspace"))
     tmp_dir = os.path.join(ws_root, "tmp")
     os.makedirs(tmp_dir, exist_ok=True)
     return tmp_dir
@@ -1227,7 +1227,7 @@ def _is_other_owner_upload_path(real_path: str, owner_id: Optional[str]) -> bool
 def _get_workspace_root() -> str:
     """Resolve the agent workspace directory."""
     from common.utils import expand_path
-    return expand_path(conf().get("agent_workspace", "~/cow"))
+    return expand_path(conf().get("agent_workspace", "./workspace"))
 
 
 def _web_identity(owner_id: str, *, administrative: bool = False):

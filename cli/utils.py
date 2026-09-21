@@ -12,9 +12,9 @@ def get_project_root() -> str:
 
 
 def get_workspace_dir() -> str:
-    """Get the agent workspace directory from config, defaulting to ~/cow."""
+    """Get the agent workspace directory from config, defaulting to ./workspace."""
     config = load_config_json()
-    workspace = config.get("agent_workspace", "~/cow")
+    workspace = config.get("agent_workspace", "./workspace")
     return os.path.expanduser(workspace)
 
 

@@ -157,7 +157,7 @@ def main() -> int:
 
     load_config()
 
-    workspace_root = expand_path(conf().get("agent_workspace", "~/cow"))
+    workspace_root = expand_path(conf().get("agent_workspace", "./workspace"))
     memory_config = MemoryConfig(workspace_root=workspace_root)
 
     logger.info(f"[RebuildIndex] Workspace: {workspace_root}")

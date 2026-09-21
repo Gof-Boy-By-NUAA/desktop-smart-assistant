@@ -36,10 +36,10 @@ Agent モードが有効な場合、SmartAssistant は以下のワークフロ�
 
 ## ワークスペースのディレクトリ構成
 
-Agent のワークスペースはデフォルトで `~/cow` にあり、システムプロンプト、記憶ファイル、Skill ファイルを格納しています：
+Agent のワークスペースはデフォルトで `./workspace` にあり、システムプロンプト、記憶ファイル、Skill ファイルを格納しています：
 
 ```
-~/cow/
+./workspace/
 ├── system.md          # Agent システムプロンプト
 ├── user.md            # ユーザープロフィール
 ├── MEMORY.md          # コアメモリ
@@ -67,7 +67,7 @@ Agent のワークスペースはデフォルトで `~/cow` にあり、シス�
 ```json
 {
   "agent": true,
-  "agent_workspace": "~/cow",
+  "agent_workspace": "./workspace",
   "agent_max_context_tokens": 40000,
   "agent_max_context_turns": 30,
   "agent_max_steps": 15,
@@ -78,7 +78,7 @@ Agent のワークスペースはデフォルトで `~/cow` にあり、シス�
 | パラメータ | 説明 | デフォルト値 |
 | --- | --- | --- |
 | `agent` | Agent モードの有効化 | `true` |
-| `agent_workspace` | ワークスペースのパス | `~/cow` |
+| `agent_workspace` | ワークスペースのパス | `./workspace` |
 | `agent_max_context_tokens` | 最大コンテキストトークン数 | `40000` |
 | `agent_max_context_turns` | 最大コンテキストターン数 | `30` |
 | `agent_max_steps` | タスクあたりの最大判断ステップ数 | `15` |

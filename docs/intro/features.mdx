@@ -7,7 +7,7 @@ description: SmartAssistant long-term memory, task planning, skills system, CLI 
 
 The memory system enables the Agent to remember important information over time, using a three-tier memory flow: conversation context (short-term) → daily memory (mid-term) → MEMORY.md (long-term), forming a complete memory lifecycle.
 
-On first launch, the Agent proactively asks the user for key information and records it in the workspace (default `~/cow`) — including agent settings, user identity, and memory files.
+On first launch, the Agent proactively asks the user for key information and records it in the workspace (default `./workspace`) — including agent settings, user identity, and memory files.
 
 In subsequent long-term conversations, the Agent intelligently stores or retrieves memory as needed, continuously updating its own settings, user preferences, and memory files. **Deep Dream** distillation runs daily, consolidating scattered daily memories into refined long-term memory and generating a narrative-style dream diary.
 
@@ -27,7 +27,7 @@ See [Long-term Memory](/memory), [Deep Dream](/memory/deep-dream), and [Self-Evo
 
 > The knowledge base system enables the Agent to continuously accumulate and organize structured knowledge. Unlike memory which records along a timeline, the knowledge base is organized by topics, transforming articles, conversation insights, and learning materials into interconnected Markdown pages that form a continuously growing knowledge network.
 
-The Agent automatically organizes valuable information from conversations into knowledge pages, maintaining cross-references and indexes. The Web console provides document browsing and knowledge graph visualization. Knowledge is stored in `~/cow/knowledge/` within the workspace.
+The Agent automatically organizes valuable information from conversations into knowledge pages, maintaining cross-references and indexes. The Web console provides document browsing and knowledge graph visualization. Knowledge is stored in `./workspace/knowledge/` within the workspace.
 
 - **Auto-organization**: The Agent autonomously extracts and organizes structured knowledge during conversations, maintaining indexes and cross-references
 - **Knowledge graph**: Automatically builds a knowledge graph from cross-references between pages, with interactive graph visualization in the Web console
@@ -92,7 +92,7 @@ The Skills system provides infinite extensibility for the Agent. Each Skill cons
 
 - [Skill Hub](https://skills.smart_assistant.ai/): An open skill marketplace featuring official, community, and third-party skills. Install with one command.
 - **Built-in skills:** Located in the project's `skills/` directory, including skill creator, image recognition, LinkAI agent, web fetch, and more. Built-in skills are automatically enabled based on dependency conditions (API keys, system commands, etc.).
-- **Custom skills:** Created by users through conversation, stored in the workspace (`~/cow/skills/`), capable of implementing any complex business process or third-party integration.
+- **Custom skills:** Created by users through conversation, stored in the workspace (`./workspace/skills/`), capable of implementing any complex business process or third-party integration.
 
 Install skills: `/skill install <name>` or `cow skill install <name>`, supporting Skill Hub, GitHub, ClawHub, URL, and more.
 

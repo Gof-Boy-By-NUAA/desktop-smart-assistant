@@ -7,7 +7,7 @@ SmartAssistant supports the [Model Context Protocol (MCP)](https://modelcontextp
 
 ## Configuration File
 
-SmartAssistant reads `~/cow/mcp.json`. If the file does not exist, no MCP tools are loaded — and no error is raised.
+SmartAssistant reads `./workspace/mcp.json`. If the file does not exist, no MCP tools are loaded — and no error is raised.
 
 For Docker deployments, the official `docker-compose.yml` already mounts the host's `./cow` directory to `/home/agent/cow` inside the container (i.e. the container user's `~/cow`). Just drop `mcp.json` into the host's `./cow/` directory and it will take effect.
 
@@ -70,7 +70,7 @@ SmartAssistant ships with `read` / `write` / `edit` tools, so **you can simply s
 For example:
 
 ```markdown
-Add this MCP to ~/cow/mcp.json:
+Add this MCP to ./workspace/mcp.json:
 
 {"mcpServers":{"fetch":{"command":"uvx","args":["mcp-server-fetch"]}}}
 ```
@@ -119,7 +119,7 @@ When a server returns `401` on its first load, authorization starts automaticall
 
 | Symptom | What to Check |
 | --- | --- |
-| Agent has no MCP tools after startup | Verify that `~/cow/mcp.json` exists and contains valid JSON |
+| Agent has no MCP tools after startup | Verify that `./workspace/mcp.json` exists and contains valid JSON |
 | A specific server fails to load | Look for `[MCP] Server 'xxx' load failed` in startup logs — usually missing dependencies or API keys |
 | Changes to `mcp.json` aren't applied | Changes take effect on **the next message**. If the server config didn't actually change (e.g. only comments edited), no restart is triggered |
 | Docker deployment | Make sure host's `./cow` is mounted to `/home/agent/cow` in the container, then just drop `mcp.json` into host's `./cow/`. Or just ask the Agent to do it |

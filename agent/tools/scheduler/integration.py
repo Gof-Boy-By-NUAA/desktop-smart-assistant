@@ -49,7 +49,7 @@ def init_scheduler(agent_bridge) -> bool:
             from agent.tools.scheduler.scheduler_service import SchedulerService
 
             # Get workspace from config
-            workspace_root = expand_path(conf().get("agent_workspace", "~/cow"))
+            workspace_root = expand_path(conf().get("agent_workspace", "./workspace"))
             store_path = os.path.join(workspace_root, "scheduler", "tasks.json")
 
             # Create task store (reuse if already created)
@@ -401,7 +401,7 @@ def _execute_tool_call(task: dict, agent_bridge) -> bool:
             return True
 
         from agent.tools.tool_manager import ToolManager
-        workspace_root = expand_path(conf().get("agent_workspace", "~/cow"))
+        workspace_root = expand_path(conf().get("agent_workspace", "./workspace"))
         tool = ToolManager().create_tool(
             tool_name,
             runtime_config={"cwd": workspace_root},

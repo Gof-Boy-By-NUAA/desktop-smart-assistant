@@ -528,7 +528,7 @@ class FeiShuChanel(ChatChannel):
 
         from agent.tools.scheduler.task_store import TaskStore
 
-        workspace_root = utils.expand_path(conf().get("agent_workspace", "~/cow"))
+        workspace_root = utils.expand_path(conf().get("agent_workspace", "./workspace"))
         return TaskStore(os.path.join(workspace_root, "scheduler", "tasks.json"))
 
     def _send_scheduler_card(self, feishu_msg, is_group: bool, receive_id_type: str) -> bool:
