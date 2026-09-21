@@ -85,6 +85,108 @@ def test_git_binding_excludes_known_runtime_sse_database(tmp_path: Path):
     assert state["all_source_paths_tracked"] is True
     assert state["commit_bound"] is True
 
+
+def test_git_binding_ignores_regenerated_mimosa_tool_state(tmp_path: Path):
+    # 评审缺陷 P1：Mimosa 安全工具在评审活动期间会再生 .mimosa/ 运行状态
+    # （hook ledger / 会话缓存）。它被纳入源码遍历后，先前生成的 manifest
+    # 在独立复核时 source fingerprint 与 commit_bound 漂移。.mimosa 必须
+    # 按名排除，且其出现/消失不得改变源码指纹与绑定状态。
+    repository = tmp_path / "mimosa-state-repository"
+    repository.mkdir()
+    (repository / ".gitignore").write_text(".mimosa/\n", encoding="utf-8")
+    (repository / "source.py").write_text("VALUE = 1\n", encoding="utf-8")
+    subprocess.run(["git", "init"], cwd=repository, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "release-test@example.invalid"],
+        cwd=repository, check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Release Test"],
+        cwd=repository, check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "add", "--", ".gitignore", "source.py"],
+        cwd=repository, check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "mimosa tool state fixture"],
+        cwd=repository, check=True, capture_output=True,
+    )
+
+    before_paths = sorted(
+        path.relative_to(repository).as_posix()
+        for path in _iter_source_files(repository)
+    )
+    before_state = _git_state(repository)
+
+    hook_state = repository / ".mimosa" / "hook-state"
+    hook_state.mkdir(parents=True)
+    (hook_state / "sess-example.json").write_text("{}", encoding="utf-8")
+    ledger = repository / ".mimosa" / "finding-ledger" / "v1" / "events"
+    ledger.mkdir(parents=True)
+    (ledger / "batch-pretooluse-example.json").write_text("{}", encoding="utf-8")
+    (repository / ".mimosa" / "history").mkdir()
+    (repository / ".mimosa" / "history" / "run-example.json").write_text(
+        "{}", encoding="utf-8"
+    )
+
+    after_paths = sorted(
+        path.relative_to(repository).as_posix()
+        for path in _iter_source_files(repository)
+    )
+    after_state = _git_state(repository)
+
+    assert after_paths == before_paths, (
+        ".mimosa 工具状态的再生不得改变源码指纹覆盖的文件集合"
+    )
+    assert after_state["source_file_count"] == before_state["source_file_count"]
+    assert after_state["all_source_paths_tracked"] is True
+    assert after_state["commit_bound"] is True
+    assert before_state["commit_bound"] is True
+
+
+def test_git_binding_still_fails_closed_on_untracked_source_files(tmp_path: Path):
+    # 反向守卫：排除 .mimosa 不得演化为"排除所有 gitignored/未跟踪文件"。
+    # 普通未跟踪源码文件必须继续把 all_source_paths_tracked 拉回 false，
+    # 保持 fail-closed。
+    repository = tmp_path / "untracked-source-repository"
+    repository.mkdir()
+    (repository / "source.py").write_text("VALUE = 1\n", encoding="utf-8")
+    subprocess.run(["git", "init"], cwd=repository, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "release-test@example.invalid"],
+        cwd=repository, check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Release Test"],
+        cwd=repository, check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "add", "--", "source.py"],
+        cwd=repository, check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "tracked source fixture"],
+        cwd=repository, check=True, capture_output=True,
+    )
+
+    (repository / "untracked_module.py").write_text(
+        "UNTRACKED = True\n", encoding="utf-8"
+    )
+
+    state = _git_state(repository)
+    assert state["all_source_paths_tracked"] is False
+    assert state["commit_bound"] is False
+
+
+def test_release_source_fingerprint_excludes_mimosa_tool_state():
+    source_paths = {
+        path.relative_to(ROOT).as_posix() for path in _iter_source_files(ROOT)
+    }
+    assert not any(
+        path == ".mimosa" or path.startswith(".mimosa/") for path in source_paths
+    ), "当前仓库的源码指纹不得包含 .mimosa 工具运行状态"
+
 def test_release_manifest_is_an_ignored_generated_artifact_not_tracked_source(
     tmp_path: Path,
 ):

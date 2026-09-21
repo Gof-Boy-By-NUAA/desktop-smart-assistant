@@ -42,6 +42,11 @@ DATASETS = {
 SOURCE_PATHS = (".",)
 EXCLUDED_PARTS = {
     ".git",
+    # Mimosa security-tool runtime state (hook ledgers / session caches),
+    # regenerated during normal review activity. Excluded by name only —
+    # deliberately NOT a blanket gitignore-based rule — so any unrelated
+    # untracked source file still fails closed in _git_state.
+    ".mimosa",
     ".pytest_cache",
     ".venv",
     ".wrangler",
