@@ -211,10 +211,43 @@ class _DurableWebExecutionPreflight:
         self._thread = None
 
 
+def _web_execution_error_brief(
+    execution_state: str | None, detail: str | None, request_id: str | None
+) -> str:
+    """Build the user-facing error summary for a non-success Web execution.
+
+    类别用中文给出（初始化失败/执行已安全终止/执行结果不确定），保留
+    durable detail 作为诊断信息，并附请求编号，方便用户报障与排查，
+    取代此前统一的英文拒绝文案。
+    """
+    state = str(execution_state or "")
+    if state == "failed_safe":
+        if detail and "initialization" in detail.lower():
+            category = "Agent 初始化失败"
+        else:
+            category = "Agent 执行已安全终止"
+    elif state == "in_doubt":
+        category = "执行结果不确定"
+    elif state == "cancelled":
+        category = "请求已取消"
+    else:
+        category = "执行失败"
+    parts = [category]
+    if detail:
+        parts.append(str(detail))
+    if request_id:
+        parts.append("请求编号 %s" % request_id)
+    return "（".join([parts[0], "；".join(parts[1:])]) + ")" if len(parts) > 1 else category
+
+
 def _web_execution_state_for_terminal_delivery(
     context: Context, request_id: str
-) -> str | None:
+) -> tuple[str | None, str | None]:
     """Read (and, if necessary, fence) an authenticated Web execution claim.
+
+    Returns ``(execution_state, execution_detail)`` — the detail comes from
+    the durable settlement so terminal delivery can surface *why* an
+    execution failed instead of a generic rejection string.
 
     `send()` is the sole normal producer of the user-visible SSE `done`
     payload.  A reply reaching that point while its execution claim is still
@@ -226,21 +259,21 @@ def _web_execution_state_for_terminal_delivery(
 
     owner_id = context.get("session_owner_id") if context else None
     if not owner_id:
-        return None
+        return None, None
     try:
         store = _get_durable_sse_store()
         replay = store.replay(request_id, str(owner_id))
         if replay is None:
-            return "in_doubt"
+            return "in_doubt", None
         state = str(replay["execution_state"])
         if state != "running":
-            return state
+            return state, replay.get("execution_detail")
         lease_token = context.get("_web_execution_lease")
         runner_id = context.get("_web_execution_runner_id")
         session_id = context.get("session_id")
         fence_token = context.get("_web_session_execution_fence")
         if not all((lease_token, runner_id, session_id, fence_token)):
-            return "in_doubt"
+            return "in_doubt", None
         try:
             store.finish_execution(
                 request_id,
@@ -261,14 +294,14 @@ def _web_execution_state_for_terminal_delivery(
                 request_id,
                 exc,
             )
-        return "in_doubt"
+        return "in_doubt", "reply reached Web terminal delivery without a durable Agent execution settlement"
     except Exception as exc:
         logger.error(
             "[WebChannel] durable execution lookup failed for %s: %s",
             request_id,
             exc,
         )
-        return "in_doubt"
+        return "in_doubt", None
 
 
 class _SSEEventJournal:
@@ -2197,8 +2230,10 @@ class WebChannel(ChatChannel):
             # SSE mode: push events to SSE queue
             if request_id in self.sse_queues:
                 content = reply.content if reply.content is not None else ""
-                execution_state = _web_execution_state_for_terminal_delivery(
-                    context, request_id
+                execution_state, execution_detail = (
+                    _web_execution_state_for_terminal_delivery(
+                        context, request_id
+                    )
                 )
 
                 # The delivery state must never outrun the separately durable
@@ -2208,9 +2243,8 @@ class WebChannel(ChatChannel):
                 if execution_state == "in_doubt":
                     self.sse_queues[request_id].put({
                         "type": "error",
-                        "message": (
-                            "Agent/tool execution outcome is unconfirmed; "
-                            "the request will not be retried automatically."
+                        "message": _web_execution_error_brief(
+                            execution_state, execution_detail, request_id
                         ),
                         "request_id": request_id,
                         "timestamp": time.time(),
@@ -2219,9 +2253,8 @@ class WebChannel(ChatChannel):
                 if execution_state == "failed_safe":
                     self.sse_queues[request_id].put({
                         "type": "error",
-                        "message": (
-                            "Agent execution was rejected before it could "
-                            "complete safely."
+                        "message": _web_execution_error_brief(
+                            execution_state, execution_detail, request_id
                         ),
                         "request_id": request_id,
                         "timestamp": time.time(),
@@ -3137,7 +3170,11 @@ class WebChannel(ChatChannel):
                             "stream": False,
                             "duplicate": claim_status == "duplicate",
                             "execution_state": execution_state,
-                            "message": "prior request did not reach a safely retryable terminal outcome",
+                            "message": _web_execution_error_brief(
+                                execution_state,
+                                execution_claim.get("execution_detail"),
+                                execution_claim.get("request_id"),
+                            ),
                         },
                         ensure_ascii=False,
                     )
@@ -4069,8 +4106,84 @@ class HealthHandler:
         return json.dumps({"status": "ok"})
 
 
+# 每个 chat provider 进行真实对话所必需的 API Key 配置字段
+# （bot_type → 配置键），与 models/bot_factory.py 的 provider 路由对应。
+# custom / custom:<id> 不在此表：其凭据经生产解析器
+# models/custom_provider.resolve_custom_credentials 解析（custom:<id> 取
+# custom_providers 选中条目，legacy 取 custom_api_key），不能错查
+# open_ai_api_key——否则有效 custom 凭据会被误判为未配置（假阴性），
+# 仅配置了 open_ai Key 时又被误判为可对话（假阳性）。
+_CHAT_PROVIDER_KEY_FIELDS = {
+    "openAI": "open_ai_api_key",
+    "openai": "open_ai_api_key",
+    "chatGPT": "open_ai_api_key",
+    "chatGPTOnAzure": "open_ai_api_key",
+    "baidu": "baidu_wenxin_api_key",
+    "qianfan": "qianfan_api_key",
+    "xunfei": "xunfei_api_key",
+    "linkai": "linkai_api_key",
+    "claudeAPI": "claude_api_key",
+    "qwen": "dashscope_api_key",
+    "dashscope": "dashscope_api_key",
+    "gemini": "gemini_api_key",
+    "zhipu": "zhipu_ai_api_key",
+    "moonshot": "moonshot_api_key",
+    "minimax": "minimax_api_key",
+    "deepseek": "deepseek_api_key",
+    "mimo": "mimo_api_key",
+    "modelscope": "modelscope_api_key",
+    "doubao": "ark_api_key",
+}
+
+# 与本文件凭据检测相同的占位 Key 集合，占位值不算已配置。
+_API_KEY_PLACEHOLDER_VALUES = {"YOUR API KEY", "YOUR_API_KEY"}
+
+
+def _chat_model_config_ok() -> bool:
+    """当前聊天模型是否具备可对话的本地配置（local_preflight）。
+
+    有效 model 非空；按 Bridge 生产解析规则选中的 provider 存在于映射表
+    （custom 走生产凭据解析器，有效 model = provider model 或全局 model，
+    与 chat_gpt_bot.py 的优先级一致）；必需的 API Key 非空且非占位值。
+    只读取本地配置，不发起任何模型 API 调用；真实鉴权、消息、
+    streaming、usage 属于更高等级验证（P3），不在本探测范围内。
+    """
+    model = conf().get("model")
+    try:
+        from bridge.bridge import Bridge
+
+        bot_type = Bridge().btype.get("chat") or ""
+    except Exception:
+        return False
+    if bot_type == "custom" or bot_type.startswith("custom:"):
+        from models.custom_provider import resolve_custom_credentials
+
+        api_key, _api_base, provider_model = resolve_custom_credentials()
+        effective_model = provider_model or model
+    else:
+        key_field = _CHAT_PROVIDER_KEY_FIELDS.get(bot_type)
+        if not key_field:
+            return False
+        api_key = conf().get(key_field)
+        effective_model = model
+    if not isinstance(effective_model, str) or not effective_model.strip():
+        return False
+    if not isinstance(api_key, str) or not api_key.strip():
+        return False
+    return api_key.strip() not in _API_KEY_PLACEHOLDER_VALUES
+
+
 class ReadinessHandler:
-    """Dependency-aware readiness probe; liveness remains /api/health."""
+    """Dependency-aware readiness probe; liveness remains /api/health.
+
+    两个状态刻意分开：/api/health 只证明页面/监听器可访问；
+    /api/readiness 证明对话链路可用——其中 agent_initialization 走
+    与真实会话相同的 AgentBridge 默认 Agent 初始化（含记忆初始化）；
+    chat_model_config 只做本地配置预检（有效模型、选中 provider、
+    非空且非占位 API Key），不调用付费模型 API。任一检查失败时返回
+    not_ready/503，页面仍可访问但对话不可用。响应 scope 恒为
+    local_preflight：真实鉴权、消息、streaming、usage 验证属于 P3。
+    """
 
     def GET(self):
         web.header('Content-Type', 'application/json; charset=utf-8')
@@ -4080,6 +4193,8 @@ class ReadinessHandler:
             "workspace_writable": False,
             "disk_space": False,
             "queues_bounded": False,
+            "agent_initialization": False,
+            "chat_model_config": False,
         }
         try:
             from agent.memory import get_conversation_store
@@ -4109,6 +4224,20 @@ class ReadinessHandler:
             )
         except Exception:
             checks["queues_bounded"] = False
+        try:
+            # 与真实对话相同的初始化入口（web_channel 自身投递路径使用的
+            # Bridge().get_agent_bridge()）；默认 Agent 初始化包含记忆/工具
+            # 链，成功后进程内有缓存，重复探测代价很低。
+            from bridge.agent_bridge import Bridge
+
+            checks["agent_initialization"] = (
+                Bridge().get_agent_bridge().get_agent() is not None
+            )
+        except Exception as exc:
+            logger.error("[WebChannel] readiness agent init probe failed: %s", exc)
+            checks["agent_initialization"] = False
+        # 只读本地配置的聊天模型预检，不产生任何外部调用。
+        checks["chat_model_config"] = _chat_model_config_ok()
         ready = all(checks.values())
         if not ready:
             try:
@@ -4117,7 +4246,11 @@ class ReadinessHandler:
                 pass
         return json.dumps({
             "status": "ready" if ready else "not_ready",
+            # 本探测只做本地检查（local_preflight），不调用任何付费模型
+            # API；真实鉴权与对话能力验证属于更高等级（P3）。
+            "scope": "local_preflight",
             "checks": checks,
+            "conversation_ready": ready,
         }, ensure_ascii=False)
 
 
@@ -8640,5 +8773,3 @@ class VersionHandler:
         web.header('Content-Type', 'application/json; charset=utf-8')
         from cli import __version__
         return json.dumps({"version": __version__})
-
-

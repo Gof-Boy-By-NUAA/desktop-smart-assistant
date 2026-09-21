@@ -478,16 +478,31 @@ class SearchFiles(BaseTool):
         glob_filter = ""
         if opts.file_glob and opts.file_glob != "*":
             glob_filter = f"-Filter '{opts.file_glob}' "
-        prune = "" if opts.no_ignore else (
-            f"| Where-Object {{ $_.FullName -notmatch '\\\\({'|'.join(_SKIP_DIR_NAMES)})\\\\' }} "
-        )
+        # 剪枝只作用于搜索根目录以下的相对路径。FullName 是绝对路径：当根
+        # 目录本身位于 build 等忽略名祖先目录之下时，每个结果的绝对路径都
+        # 含 \build\，忽略正则会把全部结果整体误删（本后端特有缺陷）。
+        # 相对路径用 canonical root 计算：_resolve_path 对绝对路径原样保留，
+        # 根可合法含 .. 段，而 Get-ChildItem 的 FullName 是规范化形态；
+        # 未规范化文本的 Length 会与 FullName 前缀不一致，Substring 越界
+        # 抛异常、整条管道被清空。Get-Item 经同一文件系统 provider 解析，
+        # 得到与枚举结果一致的规范化前缀，枚举与切片共用同一 $root。
+        # 名称经 re.escape 后进入 .NET 正则，' 转义为 PowerShell 字面量。
+        root_literal = opts.root.replace("'", "''")
+        prune = ""
+        if not opts.no_ignore:
+            names = "|".join(re.escape(name) for name in _SKIP_DIR_NAMES)
+            prune = (
+                f"| Where-Object {{ $_.FullName.Substring($root.Length) "
+                f"-notmatch '^(?:{names})\\\\|\\\\(?:{names})\\\\' }} "
+            )
         script = (
             # Force UTF-8 on stdout so non-ASCII file names/content survive the
             # trip to our subprocess reader (Windows PowerShell defaults to the
             # system code page, e.g. cp936, which we'd misread as UTF-8 -> mojibake).
             f"[Console]::OutputEncoding=[Text.Encoding]::UTF8;"
             f"$ErrorActionPreference='SilentlyContinue';"
-            f"Get-ChildItem -LiteralPath '{opts.root}' -Recurse -File {glob_filter}"
+            f"$root = (Get-Item -LiteralPath '{root_literal}').FullName;"
+            f"Get-ChildItem -LiteralPath $root -Recurse -File {glob_filter}"
             f"{prune}"
             f"| Select-String -Pattern @'\n{opts.pattern}\n'@ {ci} "
             f"| ForEach-Object {{ \"$($_.Path)`t$($_.LineNumber):$($_.Line)\" }}"

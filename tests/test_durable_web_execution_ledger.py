@@ -1490,7 +1490,10 @@ def test_duplicate_in_doubt_web_post_is_error_not_false_success(monkeypatch, tmp
         "stream": False,
         "duplicate": True,
         "execution_state": "in_doubt",
-        "message": "prior request did not reach a safely retryable terminal outcome",
+        "message": (
+            "执行结果不确定（execution lease expired; external side effect is unconfirmed；"
+            "请求编号 web-post-1)"
+        ),
     }
     assert len(_NoStartThread.started) == 1
 

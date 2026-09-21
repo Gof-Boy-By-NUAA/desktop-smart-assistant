@@ -952,6 +952,15 @@ class KnowledgeService:
         :raises FileNotFoundError: if file does not exist
         """
         rel_path, full_path = self._resolve_path(rel_path, kind="document")
+        if rel_path in self.PROTECTED_FILES:
+            # 系统文件是工作区物理文件，永远不会是治理文档；必须先于
+            # 治理查询短路——find_by_logical_path 会把这两个名字当作
+            # 无效 projection_path 直接抛错，使下方兜底分支不可达。
+            if not full_path.is_file():
+                raise FileNotFoundError(f"file not found: {rel_path}")
+            with open(full_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            return {"content": content, "path": rel_path}
         record = self._find_record(rel_path)
         if record is not None:
             return {
@@ -961,16 +970,9 @@ class KnowledgeService:
                 "version": record.version,
                 "content_hash": record.content_hash,
             }
-        if rel_path not in self.PROTECTED_FILES:
-            raise FileNotFoundError(
-                f"governed knowledge document not found: {rel_path}"
-            )
-        if not full_path.is_file():
-            raise FileNotFoundError(f"file not found: {rel_path}")
-
-        with open(full_path, "r", encoding="utf-8") as f:
-            content = f.read()
-        return {"content": content, "path": rel_path}
+        raise FileNotFoundError(
+            f"governed knowledge document not found: {rel_path}"
+        )
 
     # ------------------------------------------------------------------
     # graph — nodes and links for visualization

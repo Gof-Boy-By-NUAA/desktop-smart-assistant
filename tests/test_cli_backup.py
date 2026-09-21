@@ -97,13 +97,20 @@ def test_fresh_restore_ignores_archive_controlled_destinations(tmp_path, monkeyp
     archive = tmp_path / "cow-backup.zip"
     create_backup_archive(archive, source_data, source_workspace)
 
+    # 默认工作区自 abe8e30 起是 CWD 相对的 ./workspace（不再是 ~/cow）。
+    # 必须把 CWD 隔离进 tmp_path：早期版本只 monkeypatch HOME，默认路径
+    # 变为 CWD 相对后隔离失效，restore 把测试数据写进了真实工作区。
     fake_home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.chdir(tmp_path)
     target_data = tmp_path / "target-data"
     result = restore_backup_archive(archive, target_data)
 
-    assert result["workspace"] == str((fake_home / "cow").resolve())
-    assert (fake_home / "cow" / "MEMORY.md").exists()
+    expected_workspace = (tmp_path / "workspace").resolve()
+    assert result["workspace"] == str(expected_workspace)
+    assert (expected_workspace / "MEMORY.md").read_text(encoding="utf-8") == "portable\n"
+    # 新默认不依赖 HOME：fake_home 下不得产生任何文件
+    assert not fake_home.exists()
     assert not archive_workspace.exists()
     assert (target_data / "user_datas.pkl").read_bytes() == b"legacy"
     restored_config = json.loads((target_data / "config.json").read_text(encoding="utf-8"))

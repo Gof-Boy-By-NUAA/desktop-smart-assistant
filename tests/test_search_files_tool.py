@@ -742,3 +742,80 @@ def test_invalid_target_is_rejected(tmp_path):
     result = _make_tool(tmp_path).execute({"pattern": "x", "target": "nope"})
     assert result.status == "error"
     assert "target must be" in str(result.result)
+
+
+def test_powershell_backend_keeps_results_when_root_sits_under_build_ancestor(tmp_path):
+    # P0 批次二回归：PowerShell 后端的忽略剪枝曾对绝对路径 FullName 匹配
+    # \build\ 等忽略名，当搜索根目录本身位于名为 build 的祖先目录之下时，
+    # 每个结果的绝对路径都含 \build\，全部结果被误删。中文路径与中文内容
+    # 本身没有问题（本用例全程使用中文目录与中文内容验证）。
+    # 忽略规则修复后必须只作用于"搜索根目录以下的相对路径"。
+    # 直接驱动真实 _backend_powershell：生成脚本 → 真实 PowerShell 子进程 →
+    # 真实中文临时文件；被测剪枝逻辑就在该方法内部。
+    import sys
+
+    from agent.tools.search_files.search_files import _SearchOptions
+
+    if sys.platform != "win32":
+        pytest.skip("PowerShell 后端仅存在于 Windows")
+
+    _write(tmp_path, "build/中文工作区/笔记.md", "中文内容标记 独角兽77\n")
+    # 负对照：搜索根目录之下的 build 子目录仍必须被忽略规则剪掉，
+    # 证明修复没有把忽略规则整体关掉。
+    _write(tmp_path, "build/中文工作区/build/泄漏.md", "中文内容标记 独角兽77\n")
+
+    root_str = str(tmp_path / "build" / "中文工作区")
+    opts = _SearchOptions(
+        pattern="独角兽77",
+        root=root_str,
+        file_glob="*",
+        output_mode="content",
+        ignore_case=False,
+        no_ignore=False,
+        max_results=50,
+        deadline=time.monotonic() + 30,
+    )
+    tool = _make_tool(tmp_path)
+    outcome = tool._backend_powershell(opts)
+
+    files = {row["file"] for row in outcome.rows}
+    assert "笔记.md" in files, (
+        "根目录位于 build 祖先目录之下时，结果被绝对路径剪枝整体误删"
+    )
+    assert not any("泄漏" in name for name in files), (
+        "根目录之下的 build 子目录仍应被忽略规则剪掉"
+    )
+
+
+def test_powershell_backend_handles_root_with_dotdot_segments(tmp_path):
+    # P1 回归：_resolve_path 对绝对路径原样保留，根路径可合法包含 .. 段。
+    # Get-ChildItem 返回的 FullName 是规范化形态，与未规范化原始文本的
+    # Length 不一致时，Substring 越界抛异常、整条管道被清空（返回空结果）。
+    # 修复要求：先取得 canonical root，再同时用于枚举与相对路径计算。
+    import sys
+
+    from agent.tools.search_files.search_files import _SearchOptions
+
+    if sys.platform != "win32":
+        pytest.skip("PowerShell 后端仅存在于 Windows")
+
+    _write(tmp_path, "中文目录/文档.md", "中文标记 独角兽77\n")
+
+    root_with_dotdot = str(tmp_path / "中文目录" / ".." / "中文目录")
+    opts = _SearchOptions(
+        pattern="独角兽77",
+        root=root_with_dotdot,
+        file_glob="*",
+        output_mode="content",
+        ignore_case=False,
+        no_ignore=False,
+        max_results=50,
+        deadline=time.monotonic() + 30,
+    )
+    tool = _make_tool(tmp_path)
+    outcome = tool._backend_powershell(opts)
+
+    files = {row["file"] for row in outcome.rows}
+    assert "文档.md" in files, (
+        "根路径含合法 .. 段时，Substring 基于未规范化长度清空了全部结果"
+    )

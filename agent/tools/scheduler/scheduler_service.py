@@ -24,6 +24,19 @@ def _parse_naive_local(iso_str: str) -> datetime:
     return dt
 
 
+class TaskDeferredBeforeStart(Exception):
+    """The executor proved that nothing was attempted for this occurrence.
+
+    Raised by execute callbacks when a pre-flight readiness probe failed
+    (e.g. the target web session has no queue yet because the process just
+    restarted and no inbound message has arrived). Because no external side
+    effect can have started, the scheduler may safely release the durable
+    claim and retry on a later tick. This is fundamentally different from a
+    ``False`` callback result, which means the side-effect outcome is
+    uncertain and must stay in_doubt for operator review.
+    """
+
+
 class SchedulerService:
     """
     Background service that executes scheduled tasks
@@ -178,6 +191,22 @@ class SchedulerService:
 
                     try:
                         ok, detail = self._execute_task(task)
+                    except TaskDeferredBeforeStart as defer_reason:
+                        # Nothing was attempted (the readiness probe failed
+                        # before any side effect), so the durable claim can be
+                        # safely abandoned. The schedule is intentionally left
+                        # untouched: the next tick re-claims the same overdue
+                        # occurrence once the channel becomes ready.
+                        self.task_store.release_execution(
+                            task["id"],
+                            claim["execution_id"],
+                            claim["lease_token"],
+                        )
+                        logger.info(
+                            f"[Scheduler] Task {task['id']} deferred before "
+                            f"start ({defer_reason}); will retry on a later tick"
+                        )
+                        continue
                     except BaseException:
                         # Do not release/retry a claim after an unexpected
                         # BaseException. The durable 'running' state is safer
@@ -294,7 +323,21 @@ class SchedulerService:
         def _run():
             try:
                 logger.info(f"[Scheduler] Manually executing task: {task_id} - {task.get('name', '')}")
-                ok, detail = self._execute_task(task)
+                try:
+                    ok, detail = self._execute_task(task)
+                except TaskDeferredBeforeStart as defer_reason:
+                    # Nothing was attempted; release the claim so the next
+                    # manual click (or scheduled tick) can run the task.
+                    self.task_store.release_execution(
+                        task_id,
+                        claim["execution_id"],
+                        claim["lease_token"],
+                    )
+                    logger.info(
+                        f"[Scheduler] Manual task {task_id} deferred before "
+                        f"start ({defer_reason}); no execution recorded"
+                    )
+                    return
                 self.task_store.finish_execution(
                     task_id,
                     claim["execution_id"],
@@ -488,7 +531,8 @@ class SchedulerService:
         side-effect result is unknown, rather than permission to retry; an
         external service may have accepted the request immediately before the
         client observed an error. Callback None retains legacy success
-        behavior.
+        behavior. TaskDeferredBeforeStart propagates to the caller so the
+        claim can be released without recording an outcome.
         """
         try:
             result = self.execute_callback(task)
@@ -498,6 +542,8 @@ class SchedulerService:
                     "status is unconfirmed"
                 )
             return True, None
+        except TaskDeferredBeforeStart:
+            raise
         except Exception as e:
             logger.error(f"[Scheduler] Error executing task {task['id']}: {e}")
             return False, (

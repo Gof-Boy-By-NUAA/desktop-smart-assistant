@@ -248,6 +248,16 @@ class ZHIPUAIBot(Bot, ZhipuAIImage):
             elif "glm-4.7" in request_params["model"]:
                 # Enable thinking by default for GLM-4.7
                 request_params["thinking"] = {"type": "disabled"}
+
+            # Reasoning depth under thinking mode. agent_bridge injects
+            # reasoning_effort (high/max) only when enable_thinking is on;
+            # mirror that gate so the field is never sent for plain calls.
+            reasoning_effort = kwargs.get("reasoning_effort")
+            if (
+                request_params.get("thinking", {}).get("type") == "enabled"
+                and reasoning_effort in ("high", "max")
+            ):
+                request_params["reasoning_effort"] = reasoning_effort
             
             # Make API call with ZhipuAI SDK
             if stream:

@@ -10,6 +10,7 @@ from common.log import logger
 from common.utils import expand_path
 from bridge.context import Context, ContextType
 from bridge.reply import Reply, ReplyType
+from agent.tools.scheduler.scheduler_service import TaskDeferredBeforeStart
 
 # Global scheduler service instance
 _scheduler_service = None
@@ -57,9 +58,9 @@ def init_scheduler(agent_bridge) -> bool:
                 _task_store = TaskStore(store_path)
                 logger.debug(f"[Scheduler] Task store initialized: {store_path}")
 
-            # Create execute callback. Returns True on success, False to ask
-            # the scheduler to retry on the next tick (e.g. channel not yet
-            # ready right after process start).
+            # Create execute callback. True = delivered; False = outcome
+            # uncertain (kept in_doubt); TaskDeferredBeforeStart = nothing was
+            # attempted, the service releases the claim and retries later.
             def execute_task_callback(task: dict):
                 try:
                     action = task.get("action", {})
@@ -73,7 +74,14 @@ def init_scheduler(agent_bridge) -> bool:
                             f"'{channel_type}' not ready for receiver={receiver} "
                             f"(no inbound msg cached since restart?); deferring"
                         )
-                        return False
+                        # The readiness probe runs before any side effect, so
+                        # deferral is provably safe — unlike a False result,
+                        # which would leave an in_doubt row blocking the task
+                        # forever after a restart.
+                        raise TaskDeferredBeforeStart(
+                            f"channel '{channel_type}' not ready for "
+                            f"receiver={receiver}"
+                        )
 
                     if action_type == "agent_task":
                         return _execute_agent_task(task, agent_bridge)
@@ -86,6 +94,10 @@ def init_scheduler(agent_bridge) -> bool:
                     else:
                         logger.warning(f"[Scheduler] Unknown action type: {action_type}")
                         return True
+                except TaskDeferredBeforeStart:
+                    # Must pass through: the outer handler below would flatten
+                    # it into an uncertain False.
+                    raise
                 except Exception as e:
                     logger.error(f"[Scheduler] Error executing task {task.get('id')}: {e}")
                     return False
