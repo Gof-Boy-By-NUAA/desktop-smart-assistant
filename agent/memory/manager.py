@@ -8,6 +8,7 @@ import os
 import json
 import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional, Dict, Any
 from pathlib import Path
 import hashlib
@@ -22,6 +23,12 @@ from agent.memory.summarizer import MemoryFlushManager, create_memory_files_if_n
 
 # 同一进程内可能为多个会话创建 MemoryManager，共用锁可避免恢复与写入交错。
 _GOVERNED_RUNTIME_LOCK = threading.RLock()
+
+# 恢复阶段核验/重建投影的并行度。投影文件彼此独立，open/fsync 在本机有
+# 毫秒级开销；串行逐条处理曾把 848 文档恢复拖到 30-57 秒，低于正式性能门。
+# 逐条校验语义不变（每条仍核验，重写仍带 fsync+原子替换+写后重读），仅
+# 消除串行等待。
+_RESTORE_PROJECTION_WORKERS = 8
 
 
 class MemoryManager:
@@ -771,12 +778,28 @@ class MemoryManager:
                         )
                     )
                     active_ids = {record.memory_id for record in records}
-                    for record in records:
-                        if not self._governed_projection_matches(record):
-                            self._write_governed_projection(record)
+
+                    def _repair_governed_projection(record) -> None:
+                        # 单条记录的核验与修复语义：匹配即过；不匹配则原子
+                        # 重写并做写后重读校验，失败即抛错阻断初始化。
+                        if self._governed_projection_matches(record):
+                            return
+                        self._write_governed_projection(record)
                         if not self._governed_projection_matches(record):
                             raise RuntimeError(
                                 "治理记忆投影重建后内容不一致"
+                            )
+
+                    if records:
+                        with ThreadPoolExecutor(
+                            max_workers=_RESTORE_PROJECTION_WORKERS
+                        ) as repair_pool:
+                            # list() 强制消费全部结果；异常按记录顺序在主
+                            # 线程抛出，与串行处理的行为一致。
+                            list(
+                                repair_pool.map(
+                                    _repair_governed_projection, records
+                                )
                             )
 
                     projection_dir = self._governed_projection_dir()
@@ -1003,6 +1026,10 @@ class MemoryManager:
 
         self._assert_runtime_tenant(record.tenant_id)
         projection_path = self._governed_projection_path(record.memory_id)
+        if not projection_path.exists():
+            # 缺失投影直接判定不匹配：一次 stat 即可，无需走到 open 的
+            # 异常路径（该路径在本机与正常 open 同价）。
+            return False
         try:
             actual = projection_path.read_text(encoding="utf-8")
         except (OSError, UnicodeError):
