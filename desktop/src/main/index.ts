@@ -29,7 +29,7 @@ const VITE_DEV_PORTS = [5173, 5174, 5175, 5176]
 // after it verifies an owner/path-bound backend capability over pinned TLS.
 protocol.registerSchemesAsPrivileged([
   {
-    scheme: 'smart_assistant',
+    scheme: 'smart-assistant',
     privileges: {
       standard: true,
       secure: true,
@@ -301,7 +301,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function isTrustedRendererUrl(rawUrl: string): boolean {
   try {
     const parsed = new URL(rawUrl)
-    if (isDev) {
+    if (isDev && parsed.protocol === 'http:') {
       return parsed.protocol === 'http:' && parsed.hostname === 'localhost' && VITE_DEV_PORTS.includes(Number(parsed.port))
     }
     if (parsed.protocol !== 'file:') return false
@@ -440,8 +440,8 @@ function resourcePathFromUrl(rawUrl: string): string | null {
   try {
     const parsed = new URL(rawUrl)
     if (
-      parsed.protocol !== 'smart_assistant:' ||
-      parsed.hostname !== 'backend' ||
+      parsed.protocol !== 'smart-assistant:' ||
+      parsed.host !== 'backend' || parsed.username || parsed.password ||
       (!parsed.pathname.startsWith('/file/') && !parsed.pathname.startsWith('/preview/'))
     ) return null
     return `${parsed.pathname}${parsed.search}`
@@ -451,7 +451,7 @@ function resourcePathFromUrl(rawUrl: string): string | null {
 }
 
 function setupBackendProtocol() {
-  protocol.handle('smart_assistant', async (request) => {
+  protocol.handle('smart-assistant', async (request) => {
     const resourcePath = resourcePathFromUrl(request.url)
     if (!resourcePath || (request.method !== 'GET' && request.method !== 'HEAD') || !pythonBackend) {
       return new Response('Not found', { status: 404 })

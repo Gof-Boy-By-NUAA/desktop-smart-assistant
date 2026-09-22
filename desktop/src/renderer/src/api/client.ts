@@ -31,7 +31,7 @@ interface ApiResult {
   }
 }
 
-const BACKEND_ORIGIN = 'smart_assistant://backend'
+const BACKEND_ORIGIN = 'smart-assistant://backend'
 
 /** Minimum EventSource surface used by the desktop UI. */
 export interface BackendEventSource {
@@ -435,9 +435,11 @@ class ApiClient {
   }
 
   async getHistory(sessionId: string, page = 1, pageSize = 20): Promise<HistoryPage> {
-    return this.request<{ status: string } & HistoryPage>(
+    const result = await this.request<{ status: string; message?: string } & HistoryPage>(
       `/api/history?session_id=${encodeURIComponent(sessionId)}&page=${page}&page_size=${pageSize}`
     )
+    if (result.status !== 'success') throw new Error(result.message || 'History request failed')
+    return result
   }
 
   // ---------------------------------------------------------

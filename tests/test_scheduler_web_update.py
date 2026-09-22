@@ -9,25 +9,8 @@ from unittest.mock import Mock, patch
 
 from agent.tools.scheduler.task_store import TaskStore
 
-# Keep this unit test independent from the optional web.py dependency.
-if "web" not in sys.modules:
-    web_stub = types.ModuleType("web")
-    web_stub.HTTPError = type("HTTPError", (Exception,), {})
-    web_stub.cookies = lambda: {}
-    web_stub.header = lambda *args, **kwargs: None
-    web_stub.data = lambda: b"{}"
-    web_stub.input = lambda **kwargs: types.SimpleNamespace(**kwargs)
-    web_stub.setcookie = lambda *args, **kwargs: None
-    web_stub.seeother = lambda *args, **kwargs: Exception("seeother")
-    web_stub.notfound = lambda *args, **kwargs: Exception("notfound")
-    web_stub.badrequest = lambda *args, **kwargs: Exception("badrequest")
-    web_stub.application = lambda *args, **kwargs: types.SimpleNamespace(wsgifunc=lambda: None)
-    web_stub.httpserver = types.SimpleNamespace(
-        LogMiddleware=type("LogMiddleware", (), {"log": lambda *args, **kwargs: None}),
-        StaticMiddleware=lambda app: app,
-        WSGIServer=lambda *args, **kwargs: types.SimpleNamespace(serve_forever=lambda: None),
-    )
-    sys.modules["web"] = web_stub
+# 使用已声明的真实 web.py 依赖；仅在用例内隔离非目标依赖。
+import web
 
 from channel.web import web_channel
 

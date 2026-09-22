@@ -39,7 +39,8 @@ def _ssrf_protection_enabled() -> bool:
 def _is_blocked_ip(ip: "ipaddress._BaseAddress") -> bool:
     """Return True if the address is not safe to connect to (non-public)."""
     return (
-        ip.is_private
+        not ip.is_global
+        or ip.is_private
         or ip.is_loopback
         or ip.is_link_local
         or ip.is_reserved

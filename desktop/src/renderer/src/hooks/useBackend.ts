@@ -3,7 +3,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 // This is an opaque custom-protocol origin, not a network endpoint. The
 // renderer never learns or probes the backend's loopback port; Electron main
 // owns a per-launch pinned-TLS channel and exposes only narrow IPC methods.
-const BACKEND_ORIGIN = 'smart_assistant://backend'
+const BACKEND_ORIGIN = 'smart-assistant://backend'
 
 interface BackendState {
   status: 'connecting' | 'ready' | 'error'

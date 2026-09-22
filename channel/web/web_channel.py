@@ -22,6 +22,9 @@ from urllib.parse import quote
 
 import web
 
+# 内嵌服务不能把异常局部变量和凭据展示给客户端；服务端日志仍保留堆栈。
+web.config.debug = False
+
 from bridge.context import *
 from bridge.reply import Reply, ReplyType
 from channel.chat_channel import ChatChannel, check_prefix
@@ -822,7 +825,11 @@ def _verify_auth_subject_token(token: str) -> Optional[str]:
     if len(parts) != 3:
         return None
     version, subject_id, signature = parts
-    if version != _AUTH_SUBJECT_VERSION or not _AUTH_SUBJECT_RE.fullmatch(subject_id):
+    if (
+        version != _AUTH_SUBJECT_VERSION
+        or not _AUTH_SUBJECT_RE.fullmatch(subject_id)
+        or not re.fullmatch(r"[0-9a-f]{64}", signature)
+    ):
         return None
     payload = f"{version}.{subject_id}"
     if not hmac.compare_digest(signature, _subject_signature(payload)):
@@ -869,6 +876,8 @@ def _parse_auth_token(token: str, *, require_fresh: bool = True):
     if version != _AUTH_TOKEN_VERSION:
         return None
     if not _AUTH_SUBJECT_RE.fullmatch(subject_id) or not _AUTH_SUBJECT_RE.fullmatch(nonce):
+        return None
+    if not re.fullmatch(r"[0-9a-f]{64}", signature):
         return None
     try:
         timestamp = int(iat_hex, 16)
@@ -4420,7 +4429,13 @@ class AuthLoginHandler:
             return json.dumps({"status": "error", "message": "Invalid request"})
         password = str(data.get("password", "") or "")
         expected = _get_web_password()
-        if not hmac.compare_digest(password, expected):
+        try:
+            password_matches = hmac.compare_digest(
+                password.encode("utf-8"), expected.encode("utf-8")
+            )
+        except UnicodeEncodeError:
+            password_matches = False
+        if not password_matches:
             _record_login_failure(client_key)
             logger.warning("[WebChannel] Invalid login attempt")
             return json.dumps({"status": "error", "message": "Wrong password"})
@@ -8359,12 +8374,12 @@ class AssetsHandler:
 
             # 获取当前文件的绝对路径
             current_dir = os.path.dirname(os.path.abspath(__file__))
-            static_dir = os.path.join(current_dir, 'static')
+            static_dir = os.path.realpath(os.path.join(current_dir, 'static'))
 
-            full_path = os.path.normpath(os.path.join(static_dir, file_path))
+            full_path = os.path.realpath(os.path.join(static_dir, file_path))
 
-            # 安全检查：确保请求的文件在static目录内
-            if not os.path.abspath(full_path).startswith(os.path.abspath(static_dir)):
+            # 按目录归属检查，拒绝同前缀相邻目录及指向目录外的链接。
+            if os.path.commonpath([static_dir, full_path]) != static_dir:
                 logger.error(f"Security check failed for path: {full_path}")
                 raise web.notfound()
 

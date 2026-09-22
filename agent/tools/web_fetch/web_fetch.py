@@ -195,11 +195,13 @@ class WebFetch(BaseTool):
 
     # ---- Document fetching ----
 
-    def _fetch_document(self, url: str) -> ToolResult:
+    def _fetch_document(self, url: str, suffix: Optional[str] = None) -> ToolResult:
         """Download a document file and extract its text content."""
-        suffix = _get_url_suffix(url)
+        suffix = suffix or _get_url_suffix(url)
         parsed = urlparse(url)
         filename = self._extract_filename(url)
+        if suffix and not filename.lower().endswith(suffix):
+            filename += suffix
         tmp_dir = self._ensure_tmp_dir()
 
         local_path = os.path.join(tmp_dir, filename)
@@ -456,17 +458,10 @@ class WebFetch(BaseTool):
                 break
 
         if detected_suffix and detected_suffix in ALL_DOC_SUFFIXES:
-            # Re-fetch as document
-            return self._fetch_document(url if _get_url_suffix(url) in ALL_DOC_SUFFIXES
-                                        else self._rewrite_url_with_suffix(url, detected_suffix))
+            # 扩展名只用于本地文件和解析器，不得改写服务端路由或签名 URL。
+            response.close()
+            return self._fetch_document(url, suffix=detected_suffix)
         return ToolResult.fail(f"Error: URL returned binary content ({content_type}), not a supported document type")
-
-    @staticmethod
-    def _rewrite_url_with_suffix(url: str, suffix: str) -> str:
-        """Append a suffix to the URL path so _get_url_suffix works correctly."""
-        parsed = urlparse(url)
-        new_path = parsed.path.rstrip("/") + suffix
-        return parsed._replace(path=new_path).geturl()
 
     # ---- HTML extraction (unchanged) ----
 
