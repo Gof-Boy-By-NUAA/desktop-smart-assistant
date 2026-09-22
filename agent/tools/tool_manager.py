@@ -142,6 +142,11 @@ class ToolManager:
                                         "MemoryWriteTool",
                                         "MemoryRevokeTool",
                                         "MemoryRollbackTool",
+                                        "KnowledgeSearchTool",
+                                        "KnowledgeGetTool",
+                                        "KnowledgeWriteTool",
+                                        "KnowledgeRevokeTool",
+                                        "KnowledgeRollbackTool",
                                     ]:
                                         logger.debug(f"Skipped tool {class_name} (requires memory_manager)")
                                         continue
@@ -216,6 +221,11 @@ class ToolManager:
                                     "MemoryWriteTool",
                                     "MemoryRevokeTool",
                                     "MemoryRollbackTool",
+                                    "KnowledgeSearchTool",
+                                    "KnowledgeGetTool",
+                                    "KnowledgeWriteTool",
+                                    "KnowledgeRevokeTool",
+                                    "KnowledgeRollbackTool",
                                 ]:
                                     logger.debug(f"Skipped tool {attr_name} (requires memory_manager)")
                                     continue

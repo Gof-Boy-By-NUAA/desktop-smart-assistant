@@ -150,7 +150,10 @@ def _validate_archive(archive: zipfile.ZipFile) -> dict:
     for info in archive.infolist():
         name = info.filename
         path = PurePosixPath(name)
-        if not name or path.is_absolute() or ".." in path.parts or "\\" in name:
+        if (
+            not name or path.is_absolute() or ".." in path.parts or "\\" in name
+            or any(Path(part).drive for part in path.parts)
+        ):
             raise ValueError(f"unsafe archive path: {name!r}")
         mode = (info.external_attr >> 16) & 0o170000
         if mode == stat.S_IFLNK:

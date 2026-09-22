@@ -19,16 +19,8 @@ import unittest
 # Add project root to path.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-# Stub the web.py framework so web_channel imports without the dependency.
-if "web" not in sys.modules:
-    _web_stub = types.ModuleType("web")
-    _web_stub.HTTPError = type("HTTPError", (Exception,), {})
-    _web_stub.header = lambda *a, **k: None
-    _web_stub.data = lambda: b"{}"
-    _web_stub.ctx = types.SimpleNamespace()
-    _web_stub.setcookie = lambda *a, **k: None
-    _web_stub.notfound = lambda *a, **k: None
-    sys.modules["web"] = _web_stub
+# 使用真实框架，避免导入顺序决定是否把后续 HTTP 测试替换为 Stub。
+import web
 
 import config as config_module
 from config import Config

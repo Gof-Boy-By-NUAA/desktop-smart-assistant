@@ -44,6 +44,7 @@ const SUGGESTIONS: {
 
 const ChatPage: React.FC<ChatPageProps> = ({ baseUrl }) => {
   const activeId = useSessionStore((s) => s.activeId)
+  const draftId = useSessionStore((s) => s.draftId)
   const newSession = useSessionStore((s) => s.newSession)
   const loadSessions = useSessionStore((s) => s.loadSessions)
 
@@ -77,10 +78,10 @@ const ChatPage: React.FC<ChatPageProps> = ({ baseUrl }) => {
   useEffect(() => {
     ensureSession(activeId)
     const s = useChatStore.getState().sessions[activeId]
-    if (s && !s.historyLoaded && !s.isStreaming) {
+    if (activeId !== draftId && s && !s.historyLoaded && !s.isStreaming) {
       loadHistory(activeId, 1)
     }
-  }, [activeId, ensureSession, loadHistory])
+  }, [activeId, draftId, ensureSession, loadHistory])
 
   const scrollToBottom = useCallback((smooth = true) => {
     // Defer to the next frame so we read the height *after* the new content has

@@ -10,6 +10,7 @@ import os
 import queue
 import subprocess
 import threading
+import time
 import urllib.request
 import urllib.error
 from typing import Optional
@@ -149,8 +150,12 @@ class McpClient:
                 logger.warning(f"[MCP:{self.name}] Unknown transport type: {self.transport!r}")
                 return False
         except Exception as e:
+            self._initialized = False
             logger.warning(f"[MCP:{self.name}] Initialization failed: {e}")
             return False
+        finally:
+            if not self._initialized and self._proc is not None:
+                self.shutdown()
 
     def list_tools(self) -> list:
         """Return the tool list from this server.
@@ -173,15 +178,20 @@ class McpClient:
             return []
 
     def call_tool(self, name: str, arguments: dict) -> str:
-        """Call a tool and return the result as a string."""
+        """Return tool text; propagate failures to McpTool's error boundary."""
         try:
             resp = self._send_request("tools/call", {"name": name, "arguments": arguments})
-            content = resp.get("result", {}).get("content", [])
+            if "error" in resp:
+                raise RuntimeError(f"MCP protocol error: {resp['error']}")
+            result = resp["result"]
+            content = result.get("content", [])
             parts = [item.get("text", "") for item in content if item.get("type") == "text"]
+            if result.get("isError"):
+                raise RuntimeError("\n".join(parts) or "MCP tool execution failed")
             return "\n".join(parts)
         except Exception as e:
             logger.warning(f"[MCP:{self.name}] call_tool({name}) failed: {e}")
-            return f"Error: {e}"
+            raise
 
     def shutdown(self):
         """Close the connection / terminate the child process."""
@@ -196,6 +206,7 @@ class McpClient:
             except Exception:
                 try:
                     self._proc.kill()
+                    self._proc.wait(timeout=5)
                 except Exception:
                     pass
             self._proc = None
@@ -351,13 +362,17 @@ class McpClient:
 
     def _stdio_send(self, message: dict) -> dict:
         """Send a JSON-RPC message over stdio and read the response."""
+        deadline = time.monotonic() + self._timeout
         raw = json.dumps(message) + "\n"
         self._proc.stdin.write(raw)
         self._proc.stdin.flush()
 
         expected_id = message.get("id")
         while True:
-            line = self._readline_with_timeout()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"[MCP:{self.name}] request timed out after {self._timeout}s")
+            line = self._readline_with_timeout(timeout=remaining)
             if not line:
                 raise IOError(f"[MCP:{self.name}] stdio process closed unexpectedly")
             line = line.strip()

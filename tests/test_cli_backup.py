@@ -1,6 +1,7 @@
 """Tests for portable SmartAssistant backup archives."""
 
 import json
+import os
 import zipfile
 from pathlib import Path
 
@@ -79,6 +80,20 @@ def test_restore_rejects_path_traversal(tmp_path):
 
     with pytest.raises(ValueError, match="unsafe archive path"):
         restore_backup_archive(archive, tmp_path / "data", tmp_path / "workspace")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="验证 Windows 盘符相对路径")
+def test_archive_validation_rejects_embedded_drive_component(tmp_path):
+    from cli.commands.backup import _validate_archive
+
+    archive = tmp_path / "drive-path.zip"
+    with zipfile.ZipFile(archive, "w") as output:
+        output.writestr("manifest.json", json.dumps({"format": "smart-assistant-backup", "version": 1}))
+        output.writestr("workspace/Z:/audit-probe.txt", "synthetic payload")
+    # 只验证恶意归档的拒绝，不执行越界解压。
+    with zipfile.ZipFile(archive) as source:
+        with pytest.raises(ValueError, match="unsafe archive path"):
+            _validate_archive(source)
 
 
 def test_fresh_restore_ignores_archive_controlled_destinations(tmp_path, monkeypatch):
