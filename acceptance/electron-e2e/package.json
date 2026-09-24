@@ -1,0 +1,12 @@
+{
+  "name": "smartassistant-electron-acceptance",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "test": "node logout.e2e.cjs"
+  },
+  "description": "External driver for the unchanged Electron and Python logout boundary",
+  "devDependencies": {
+    "playwright": "1.63.0"
+  }
+}
