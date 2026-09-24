@@ -175,10 +175,9 @@ const ChatPage: React.FC<ChatPageProps> = ({ baseUrl }) => {
   const handleNewChat = useCallback(() => {
     const id = newSession()
     ensureSession(id)
-    loadHistory(id, 1)
     // Auto-expand the session list so the user sees the new/switched session.
     setSessionsCollapsed(false)
-  }, [newSession, ensureSession, loadHistory, setSessionsCollapsed])
+  }, [newSession, ensureSession, setSessionsCollapsed])
 
   const handleClearContext = useCallback(async () => {
     await clearContext(activeId)

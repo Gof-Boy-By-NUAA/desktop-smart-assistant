@@ -253,9 +253,18 @@ class ZHIPUAIBot(Bot, ZhipuAIImage):
             # reasoning_effort (high/max) only when enable_thinking is on;
             # mirror that gate so the field is never sent for plain calls.
             reasoning_effort = kwargs.get("reasoning_effort")
+            reasoning_only = request_params["model"] in ("glm-5.3", "glm-5.3-flash", "glm-5.3-flashx")
+            if reasoning_only:
+                # 官方迁移规则：这些精确型号不支持 disabled；关闭深度思考时用 low。
+                # 不将此规则推断到未知的自定义型号。
+                if request_params.get("thinking", {}).get("type") == "disabled":
+                    request_params["thinking"] = {**request_params["thinking"], "type": "enabled"}
+                    reasoning_effort = "low"
+                else:
+                    request_params.setdefault("thinking", {"type": "enabled"})
             if (
                 request_params.get("thinking", {}).get("type") == "enabled"
-                and reasoning_effort in ("high", "max")
+                and reasoning_effort in (("low", "high", "max") if reasoning_only else ("high", "max"))
             ):
                 request_params["reasoning_effort"] = reasoning_effort
             

@@ -220,3 +220,10 @@
 
 - **P03/P04 修复任务：COMPLETED。** 两项均达到 CONFIRMED + 修复验证通过；验证等级 **INTEGRATION_VERIFIED**。
 - **项目正式制品验收：PARTIAL。** 实际 NSIS 安装和卸载尚未执行，整体 **不标记 ACCEPTANCE_VERIFIED**。
+## 2026-09-23 续修记录（保留以上历史结果）
+
+P05/P07 已在新生成正式 win-unpacked 上通过验证；P06 部分完成，P08 需要身份授权映射决策。详见 [P05–P08 续修报告](2026-09-23-p05-p08-fixes.md)。新 NSIS SHA-256 为 a302949b1562bc25d84f20b8b6bd81ae3f7a48332a8f747fefa3ec8ca1baf811。未执行 NSIS 安装/卸载，整体仍为 PARTIAL / INTEGRATION_VERIFIED，旧包结果不改写。
+
+## 2026-09-24 P06 续修记录（保留以上历史结果）
+
+当前正式 win-unpacked 已通过 P06 本地模型配置、重启、发现失败提示和 GLM-5.3 SDK 参数验证；P03/P04、P05/P07 回归通过。新 NSIS SHA-256 为 `52e1a55fd76c2d0f2075f7a7c279d12af989b2aefb58ce1ba4bd38e7601a9e05`。详见 [P06 续修报告](2026-09-24-p06-followup.md)。真实供应商推理未执行，原始模型拒绝原因未直接显示在 UI；P06 整项 PARTIAL。NSIS 实际安装/卸载仍 BLOCKED / NOT_RUN，整体不得提升为 ACCEPTANCE_VERIFIED。

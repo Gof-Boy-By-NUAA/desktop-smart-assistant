@@ -227,11 +227,12 @@ class ApiClient {
     if (typeof options?.body === 'string' && !headers.has('Content-Type')) {
       headers.set('Content-Type', 'application/json')
     }
+    const body = await serializeBody(options?.body, headers)
     const response = await api.backendRequest({
       path,
       method: options?.method || 'GET',
       headers: Object.fromEntries(headers.entries()),
-      body: await serializeBody(options?.body, headers),
+      body,
     })
     if (!Number.isInteger(response.status) || response.status < 100 || response.status > 599) {
       throw new Error('Invalid desktop backend response')
@@ -354,6 +355,7 @@ class ApiClient {
 
   async uploadFile(file: File, sessionId?: string): Promise<{
     status: string
+    message?: string
     file_path: string
     file_name: string
     file_type: string
@@ -470,6 +472,15 @@ class ApiClient {
       method: 'POST',
       body: JSON.stringify(action),
     })
+  }
+
+  async modelCatalog(providerId: string): Promise<{ status: string; provider_id: string; models: string[]; discovery: string }> {
+    const result = await this.request<{ status: string; provider_id: string; models: string[]; discovery: string; message?: string }>(`/api/models?catalog_provider=${encodeURIComponent(providerId)}`)
+    if (result.status !== 'success') throw new Error(result.message || 'Model catalog request failed')
+    if (result.provider_id !== providerId || !Array.isArray(result.models) || result.models.some(model => typeof model !== 'string')) {
+      throw new Error('Invalid model catalog response')
+    }
+    return result
   }
 
   // ---------------------------------------------------------

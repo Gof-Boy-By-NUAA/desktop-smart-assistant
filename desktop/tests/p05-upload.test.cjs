@@ -1,0 +1,22 @@
+const test = require('node:test')
+const assert = require('node:assert/strict')
+const fs = require('node:fs')
+const vm = require('node:vm')
+const ts = require('typescript')
+const path = require('node:path')
+test('P05 multipart headers include the boundary generated before IPC', async () => {
+  let sent
+  const source=fs.readFileSync(path.join(__dirname,'../src/renderer/src/api/client.ts'),'utf8')
+  const context=vm.createContext({exports:{},require,URL,Headers,Response,Request,FormData,File,Blob,URLSearchParams,ArrayBuffer,Uint8Array,TextEncoder,TextDecoder,atob,crypto,console,window:{electronAPI:{backendRequest:async r=>{sent=r;return {status:200,headers:{},bodyBase64:Buffer.from('{"status":"success"}').toString('base64')}}}}})
+  vm.runInContext(ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,context)
+  await context.exports.default.uploadFile(new File(['hello'],'测试 附件.md',{type:'text/markdown'}),'draft-id')
+  const boundary=sent.headers['content-type'].split('boundary=')[1]
+  const body=new TextDecoder().decode(sent.body)
+  assert.ok(boundary)
+  assert.ok(body.startsWith('--'+boundary+'\r\n'))
+  assert.ok(body.includes('filename="测试 附件.md"'))
+  const request=new Request('https://example.invalid/upload',{method:'POST',headers:sent.headers,body:sent.body})
+  const form=await request.formData()
+  assert.equal(form.get('session_id'),'draft-id')
+  assert.equal(await form.get('file').text(),'hello')
+})

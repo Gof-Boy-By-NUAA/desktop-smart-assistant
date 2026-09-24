@@ -1,0 +1,294 @@
+[
+  {
+    "evidencePath": "tmp/p06-followup-20260923/ui-before/results.json",
+    "rawSha256": "4611ed6a8d8f25ca754c6733c96eaa85b0a8b6cd024e5b61af50ac71fa7d5954",
+    "status": "REPRODUCED",
+    "checks": {
+      "zhipuOptions": [
+        "glm-5.2",
+        "glm-5.1",
+        "glm-5-turbo",
+        "glm-5",
+        "glm-4.7",
+        "自定义"
+      ]
+    },
+    "exitCodes": [
+      0
+    ],
+    "testDoubles": "NONE",
+    "faultInjection": [],
+    "scope": "Selected facts from original local result; raw profile/URLs/logs not committed",
+    "error": null
+  },
+  {
+    "evidencePath": "tmp/p06-followup-20260923/ui-after-20260924/results.json",
+    "rawSha256": "0649a5888968bc784f9ad30112fd034b94cb5d1194b9429363212ad6e1f46ae8",
+    "status": "FAILED",
+    "checks": {},
+    "exitCodes": [
+      0
+    ],
+    "testDoubles": "NONE",
+    "faultInjection": [],
+    "scope": "Selected facts from original local result; raw profile/URLs/logs not committed",
+    "error": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:"
+  },
+  {
+    "evidencePath": "tmp/p06-followup-20260923/ui-after-20260924-b/results.json",
+    "rawSha256": "ce3276b0eaf7dc315379aad9af94d9525346c459581c787c18d2fddd909aa821",
+    "status": "FAILED",
+    "checks": {
+      "zhipuOptions": [
+        "glm-5.3",
+        "glm-5.3-flash",
+        "glm-5.3-flashx",
+        "glm-5.2",
+        "glm-5.1",
+        "glm-5-turbo",
+        "glm-5",
+        "glm-4.7",
+        "自定义"
+      ],
+      "newModelSelected": true,
+      "customInputSaved": true,
+      "customRestart": true,
+      "discoveryFailureVisible": true,
+      "customAfterFailure": true,
+      "providerSwitch": true,
+      "finalRestart": true
+    },
+    "exitCodes": [
+      0,
+      0,
+      0
+    ],
+    "testDoubles": "NONE",
+    "faultInjection": [],
+    "scope": "Selected facts from original local result; raw profile/URLs/logs not committed",
+    "error": "Error: Packaged backend SDK request: timeout; undefined"
+  },
+  {
+    "evidencePath": "tmp/p06-followup-20260923/ui-after-20260924-c/results.json",
+    "rawSha256": "56bd90d209b88475d8e225c8143e72c884e9bb56db93b53edede019f56314305",
+    "status": "FAILED",
+    "checks": {
+      "zhipuOptions": [
+        "glm-5.3",
+        "glm-5.3-flash",
+        "glm-5.3-flashx",
+        "glm-5.2",
+        "glm-5.1",
+        "glm-5-turbo",
+        "glm-5",
+        "glm-4.7",
+        "自定义"
+      ],
+      "newModelSelected": true,
+      "customInputSaved": true,
+      "customRestart": true,
+      "discoveryFailureVisible": true,
+      "customAfterFailure": true,
+      "providerSwitch": true,
+      "finalRestart": true
+    },
+    "exitCodes": [
+      0,
+      0,
+      0
+    ],
+    "testDoubles": "Local upstream returns HTTP 404 MODEL_NOT_FOUND; no model success or quality claim",
+    "faultInjection": [
+      "Dummy credentials in isolated profile; closed localhost discovery port; local model rejection server"
+    ],
+    "scope": "Selected facts from original local result; raw profile/URLs/logs not committed",
+    "error": "TypeError: Cannot read properties of null (reading 'type')"
+  },
+  {
+    "evidencePath": "tmp/p06-followup-20260923/ui-after-20260924-d/results.json",
+    "rawSha256": "8dafd9c7af57764faeafaeaa5f0afb9fc9e200b11f642b8c0e416dfcbb3825aa",
+    "status": "FAILED",
+    "checks": {
+      "zhipuOptions": [
+        "glm-5.3",
+        "glm-5.3-flash",
+        "glm-5.3-flashx",
+        "glm-5.2",
+        "glm-5.1",
+        "glm-5-turbo",
+        "glm-5",
+        "glm-4.7",
+        "自定义"
+      ],
+      "newModelSelected": true,
+      "customInputSaved": true,
+      "customRestart": true,
+      "discoveryFailureVisible": true,
+      "customAfterFailure": true,
+      "providerSwitch": true,
+      "finalRestart": true,
+      "wire": {
+        "path": "/v4/chat/completions",
+        "model": "glm-5.3",
+        "thinking": {
+          "type": "enabled"
+        },
+        "reasoning_effort": "low"
+      }
+    },
+    "exitCodes": [
+      0,
+      0,
+      0
+    ],
+    "testDoubles": "Local upstream returns HTTP 404 MODEL_NOT_FOUND; no model success or quality claim",
+    "faultInjection": [
+      "Dummy credentials in isolated profile; closed localhost discovery port; local model rejection server"
+    ],
+    "scope": "Selected facts from original local result; raw profile/URLs/logs not committed",
+    "error": "Error: Real upstream error shown: timeout; false"
+  },
+  {
+    "evidencePath": "tmp/p06-followup-20260923/ui-after-20260924-e/results.json",
+    "rawSha256": "c2db4ba99c44e19184d2db5422ba85d38efd6b4a0d3aec1046580c14e470e608",
+    "status": "FAILED",
+    "checks": {
+      "zhipuOptions": [
+        "glm-5.3",
+        "glm-5.3-flash",
+        "glm-5.3-flashx",
+        "glm-5.2",
+        "glm-5.1",
+        "glm-5-turbo",
+        "glm-5",
+        "glm-4.7",
+        "自定义"
+      ],
+      "newModelSelected": true,
+      "customInputSaved": true,
+      "customRestart": true,
+      "discoveryFailureVisible": true,
+      "customAfterFailure": true,
+      "providerSwitch": true,
+      "finalRestart": true,
+      "wire": {
+        "path": "/v4/chat/completions",
+        "model": "glm-5.3",
+        "thinking": {
+          "type": "enabled"
+        },
+        "reasoning_effort": "low"
+      }
+    },
+    "exitCodes": [
+      0,
+      0,
+      0
+    ],
+    "testDoubles": "Local upstream returns HTTP 404 MODEL_NOT_FOUND; no model success or quality claim",
+    "faultInjection": [
+      "Dummy credentials in isolated profile; closed localhost discovery port; local model rejection server"
+    ],
+    "scope": "Selected facts from original local result; raw profile/URLs/logs not committed",
+    "error": "Error: Real upstream error shown: timeout; false"
+  },
+  {
+    "evidencePath": "tmp/p06-followup-20260923/ui-after-20260924-final/results.json",
+    "rawSha256": "f3eebb12edc90504a3e4ac2a21d507e4d89111ea5b699c78a2c08a266a30e7ba",
+    "status": "PASSED",
+    "checks": {
+      "zhipuOptions": [
+        "glm-5.3",
+        "glm-5.3-flash",
+        "glm-5.3-flashx",
+        "glm-5.2",
+        "glm-5.1",
+        "glm-5-turbo",
+        "glm-5",
+        "glm-4.7",
+        "自定义"
+      ],
+      "newModelSelected": true,
+      "customInputSaved": true,
+      "customRestart": true,
+      "discoveryFailureVisible": true,
+      "customAfterFailure": true,
+      "providerSwitch": true,
+      "finalRestart": true,
+      "wire": {
+        "path": "/v4/chat/completions",
+        "model": "glm-5.3",
+        "thinking": {
+          "type": "enabled"
+        },
+        "reasoning_effort": "low"
+      },
+      "modelErrorVisible": true,
+      "vendorErrorDetailVisible": false
+    },
+    "exitCodes": [
+      0,
+      0,
+      0
+    ],
+    "testDoubles": "Local upstream returns HTTP 404 MODEL_NOT_FOUND; no model success or quality claim",
+    "faultInjection": [
+      "Dummy credentials in isolated profile; closed localhost discovery port; local model rejection server",
+      "Only dummy credentials in isolated profile; discovery connects to closed localhost port; no external model call"
+    ],
+    "scope": "Selected facts from original local result; raw profile/URLs/logs not committed",
+    "error": null
+  },
+  {
+    "evidencePath": "tmp/p06-followup-20260923/p03-p04-regression-20260924/results.json",
+    "rawSha256": "28186398497f641a816dac7335709b8f38cea5bc3588f120a42daeb79bb1a603",
+    "status": "PASSED",
+    "checks": {
+      "dangerousAnchors": 0,
+      "internalLinkWindow": true,
+      "draftPersisted": true,
+      "recovery": true,
+      "restartHistory": true
+    },
+    "exitCodes": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "testDoubles": "NONE",
+    "faultInjection": [
+      "Renamed messages table in owned real SQLite database; restored in finally",
+      "Terminated only the backend child of the owned test app, PID 18700"
+    ],
+    "scope": "Selected facts from original local result; raw profile/URLs/logs not committed",
+    "error": null
+  },
+  {
+    "evidencePath": "tmp/p06-followup-20260923/p05-p07-regression-20260924/results.json",
+    "rawSha256": "df71edaf9aa4a6aa6a88d7647a8d9d944e9231ac3569c7cdffee8b7b73c8cbeb",
+    "status": "PASSED",
+    "checks": {
+      "resourceWindows": {
+        "count": 14,
+        "allHaveContent": true,
+        "anyScriptExecuted": false,
+        "anyIpcExposed": false
+      },
+      "providerRestart": true,
+      "firstMessageRestart": true
+    },
+    "exitCodes": [
+      0,
+      0,
+      0
+    ],
+    "testDoubles": "NONE",
+    "faultInjection": [
+      "Discovery request to closed local HTTPS port; no external provider calls",
+      "Custom provider in isolated profile points to closed localhost port 9; no external model call"
+    ],
+    "scope": "Selected facts from original local result; raw profile/URLs/logs not committed",
+    "error": null
+  }
+]

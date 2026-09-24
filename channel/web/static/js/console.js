@@ -25,6 +25,9 @@ const I18N = {
         models_add_vendor: '添加厂商',
         models_provider: '厂商',
         models_model: '模型',
+        models_catalog_builtin: '内置推荐目录，可填写自定义模型 ID。',
+        models_catalog_discovered: '供应商返回的模型目录，能力兼容性仍需验证。',
+        models_catalog_failed: '模型发现失败，已保留推荐目录和自定义输入。',
         models_voice: '音色',
         models_configured: '已配置',
         models_not_configured: '未配置',
@@ -594,6 +597,9 @@ const I18N = {
         models_add_vendor: 'Add Provider',
         models_provider: 'Provider',
         models_model: 'Model',
+        models_catalog_builtin: 'Built-in recommendations; custom model IDs are accepted.',
+        models_catalog_discovered: 'Provider model catalog; capability compatibility still requires verification.',
+        models_catalog_failed: 'Discovery failed. Recommendations and custom input remain available.',
         models_voice: 'Voice',
         models_configured: 'configured',
         models_not_configured: 'not configured',
@@ -6652,6 +6658,7 @@ function renderCapabilityBody(def, cap, body) {
                 </div>
                 <div class="cfg-dropdown-menu"></div>
             </div>
+            ${def.id === 'chat' ? `<p id="cap-chat-catalog-status" role="status" class="mt-2 text-xs">${t('models_catalog_builtin')}</p>` : ''}
             <div id="cap-${def.id}-model-custom-wrap" class="mt-2 hidden">
                 <input id="cap-${def.id}-model-custom" type="text"
                        class="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600
@@ -7050,6 +7057,32 @@ function rebuildCapabilityModelDropdown(def, providerId, selectedModel, scope) {
     const root = scope || document;
     const el = root.querySelector(`#cap-${def.id}-model`);
     if (!el) return;
+    const catalogProvider = modelsState.providers.find(p => p.id === providerId);
+    const updateCatalogStatus = () => {
+        const status = root.querySelector('#cap-chat-catalog-status');
+        const picker = root.querySelector('#cap-chat-provider');
+        if (def.id !== 'chat' || !status || (picker && getDropdownValue(picker) !== providerId)) return;
+        const discovery = catalogProvider?.discovery;
+        status.textContent = t(discovery === 'failed' ? 'models_catalog_failed' : discovery === 'success' ? 'models_catalog_discovered' : 'models_catalog_builtin');
+    };
+    updateCatalogStatus();
+    if (def.id === 'chat' && catalogProvider && !catalogProvider._catalogRequested) {
+        catalogProvider._catalogRequested = true;
+        fetch('/api/models?catalog_provider=' + encodeURIComponent(providerId))
+            .then(r => { if (!r.ok) throw new Error('catalog request failed'); return r.json(); })
+            .then(data => {
+                if (data.status !== 'success' || data.provider_id !== providerId || !Array.isArray(data.models) || data.models.some(model => typeof model !== 'string')) throw new Error('Invalid model catalog response');
+                catalogProvider.discovery = data.discovery;
+                updateCatalogStatus();
+                if (data.discovery === 'success') catalogProvider.models = data.models;
+                const picker = root.querySelector('#cap-chat-provider');
+                if (picker && getDropdownValue(picker) === providerId && root.querySelector('#cap-chat-model') === el) {
+                    // Preserve a selection made while discovery was pending.
+                    const chosen = getDropdownValue(el);
+                    if (chosen !== '__custom__') rebuildCapabilityModelDropdown(def, providerId, chosen, root);
+                }
+            }).catch(() => { catalogProvider.discovery = 'failed'; updateCatalogStatus(); });
+    }
 
     // Prefer the capability-scoped model list when the backend provides one
     // (vision / image). It reflects the models the runtime can actually

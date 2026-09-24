@@ -1,4 +1,5 @@
-import React, { useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
+import apiClient from '../../api/client'
 import type { LucideIcon } from 'lucide-react'
 import { Loader2 } from 'lucide-react'
 import { t } from '../../i18n'
@@ -31,6 +32,7 @@ const CapabilityCard: React.FC<CapabilityCardProps> = ({
   icon: Icon,
   title,
   subtitle,
+  capKey,
   state,
   data,
   allowAuto,
@@ -45,6 +47,21 @@ const CapabilityCard: React.FC<CapabilityCardProps> = ({
   const [model, setModel] = useState(state.current_model || '')
   const [customModel, setCustomModel] = useState('')
   const [showCustom, setShowCustom] = useState(false)
+  const [catalog, setCatalog] = useState<{ provider: string; models: string[]; discovery: string } | null>(null)
+
+  useEffect(() => {
+    if (capKey !== 'chat' || !provider) return
+    let cancelled = false
+    setCatalog(null)
+    void apiClient.modelCatalog(provider).then((result) => {
+      if (!cancelled && result.status === 'success' && result.provider_id === provider) {
+        setCatalog({ provider, models: result.models, discovery: result.discovery })
+      }
+    }).catch(() => {
+      if (!cancelled) setCatalog({ provider, models: [], discovery: 'failed' })
+    })
+    return () => { cancelled = true }
+  }, [capKey, provider, data])
 
   // A provider is configured when it has credentials (a custom provider counts
   // only once it actually carries a name/key, not as an empty placeholder).
@@ -70,7 +87,9 @@ const CapabilityCard: React.FC<CapabilityCardProps> = ({
   const currentUnconfigured = !!provider && !isConfigured(provider)
 
   const modelOptions: DropdownOption[] = useMemo(() => {
-    const list = resolveModels(data, provider, state.provider_models).map((o) => ({
+    const discovered = catalog?.provider === provider && catalog.discovery === 'success'
+      ? catalog.models.map(value => ({ value, hint: undefined })) : null
+    const list = (discovered || resolveModels(data, provider, state.provider_models)).map((o) => ({
       value: o.value,
       label: o.value,
       hint: o.hint,
@@ -81,7 +100,7 @@ const CapabilityCard: React.FC<CapabilityCardProps> = ({
     }
     if (allowCustomModel) list.push({ value: CUSTOM_OPTION, label: t('config_custom_option'), hint: undefined })
     return list
-  }, [data, state.provider_models, provider, allowCustomModel, model, showCustom])
+  }, [data, state.provider_models, provider, allowCustomModel, model, showCustom, catalog])
 
   const handleProvider = (id: string) => {
     setProvider(id)
@@ -137,6 +156,9 @@ const CapabilityCard: React.FC<CapabilityCardProps> = ({
                 placeholder={t('config_custom_model_hint')}
               />
             )}
+            {capKey === 'chat' && <p className="text-xs text-content-tertiary mt-2">{t(catalog?.provider === provider && catalog.discovery === 'success' ? 'models_catalog_discovered' : 'models_catalog_builtin')}</p>}
+            {catalog?.provider === provider && catalog.discovery === 'failed' && <p role="status" className="text-xs text-danger mt-1">{t('models_catalog_failed')}</p>}
+            {capKey === 'chat' && provider === 'zhipu' && ['glm-5.3', 'glm-5.3-flash', 'glm-5.3-flashx'].includes(finalModel) && <p className="text-xs text-content-tertiary mt-2">{t('models_reasoning_only')}</p>}
           </Field>
         )}
         {children}

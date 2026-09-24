@@ -101,3 +101,30 @@ desktop/resources/bin/
 .mimosa/
 
 /web_sse_journal.sqlite3
+
+# Local secrets and acceptance-run data must never enter a baseline commit.
+.env
+.env.*
+auth.json
+credentials.json
+credentials.yaml
+credentials.yml
+*.pem
+*.p12
+*.pfx
+*.key
+*.exe
+*.msi
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-wal
+*.sqlite3-shm
+*.db
+*.db-wal
+*.db-shm
+userData/
+profile/
+profiles/
+pre-commit-full.diff
