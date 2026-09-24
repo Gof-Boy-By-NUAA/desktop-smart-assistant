@@ -4636,6 +4636,10 @@ class FileCapabilityHandler:
                 raise web.notfound()
             content_type = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
             file_name = os.path.basename(file_path)
+            # Attachment links open a resource window too; keep Markdown inert
+            # and displayable independently of the host's MIME registrations.
+            if os.path.splitext(file_name)[1].lower() in (".md", ".markdown"):
+                content_type = "text/plain; charset=utf-8"
             web.header('Content-Type', content_type)
             web.header('Content-Disposition', f"inline; filename*=UTF-8''{quote(file_name)}")
             web.header('Cache-Control', 'private, no-store')
@@ -4721,6 +4725,12 @@ class PreviewHandler:
                 raise web.notfound()
 
             content_type = mimetypes.guess_type(full_path)[0] or "application/octet-stream"
+            # Windows MIME registrations do not reliably include Markdown;
+            # both octet-stream and text/markdown trigger Chromium downloads.
+            # Serve preview source as inert text. The main UI fetches the same
+            # bytes and applies its existing safe Markdown renderer.
+            if os.path.splitext(full_path)[1].lower() in (".md", ".markdown"):
+                content_type = "text/plain; charset=utf-8"
             web.header('Content-Type', content_type)
             web.header('Cache-Control', 'no-cache')
             web.header('X-Content-Type-Options', 'nosniff')
@@ -4923,7 +4933,7 @@ class ConfigHandler:
             "api_base_key": "zhipu_ai_api_base",
             "api_base_default": "https://open.bigmodel.cn/api/paas/v4",
             "api_base_placeholder": _PLACEHOLDER_ZHIPU,
-            "models": [const.GLM_5_2, const.GLM_5_1, const.GLM_5_TURBO, const.GLM_5, const.GLM_4_7],
+            "models": [const.GLM_5_3, const.GLM_5_3_FLASH, const.GLM_5_3_FLASHX, const.GLM_5_2, const.GLM_5_1, const.GLM_5_TURBO, const.GLM_5, const.GLM_4_7],
         }),
         ("dashscope", {
             "label": {"zh": "通义千问", "en": "Qwen"},
@@ -4947,7 +4957,7 @@ class ConfigHandler:
             "api_base_key": "moonshot_base_url",
             "api_base_default": "https://api.moonshot.cn/v1",
             "api_base_placeholder": _PLACEHOLDER_V1,
-            "models": [const.KIMI_K3, const.KIMI_K2_7_CODE, const.KIMI_K2_7_CODE_HIGHSPEED, const.KIMI_K2_6, const.KIMI_K2_5, const.KIMI_K2],
+            "models": [const.KIMI_K3, const.KIMI_K2_7_CODE, const.KIMI_K2_7_CODE_HIGHSPEED, const.KIMI_K2_6],
         }),
         ("qianfan", {
             "label": {"zh": "百度千帆", "en": "ERNIE"},
@@ -5664,6 +5674,7 @@ class ModelsHandler:
         ``_custom_provider_cards``). Otherwise the legacy single ``custom``
         card is shown unchanged.
         """
+        from models.catalog import get_catalog
         local_config = conf()
         custom_cards = cls._custom_provider_cards(local_config)
         # Keep the legacy single "custom" card visible alongside the expanded
@@ -5694,7 +5705,7 @@ class ModelsHandler:
                 "api_base": raw_base or (p.get("api_base_default") or ""),
                 "api_base_default": p.get("api_base_default") or "",
                 "api_base_placeholder": p.get("api_base_placeholder") or "",
-                "models": list(p.get("models") or []),
+                **get_catalog(pid, p, local_config),
             })
 
         def _sort_key(it):
@@ -6187,6 +6198,18 @@ class ModelsHandler:
         web.header("Content-Type", "application/json; charset=utf-8")
         try:
             local_config = conf()
+            provider_id = web.input(catalog_provider="").catalog_provider
+            if provider_id:
+                from models.catalog import get_catalog
+                meta = ConfigHandler.PROVIDER_MODELS.get(provider_id)
+                if meta is None and provider_id.startswith("custom:"):
+                    card = next((p for p in self._custom_provider_cards(local_config) if p["id"] == provider_id), None)
+                    if card is not None:
+                        meta = {"models": card["models"]}
+                if meta is None:
+                    return json.dumps({"status": "error", "message": "unknown provider"})
+                return json.dumps({"status": "success", "provider_id": provider_id,
+                                   **get_catalog(provider_id, meta, local_config, discover=True)}, ensure_ascii=False)
             return json.dumps({
                 "status": "success",
                 "providers": self._provider_overview(),

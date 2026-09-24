@@ -127,6 +127,9 @@ MINIMAX_ABAB6_5 = "abab6.5-chat"  # MiniMax abab6.5
 
 # GLM (Zhipu AI)
 GLM_5_2 = "glm-5.2"  # GLM-5.2 - Agent recommended model (default)
+GLM_5_3 = "glm-5.3"
+GLM_5_3_FLASH = "glm-5.3-flash"
+GLM_5_3_FLASHX = "glm-5.3-flashx"
 GLM_5_1 = "glm-5.1"  # GLM-5.1
 GLM_5_TURBO = "glm-5-turbo"  # GLM-5-Turbo
 GLM_5 = "glm-5"  # GLM-5

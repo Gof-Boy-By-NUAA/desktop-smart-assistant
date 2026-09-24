@@ -43,6 +43,7 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
   const [text, setText] = useState('')
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [uploading, setUploading] = useState(false)
+  const [uploadError, setUploadError] = useState('')
   const [dragOver, setDragOver] = useState(false)
   const [slashOpen, setSlashOpen] = useState(false)
   const [slashIndex, setSlashIndex] = useState(0)
@@ -282,9 +283,11 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
   const uploadFiles = async (files: File[]) => {
     if (!files.length) return
     setUploading(true)
+    setUploadError('')
     try {
       for (const file of files) {
         const result = await apiClient.uploadFile(file, sessionId)
+        if (result.status !== 'success') throw new Error(result.message || t('chat_upload_error'))
         if (result.status === 'success') {
           setAttachments((prev) => [
             ...prev,
@@ -299,6 +302,7 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
       }
     } catch (err) {
       console.error('Upload failed:', err)
+      setUploadError(err instanceof Error ? err.message : t('chat_upload_error'))
     } finally {
       setUploading(false)
     }
@@ -390,6 +394,7 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
           </div>
         )}
 
+        {uploadError && <p role="alert" className="text-xs text-danger mb-2">{t('chat_upload_error')}: {uploadError}</p>}
         {/* Slash command menu */}
         {slashOpen && filtered.length > 0 && (
           <div className="absolute bottom-full left-0 right-0 mb-1.5 max-h-80 overflow-y-auto rounded-xl border border-default bg-elevated shadow-xl z-30 p-1.5">
