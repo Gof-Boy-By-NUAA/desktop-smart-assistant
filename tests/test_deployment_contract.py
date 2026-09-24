@@ -231,7 +231,6 @@ def test_desktop_logout_revokes_backend_credential_and_clears_renderer_state():
     app = (ROOT / "desktop/src/renderer/src/App.tsx").read_text(encoding="utf-8")
     client = (ROOT / "desktop/src/renderer/src/api/client.ts").read_text(encoding="utf-8")
     main = (ROOT / "desktop/src/main/index.ts").read_text(encoding="utf-8-sig")
-    sessions = (ROOT / "desktop/src/renderer/src/store/sessionStore.ts").read_text(encoding="utf-8")
     chat = (ROOT / "desktop/src/renderer/src/store/chatStore.ts").read_text(encoding="utf-8")
     nav = (ROOT / "desktop/src/renderer/src/layout/NavRail.tsx").read_text(encoding="utf-8")
     assert "await apiClient.authLogout()" in app
@@ -241,7 +240,6 @@ def test_desktop_logout_revokes_backend_credential_and_clears_renderer_state():
     assert "clearDesktopAuthentication()" in main
     assert "desktopAuthToken = null" in main
     assert "localStorage" not in client
-    assert "localStorage.removeItem(ACTIVE_KEY)" in sessions
     assert "set({ sessions: {} })" in chat
     assert "menu_logout" in nav
 

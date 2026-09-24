@@ -132,6 +132,9 @@ jobs:
       - name: Install desktop dependencies
         run: npm ci
 
+      - name: Verify logout session reset behavior
+        run: node --test tests/session-store-reset.test.cjs
+
       - name: Build desktop renderer and main process
         run: npm run build
 
