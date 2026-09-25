@@ -67,7 +67,9 @@ if [ "$RELEASE_MODE" -eq 1 ]; then
   # shellcheck disable=SC1091
   source "$VENV_DIR/Scripts/activate" 2>/dev/null || source "$VENV_DIR/bin/activate"
 
-  pip install -q --upgrade pip
+  # Use `python -m pip` for the self-upgrade: on Windows the pip.exe shim
+  # cannot replace itself while running.
+  python -m pip install -q --upgrade pip
   echo "==> Installing hash-locked release dependencies"
   pip install --require-hashes --only-binary=:all: -r "$LOCK_FILE"
   pip check
