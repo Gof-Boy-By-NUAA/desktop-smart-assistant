@@ -162,7 +162,10 @@ def main():
         )
         checks["TOOLCHAIN_GIT_CLEAN"] = "PASS" if (r.returncode == 0 and not r.stdout.strip()) else "FAIL"
 
-    result = "PASS" if all(v in ("PASS", "SKIP") for v in checks.values()) else "FAIL"
+    # Aggregate: any FAIL fails the run; SKIP (not-yet-applicable) and
+    # informational entries (non-check strings) do not affect the verdict.
+    check_values = [v for k, v in checks.items() if k.startswith("TOOLCHAIN_")]
+    result = "PASS" if "FAIL" not in check_values and "PASS" in check_values else "FAIL"
     print(json.dumps({"result": result, "checks": checks}, indent=2))
     sys.exit(0 if result == "PASS" else 1)
 
