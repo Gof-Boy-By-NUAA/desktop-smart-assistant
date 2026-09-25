@@ -5,6 +5,9 @@
   "main": "dist/main/index.js",
   "author": "SmartAssistant",
   "license": "MIT",
+  "engines": {
+    "node": "20.20.2"
+  },
   "scripts": {
     "dev": "npm run build && electron .",
     "dev:hot": "concurrently \"npm run dev:renderer\" \"sleep 2 && npm run dev:main\"",
@@ -38,8 +41,8 @@
     "@vitejs/plugin-react": "^4.3.4",
     "autoprefixer": "^10.4.20",
     "concurrently": "^9.1.0",
-    "electron": "^33.2.0",
-    "electron-builder": "^25.1.8",
+    "electron": "33.4.11",
+    "electron-builder": "25.1.8",
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.15",
     "typescript": "^5.7.2",

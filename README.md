@@ -37,9 +37,34 @@ Electron Renderer / Web Console / IM Channel
 
 桌面端由 Electron 主进程启动 Python 后端。Renderer 通过 preload 暴露的受限 API 请求本地后端；生产桌面端使用绑定启动信息和证书校验保护这条本地控制通道。打包后的用户数据默认位于 Windows 的 `%USERPROFILE%\.cow`，源码运行时默认使用项目运行目录，也可以通过 `COW_DATA_DIR` 指定数据目录。
 
+## 规范发布工具链（Windows/Desktop Release Toolchain V1）
+
+正式的 Windows 桌面安装器构建使用以下**规范发布工具链**，由仓库内三个声明文件作为唯一事实来源：
+
+| 组件 | 版本 | 声明位置 |
+| --- | --- | --- |
+| Node.js | 20.20.2 | `.node-version`、`desktop/package.json` engines、`toolchain.lock.json` |
+| npm | 10.8.2 | `toolchain.lock.json`（随 Node 20.20.2 官方发行版附带） |
+| Python | 3.11.9 | `.python-version`、`toolchain.lock.json` |
+| Electron | 33.4.11 | `desktop/package.json`（精确版本）、`desktop/package-lock.json` |
+| electron-builder | 25.1.8 | 同上 |
+| PyInstaller | 6.22.3 | `desktop/build/requirements-desktop-py311.lock.txt`（哈希锁） |
+
+要点：
+
+- 发布构建必须使用 `bash desktop/build/build-backend.sh --release`：该路径要求 Python 恰为 3.11.9、从哈希锁 `desktop/build/requirements-desktop-py311.lock.txt` 安装全部依赖（含 PyInstaller 6.22.3）、运行 `pip check`，任何不匹配直接失败。
+- `scripts/verify-release-toolchain.py` 以机器可读结果校验活动工具链与 `toolchain.lock.json` 是否一致。
+- 日常开发可以使用默认（无参数）的 `build-backend.sh`，它保留 3.11 优先、`python3.12`/`python3.10`/`python3` 回退的宽松行为；该回退**不用于**正式发布制品。
+- 保留的例外通道（不是规范发布工具链，勿混淆）：
+  - `release-win7.yml`：Win7 兼容通道使用 Python 3.8。
+  - `test-governed-memory.yml`：3.8 / 3.11 / 3.13 兼容性测试矩阵（3.13 仅验证最小依赖子集，**不代表 3.13 通过发布验证**）。
+  - `release-overlay.yml` 中存在一个 `if: ${{ false }}` 禁用的 Node 22 发布辅助步骤（wrangler 需要 ≥22）。
+- 检索基准的 AST 哈希基线在 Python 3.11 下冻结并有硬性版本守卫（`benchmarks/retrieval/smart_assistant_baseline.py`），这也是 V1 发布工具链保持在 3.11 的原因之一。
+- 明确说明：Python 3.13 与 Node 26 **未通过发布验证**；升级属于后续独立任务。
+
 ## 从源码运行后端
 
-建议使用 Python 3.10 或更高版本和虚拟环境。项目的部分依赖会随 Python 版本和平台变化，请以 `requirements.txt` 为准。
+建议使用 Python 3.10 或更高版本和虚拟环境。项目的部分依赖会随 Python 版本和平台变化，请以 `requirements.txt` 为准。正式发布构建的工具链要求见上方「规范发布工具链」一节。
 
 Windows PowerShell：
 

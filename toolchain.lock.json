@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "release_channel": "desktop-windows",
+  "node": "20.20.2",
+  "npm": "10.8.2",
+  "python": "3.11.9",
+  "electron": "33.4.11",
+  "electron_builder": "25.1.8",
+  "pyinstaller": "6.22.3",
+  "notes": {
+    "npm": "actual npm bundled with the verified Node.js v20.20.2 official distribution (nodejs.org, SHASUMS256-verified zip used by B01); recorded from `npm --version` of that runtime",
+    "scope": "canonical Windows/Desktop release toolchain V1; legacy/special channels (release-win7 Python 3.8, test-governed-memory 3.8/3.11/3.13 matrix) are documented exceptions",
+    "source_baseline": "d60e99f5c0d87f651239ca9840881cc8be1eddbc"
+  }
+}
