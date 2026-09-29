@@ -34,6 +34,9 @@ const ToolStep: React.FC<{ step: MessageStep }> = ({ step }) => {
   const [expanded, setExpanded] = useState(false)
   const running = step.status === 'running'
   const isError = step.is_error || (!!step.status && step.status !== 'success' && !running)
+  // Live tool results can be JSON objects; React children must be display text.
+  const resultText = step.result == null ? '' :
+    typeof step.result === 'string' ? step.result : JSON.stringify(step.result, null, 2)
 
   const icon = running ? (
     <Loader2 size={12} className="text-accent animate-spin" />
@@ -66,7 +69,7 @@ const ToolStep: React.FC<{ step: MessageStep }> = ({ step }) => {
               </pre>
             </div>
           )}
-          {step.result && (
+          {resultText !== '' && (
             <div>
               <div className="text-[10px] font-semibold uppercase tracking-wide opacity-60 mb-1">
                 {isError ? 'Error' : 'Output'}
@@ -76,7 +79,7 @@ const ToolStep: React.FC<{ step: MessageStep }> = ({ step }) => {
                   isError ? 'text-danger' : ''
                 }`}
               >
-                {step.result.length > 4000 ? step.result.slice(0, 4000) + '\n… (truncated)' : step.result}
+                {resultText.length > 4000 ? resultText.slice(0, 4000) + '\n… (truncated)' : resultText}
               </pre>
             </div>
           )}

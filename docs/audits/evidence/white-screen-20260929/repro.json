@@ -1,0 +1,9 @@
+{
+  "errors": [
+    "Objects are not valid as a React child (found: object with keys {content, model, provider, usage}). If you meant to render a collection of children, use an array instead.",
+    "Objects are not valid as a React child (found: object with keys {content, model, provider, usage}). If you meant to render a collection of children, use an array instead.",
+    "Objects are not valid as a React child (found: object with keys {content, model, provider, usage}). If you meant to render a collection of children, use an array instead."
+  ],
+  "rootChildren": 0,
+  "fixture": "synthetic vision result with actual recorded keys; real unmodified ToolStep, React and browser; no LLM"
+}

@@ -1,0 +1,15 @@
+FIX=Convert JSON tool result to display text in ToolStep before truncation and React rendering.
+PRODUCTION_FILE=desktop/src/renderer/src/components/MessageSteps.tsx
+REGRESSION=desktop/tests/tool-step-rendering.test.cjs
+RED=exit 1; Objects are not valid as a React child (content, model, provider, usage).
+GREEN=1 passed, 0 failed; exit 0.
+CASES=expanded running card -> object result; array; string; zero; false; long text truncation; null.
+TYPECHECK=node desktop/node_modules/typescript/bin/tsc --noEmit -p desktop/tsconfig.json; exit 0.
+DIFF_CHECK=PASS
+BROWSER=real headless Edge, actual React and ToolStep
+FIXTURES=synthetic JSON values, no external model call; does not verify installed Electron build.
+COMMAND_ENV=PLAYWRIGHT_MODULE points to existing bundled playwright; BROWSER_CHANNEL=msedge
+COMMAND=C:/B01-build/tools/node20/node.exe --test desktop/tests/tool-step-rendering.test.cjs
+INSTALLER_REBUILT=NO
+INSTALLED_APP_UPDATED=NO
+COMMIT=NO
