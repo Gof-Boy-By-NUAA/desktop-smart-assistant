@@ -442,7 +442,7 @@ def test_rc2_cancel_preserves_partial_text_and_balanced_end_at_stream_boundary(e
     assert endings[0]["data"]["tool_calls"] == []
 
 
-def test_retry_handoff_cancel_preserves_partial_text_and_closes_message(monkeypatch):
+def test_retry_handoff_cancel_preserves_partial_text_and_closes_message(monkeypatch, tmp_path):
     """故障注入交接窗口；观察真实回调直到异常或正常结束，覆盖外层取消传播。"""
     import os
     from pathlib import Path
@@ -451,6 +451,10 @@ def test_retry_handoff_cancel_preserves_partial_text_and_closes_message(monkeypa
     import agent.tools
     import config
     from agent.protocol.agent import Agent
+
+    # 收尾时向 COW_DATA_DIR 转储观测 JSON；未设置该变量时（如 CI）
+    # 用 tmp_path 提供隔离目录，避免 KeyError。
+    monkeypatch.setenv("COW_DATA_DIR", str(tmp_path))
 
     visible_text = "attempt-one-visible"
     delivery = Queue()
