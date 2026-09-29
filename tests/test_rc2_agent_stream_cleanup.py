@@ -3,10 +3,13 @@
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from zai import ZhipuAiClient
+from zai.core import APIReachLimitError
 
 from agent.protocol.agent_stream import AgentStreamExecutor
 from agent.protocol.cancel import AgentCancelledError
@@ -112,6 +115,245 @@ def test_rc2_cancel_is_checked_on_next_yield_and_closes_sdk_response(real_stream
     with pytest.raises(AgentCancelledError):
         executor._call_llm_stream(retry_on_empty=False, max_retries=0)
     assert responses[0].is_closed
+
+
+def test_rc2_cancel_interrupts_real_sdk_before_first_response_event(monkeypatch):
+    """A real loopback SDK request must unwind while waiting for response headers."""
+    request_seen = threading.Event()
+    release_server = threading.Event()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            request_seen.set()
+            release_server.wait(10)
+
+        def log_message(self, *_args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+    client = ZhipuAiClient(
+        api_key="loopback-rc2-placeholder",
+        base_url=f"http://127.0.0.1:{server.server_port}/v4/",
+        max_retries=0,
+        timeout=10,
+    )
+    bot = object.__new__(ZHIPUAIBot)
+    bot.args = {"model": "glm-4"}
+    bot.client = client
+
+    import agent.tools
+    import config
+    from bridge import agent_bridge
+
+    monkeypatch.setattr(config, "conf", lambda: {"model": "glm-4", "bot_type": "zhipu"})
+    monkeypatch.setattr(agent_bridge, "conf", config.conf)
+    monkeypatch.setattr(
+        agent.tools,
+        "ToolManager",
+        lambda: SimpleNamespace(sync_mcp_into_agent=lambda _agent: None),
+    )
+    model = object.__new__(AgentLLMModel)
+    model._bot = bot
+    model._bot_model = "glm-4"
+    model._bot_type = "zhipu"
+    cancel = threading.Event()
+    executor = AgentStreamExecutor(
+        None,
+        model,
+        "",
+        [],
+        messages=[{"role": "user", "content": "hello"}],
+        cancel_event=cancel,
+    )
+    errors = []
+
+    def run():
+        try:
+            executor._call_llm_stream(retry_on_empty=False, max_retries=0)
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    try:
+        assert request_seen.wait(5)
+        cancel.set()
+        worker.join(2)
+        assert not worker.is_alive(), "cancel must close the blocking SDK transport"
+        assert len(errors) == 1 and isinstance(errors[0], AgentCancelledError)
+    finally:
+        cancel.set()
+        release_server.set()
+        worker.join(10)
+        client.close()
+        server.shutdown()
+        server.server_close()
+        server_thread.join(5)
+
+
+def test_rc2_cancel_closes_the_active_sdk_response_before_the_shared_client():
+    """Cancel an established stream even when closing its shared client cannot unblock it."""
+
+    cancel = threading.Event()
+    iteration_started = threading.Event()
+    response_closed = threading.Event()
+
+    class BlockingResponse:
+        def close(self):
+            response_closed.set()
+
+    class BlockingStream:
+        response = BlockingResponse()
+
+        def __iter__(self):
+            iteration_started.set()
+            if not response_closed.wait(5):
+                raise TimeoutError("active response was not closed")
+            raise OSError("response closed")
+
+    class Completions:
+        def create(self, **_kwargs):
+            return BlockingStream()
+
+    class Client:
+        def __init__(self):
+            self.chat = SimpleNamespace(completions=Completions())
+            self.close_calls = 0
+
+        def close(self):
+            self.close_calls += 1
+
+    client = Client()
+    bot = object.__new__(ZHIPUAIBot)
+    bot.client = client
+    worker = threading.Thread(
+        target=lambda: list(
+            bot._handle_stream_response(
+                {"model": "glm-4", "messages": [], "stream": True},
+                cancel_event=cancel,
+            )
+        )
+    )
+    worker.start()
+    try:
+        assert iteration_started.wait(2)
+        cancel.set()
+        worker.join(1)
+        assert not worker.is_alive(), "cancel must close the active SDK response"
+        assert response_closed.is_set()
+        assert client.close_calls == 0
+    finally:
+        cancel.set()
+        response_closed.set()
+        worker.join(5)
+
+
+def test_rc2_zhipu_stream_has_one_cancellation_aware_retry_owner(monkeypatch):
+    """Only streams disable SDK retries; sync features keep the SDK default."""
+
+    captured = {}
+
+    def build_client(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    import models.zhipuai.zhipuai_bot as zhipu_module
+
+    monkeypatch.setattr(zhipu_module, "ZhipuAiClient", build_client)
+    monkeypatch.setattr(
+        zhipu_module,
+        "conf",
+        lambda: {
+            "zhipu_ai_api_key": "rc2-placeholder",
+            "zhipu_ai_api_base": "https://example.invalid/v4",
+        },
+    )
+
+    assert ZHIPUAIBot._build_client(max_retries=0) is not None
+    assert captured["max_retries"] == 0
+
+    captured.clear()
+    assert ZHIPUAIBot._build_client() is not None
+    assert "max_retries" not in captured
+
+
+def test_rc2_desktop_scrubs_internal_cancel_marker_on_terminal_and_history():
+    """The private Agent marker must never become the user-visible cancel result."""
+
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "desktop"
+        / "src"
+        / "renderer"
+        / "src"
+        / "store"
+        / "chatStore.ts"
+    ).read_text(encoding="utf-8")
+    cancelled_case = source.split("case 'cancelled':", 1)[1].split("case 'done':", 1)[0]
+    history_mapper = source.split("function historyToMessage", 1)[1].split(
+        "export const useChatStore", 1
+    )[0]
+
+    assert "content: stripCancelMarker(m.content)" in cancelled_case
+    assert "content: stripCancelMarker(finalContent)" in history_mapper
+    assert "isCancelled: finalContent !== stripCancelMarker(finalContent)" in history_mapper
+
+
+def test_zhipu_status_error_metadata_is_preserved_without_agent_retry(monkeypatch):
+    """Injected SDK status failure proves local propagation; no vendor request is made."""
+    calls = []
+    captured = []
+    response = httpx.Response(
+        429,
+        request=httpx.Request("POST", "https://example.invalid/chat/completions"),
+        json={"error": {"code": "test-limit-code", "message": "test provider limit"}},
+    )
+
+    class Completions:
+        def create(self, **_kwargs):
+            calls.append(True)
+            raise APIReachLimitError("wrapped provider failure", response=response)
+
+    bot = object.__new__(ZHIPUAIBot)
+    bot.client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
+
+    def call_stream(_request):
+        for chunk in bot._handle_stream_response({"model": "glm-4", "messages": [], "stream": True}):
+            captured.append(chunk)
+            yield chunk
+
+    import agent.tools
+
+    monkeypatch.setattr(
+        agent.tools,
+        "ToolManager",
+        lambda: SimpleNamespace(sync_mcp_into_agent=lambda _agent: None),
+    )
+    executor = AgentStreamExecutor(
+        None,
+        SimpleNamespace(call_stream=call_stream),
+        "",
+        [],
+        messages=[{"role": "user", "content": "hello"}],
+    )
+    with pytest.raises(RuntimeError, match="test provider limit"):
+        executor._call_llm_stream(retry_on_empty=False)
+
+    assert calls == [True]
+    assert captured == [{
+        "error": True,
+        "message": "test provider limit",
+        "status_code": 429,
+        "error_code": "test-limit-code",
+        "error_type": "APIReachLimitError",
+        "retryable": False,
+    }]
 
 
 def test_rc2_cancel_interrupts_retry_wait_and_does_not_call_provider_again(monkeypatch):

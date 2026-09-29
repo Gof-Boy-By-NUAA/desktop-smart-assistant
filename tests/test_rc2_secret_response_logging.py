@@ -47,6 +47,26 @@ def _assert_no_values_logged(response, messages):
     return output
 
 
+def test_config_credentials_are_fully_redacted():
+    from config import drag_sensitive
+
+    short_password = "pw123"
+    long_api_key = "rc2-test-api-key-value"
+    redacted = drag_sensitive(
+        {
+            "web_password": short_password,
+            "zhipu_ai_api_key": long_api_key,
+            "channel_type": "web",
+        }
+    )
+
+    assert redacted["web_password"] == "<redacted>"
+    assert redacted["zhipu_ai_api_key"] == "<redacted>"
+    assert redacted["channel_type"] == "web"
+    assert short_password not in str(redacted)
+    assert long_api_key not in str(redacted)
+
+
 def test_oauth_missing_access_token_logs_keys_without_mutation(records):
     handler = object.__new__(OAuthHandler)
     handler.server_name = "rc2-oauth-server"
