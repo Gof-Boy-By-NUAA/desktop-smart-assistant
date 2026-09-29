@@ -2,6 +2,10 @@
 
 SmartAssistant 是一个可在桌面、Web 和即时通信渠道中运行的个人 AI Agent。它提供任务规划、工具调用、长期记忆、知识库、Skill、MCP 和多模型接入能力。
 
+## 项目状态（2026-09-29 收尾）
+
+开发已于 2026-09-29 结束。最终状态位于 `master`（最终版本号见 `cli/VERSION`，收尾时为 `2.1.3-rc.2`），完整验证记录、已知未竟事项和归档索引见 [`docs/audits/2026-09-29-project-closeout.md`](docs/audits/2026-09-29-project-closeout.md)。历史验收与审计报告在 [`docs/audits/`](docs/audits/)，已冻结不实现的方案在 [`docs/归档/`](docs/归档/)。
+
 当前项目由两部分组成：
 
 - Python 后端：负责 Agent、渠道、模型、工具、记忆、知识库和持久化。
