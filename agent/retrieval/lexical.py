@@ -531,39 +531,91 @@ class TenantAwareLexicalIndex:
                 return False
             return self._fts_integrity_valid()
 
-    def _matches_tenant_rows(
-        self, tenant_id: str, rows: Sequence[Tuple[object, ...]]
+    def matches_collection(
+        self,
+        tenant_id: str,
+        collection_id: str,
+        documents: Sequence[IndexedDocument],
     ) -> bool:
-        """单次读回精确核验租户内容行和 FTS 文档大小映射。"""
+        """核验租户内单个集合的派生索引内容。
+
+        同一租户的索引库可以承载多个集合（如 workspace 与 governed）；
+        集合级重建只校验对应集合，其余集合的合法记录不在本次校验范围内。
+        """
+
+        if not tenant_id.strip():
+            raise ValidationError("tenant_id 不能为空")
+        if not collection_id.strip():
+            raise ValidationError("collection_id 不能为空")
+        rows = self._document_rows(documents)
+        expected_ids = [document.document_id for document in documents]
+        if len(expected_ids) != len(set(expected_ids)):
+            return False
+        if any(
+            document.tenant_id != tenant_id
+            or document.collection_id != collection_id
+            for document in documents
+        ):
+            return False
+        with self._lock:
+            if not self._matches_tenant_rows(tenant_id, rows, collection_id):
+                return False
+            return self._fts_integrity_valid()
+
+    def _matches_tenant_rows(
+        self,
+        tenant_id: str,
+        rows: Sequence[Tuple[object, ...]],
+        collection_id: Optional[str] = None,
+    ) -> bool:
+        """单次读回精确核验（可选集合限域）与 FTS 文档大小映射。"""
 
         try:
-            columns = (
-                "tenant_id, document_id, scope, owner_user_id, session_id, "
-                "sensitivity, title, text, source_ref, collection_id, "
-                "metadata_json, content_hash"
-            )
-            actual = [
-                tuple(row)
-                for row in self._conn.execute(
-                    "SELECT %s FROM retrieval_documents WHERE tenant_id = ? "
-                    "ORDER BY tenant_id, document_id" % columns,
+            if collection_id is None:
+                actual = [
+                    tuple(row)
+                    for row in self._conn.execute(
+                        "SELECT tenant_id, document_id, scope, owner_user_id, "
+                        "session_id, sensitivity, title, text, source_ref, "
+                        "collection_id, metadata_json, content_hash "
+                        "FROM retrieval_documents WHERE tenant_id = ? "
+                        "ORDER BY tenant_id, document_id",
+                        (tenant_id,),
+                    )
+                ]
+                missing_docsize = self._conn.execute(
+                    "SELECT 1 FROM retrieval_documents AS documents "
+                    "LEFT JOIN retrieval_documents_fts_docsize AS sizes "
+                    "ON sizes.id = documents.rowid "
+                    "WHERE documents.tenant_id = ? AND sizes.id IS NULL "
+                    "LIMIT 1",
                     (tenant_id,),
-                )
-            ]
+                ).fetchone()
+            else:
+                actual = [
+                    tuple(row)
+                    for row in self._conn.execute(
+                        "SELECT tenant_id, document_id, scope, owner_user_id, "
+                        "session_id, sensitivity, title, text, source_ref, "
+                        "collection_id, metadata_json, content_hash "
+                        "FROM retrieval_documents "
+                        "WHERE tenant_id = ? AND collection_id = ? "
+                        "ORDER BY tenant_id, document_id",
+                        (tenant_id, collection_id),
+                    )
+                ]
+                missing_docsize = self._conn.execute(
+                    "SELECT 1 FROM retrieval_documents AS documents "
+                    "LEFT JOIN retrieval_documents_fts_docsize AS sizes "
+                    "ON sizes.id = documents.rowid "
+                    "WHERE documents.tenant_id = ? "
+                    "AND documents.collection_id = ? AND sizes.id IS NULL "
+                    "LIMIT 1",
+                    (tenant_id, collection_id),
+                ).fetchone()
             expected = sorted(rows, key=lambda row: (row[0], row[1]))
             if actual != expected:
                 return False
-            missing_docsize = self._conn.execute(
-                """
-                SELECT 1
-                FROM retrieval_documents AS documents
-                LEFT JOIN retrieval_documents_fts_docsize AS sizes
-                  ON sizes.id = documents.rowid
-                WHERE documents.tenant_id = ? AND sizes.id IS NULL
-                LIMIT 1
-                """,
-                (tenant_id,),
-            ).fetchone()
             return missing_docsize is None
         except sqlite3.DatabaseError:
             return False

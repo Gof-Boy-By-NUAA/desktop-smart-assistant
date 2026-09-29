@@ -24,7 +24,7 @@ ITEM_VIDEO = 5
 
 
 def _get_tmp_dir() -> str:
-    ws_root = expand_path(conf().get("agent_workspace", "~/cow"))
+    ws_root = expand_path(conf().get("agent_workspace", "./workspace"))
     tmp_dir = os.path.join(ws_root, "tmp")
     os.makedirs(tmp_dir, exist_ok=True)
     return tmp_dir

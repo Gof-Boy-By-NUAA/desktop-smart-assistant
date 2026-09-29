@@ -50,7 +50,7 @@ class DingTalkMessage(ChatMessage):
                 download_url = image_download_handler.get_image_download_url(download_code)
                 
                 # 下载到工作空间 tmp 目录
-                workspace_root = expand_path(conf().get("agent_workspace", "~/cow"))
+                workspace_root = expand_path(conf().get("agent_workspace", "./workspace"))
                 tmp_dir = os.path.join(workspace_root, "tmp")
                 os.makedirs(tmp_dir, exist_ok=True)
                 
@@ -68,7 +68,7 @@ class DingTalkMessage(ChatMessage):
                 self.ctype = ContextType.TEXT
                 
                 # 下载到工作空间 tmp 目录
-                workspace_root = expand_path(conf().get("agent_workspace", "~/cow"))
+                workspace_root = expand_path(conf().get("agent_workspace", "./workspace"))
                 tmp_dir = os.path.join(workspace_root, "tmp")
                 os.makedirs(tmp_dir, exist_ok=True)
                 

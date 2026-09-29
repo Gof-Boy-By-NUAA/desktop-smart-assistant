@@ -96,4 +96,8 @@ desktop/resources/bin/
 
 .wrangler/
 
+# Mimosa security-tool local artifacts (scan caches / interception state);
+# generated per machine, never part of the source tree.
+.mimosa/
+
 /web_sse_journal.sqlite3

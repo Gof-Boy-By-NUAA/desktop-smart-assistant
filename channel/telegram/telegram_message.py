@@ -56,7 +56,7 @@ class TelegramMessage(ChatMessage):
     @staticmethod
     def get_tmp_dir() -> str:
         """Local download directory, aligned with other channels (agent_workspace/tmp)."""
-        workspace_root = expand_path(conf().get("agent_workspace", "~/cow"))
+        workspace_root = expand_path(conf().get("agent_workspace", "./workspace"))
         tmp_dir = os.path.join(workspace_root, "tmp")
         os.makedirs(tmp_dir, exist_ok=True)
         return tmp_dir

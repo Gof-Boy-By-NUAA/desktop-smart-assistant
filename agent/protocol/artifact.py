@@ -60,12 +60,12 @@ _KIND_BY_EXT: Dict[str, str] = {
 
 
 def get_workspace_root() -> str:
-    """Absolute path of the agent workspace (defaults to ~/cow)."""
+    """Absolute path of the agent workspace (defaults to ./workspace)."""
     try:
         from config import conf
-        raw = conf().get("agent_workspace", "~/cow") or "~/cow"
+        raw = conf().get("agent_workspace", "./workspace") or "./workspace"
     except Exception:
-        raw = "~/cow"
+        raw = "./workspace"
     return os.path.realpath(expand_path(raw))
 
 

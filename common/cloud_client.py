@@ -72,7 +72,7 @@ class CloudClient(LinkAIClient):
                 from agent.skills.service import SkillService
                 from config import conf
                 from common.utils import expand_path
-                workspace_root = expand_path(conf().get("agent_workspace", "~/cow"))
+                workspace_root = expand_path(conf().get("agent_workspace", "./workspace"))
                 manager = SkillManager(custom_dir=os.path.join(workspace_root, "skills"))
                 self._skill_service = SkillService(manager)
                 logger.debug("[CloudClient] SkillService initialised")
@@ -88,7 +88,7 @@ class CloudClient(LinkAIClient):
                 from agent.memory.service import MemoryService
                 from config import conf
                 from common.utils import expand_path
-                workspace_root = expand_path(conf().get("agent_workspace", "~/cow"))
+                workspace_root = expand_path(conf().get("agent_workspace", "./workspace"))
                 self._memory_service = MemoryService(workspace_root)
                 logger.debug("[CloudClient] MemoryService initialised")
             except Exception as e:
@@ -103,7 +103,7 @@ class CloudClient(LinkAIClient):
                 from agent.knowledge.service import KnowledgeService
                 from config import conf
                 from common.utils import expand_path
-                workspace_root = expand_path(conf().get("agent_workspace", "~/cow"))
+                workspace_root = expand_path(conf().get("agent_workspace", "./workspace"))
                 self._knowledge_service = KnowledgeService(workspace_root)
                 logger.debug("[CloudClient] KnowledgeService initialised")
             except Exception as e:

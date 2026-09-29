@@ -39,12 +39,13 @@ class TaskStore:
         Initialize task store
         
         Args:
-            store_path: Path to tasks.json file. Defaults to ~/cow/scheduler/tasks.json
+            store_path: Path to tasks.json file. Defaults to ./workspace/scheduler/tasks.json
         """
         if store_path is None:
-            # Default to ~/cow/scheduler/tasks.json
-            home = expand_path("~")
-            store_path = os.path.join(home, "cow", "scheduler", "tasks.json")
+            # Default to ./workspace/scheduler/tasks.json
+            store_path = os.path.join(
+                expand_path("./workspace"), "scheduler", "tasks.json"
+            )
         
         self.store_path = os.path.realpath(store_path)
         self.lock = self._lock_for_path(self.store_path)
@@ -734,6 +735,48 @@ class TaskStore:
                 pass
             raise TaskExecutionStoreError(
                 f"Scheduler execution completion failed: {exc}"
+            ) from exc
+        finally:
+            connection.close()
+
+    def release_execution(
+        self,
+        task_id: str,
+        execution_id: str,
+        lease_token: str,
+    ) -> None:
+        """Abandon a claim that provably never started its side effect.
+
+        Deletes the exact lease-guarded 'running' row so the task's next
+        occurrence can be claimed again. Only callers that know nothing was
+        attempted (e.g. a failed pre-flight readiness probe) may use this;
+        an uncertain side effect must stay in_doubt instead.
+        """
+        if not task_id or not execution_id or not lease_token:
+            raise ValueError("task_id, execution_id, and lease_token are required")
+        connection = self._execution_connection()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                "DELETE FROM scheduler_executions "
+                "WHERE task_id = ? AND occurrence_id = ? AND lease_token = ? "
+                "AND status = 'running'",
+                (task_id, execution_id, lease_token),
+            )
+            if cursor.rowcount != 1:
+                connection.execute("ROLLBACK")
+                raise TaskExecutionStoreError(
+                    "Scheduler execution release was rejected "
+                    "(stale, missing, or non-running lease)"
+                )
+            connection.execute("COMMIT")
+        except sqlite3.Error as exc:
+            try:
+                connection.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise TaskExecutionStoreError(
+                f"Scheduler execution release failed: {exc}"
             ) from exc
         finally:
             connection.close()

@@ -40,7 +40,7 @@ def _read_config(data_root: Path) -> dict:
 
 
 def _workspace_from_config(config: dict) -> Path:
-    return Path(expand_path(config.get("agent_workspace") or "~/cow")).resolve()
+    return Path(expand_path(config.get("agent_workspace") or "./workspace")).resolve()
 
 
 def _legacy_user_data_path(data_root: Path, config: dict) -> Path:
@@ -221,7 +221,7 @@ def restore_backup_archive(
             # Do not trust an archive-controlled absolute destination on a
             # fresh machine. Portable restores default to the standard local
             # workspace unless the operator supplies --workspace.
-            target_workspace = Path(expand_path("~/cow")).resolve()
+            target_workspace = Path(expand_path("./workspace")).resolve()
 
         restored_config = dict(archived_config)
         if restored_config:
