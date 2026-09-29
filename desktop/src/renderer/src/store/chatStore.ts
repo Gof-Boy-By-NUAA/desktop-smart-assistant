@@ -200,13 +200,14 @@ function historyToMessage(m: HistoryMessage): ChatMessage {
   return {
     id: uid('assistant'),
     role: 'assistant',
-    content: finalContent,
+    content: stripCancelMarker(finalContent),
     timestamp: m.created_at,
     steps,
     reasoning: m.reasoning,
     kind: m.kind,
     extras: m.extras,
     botSeq: m._seq,
+    isCancelled: finalContent !== stripCancelMarker(finalContent),
     attachments: attachments.length > 0 ? attachments : undefined,
     artifacts: artifacts.length > 0 ? artifacts : undefined,
   }
@@ -409,10 +410,13 @@ export const useChatStore = create<ChatState>((set, get) => {
         case 'cancelled':
           updateMsg(sid, botId, (m) => ({
             ...m,
+            content: stripCancelMarker(m.content),
             isCancelled: true,
             isCancelPending: false,
             isCancelUnconfirmed: false,
           }))
+          // This is the durable terminal event, so the turn can be released.
+          finishStream()
           break
 
         case 'done':
@@ -661,7 +665,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         }
         // REST acceptance only proves the signal was delivered. The task can
         // still emit tool/output events, so retain the SSE and request id until
-        // `cancelled` and terminal `done` are observed.
+        // an authoritative terminal `cancelled`, `done`, or `error` is observed.
         const controller = streamControllers[sid]
         if (controller?.requestId === requestId && !streams[sid]) {
           void controller.reconnect()

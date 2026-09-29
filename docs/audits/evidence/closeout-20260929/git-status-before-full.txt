@@ -1,0 +1,27 @@
+ M README.md
+ M agent/protocol/agent.py
+ M agent/protocol/agent_stream.py
+ M agent/tools/mcp/mcp_oauth.py
+ M benchmarks/results/web-boundary-security-verification.json
+ M benchmarks/results/web-boundary-security.json
+ M bridge/agent_bridge.py
+ M channel/dingtalk/dingtalk_message.py
+ M channel/web/sse_persistence.py
+ M channel/web/web_channel.py
+ M cli/VERSION
+ M config.py
+ M desktop/package-lock.json
+ M desktop/package.json
+ M desktop/src/renderer/src/components/MessageSteps.tsx
+ M desktop/src/renderer/src/store/chatStore.ts
+ M models/zhipuai/zhipuai_bot.py
+ M tests/test_durable_web_execution_ledger.py
+AM tests/test_rc2_agent_stream_cleanup.py
+AM tests/test_rc2_secret_response_logging.py
+ M tests/test_web_session_security.py
+?? acceptance/
+?? desktop/tests/tool-step-rendering.test.cjs
+?? docs/audits/2026-09-26-a05-rc1-forensic-investigation.md
+?? docs/audits/2026-09-29-white-screen-root-cause-and-fix.md
+?? docs/audits/evidence/white-screen-20260929/
+?? "docs/\345\275\222\346\241\243/"

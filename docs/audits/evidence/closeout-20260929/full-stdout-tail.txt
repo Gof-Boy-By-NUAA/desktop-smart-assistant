@@ -1,0 +1,36 @@
+..................sssssssssssssss.......................ss.sssss........ [  6%]
+ss.ss.s..s.s............................................................ [ 12%]
+........................................................................ [ 18%]
+........................................................................ [ 24%]
+........................................................................ [ 30%]
+........................................................................ [ 36%]
+........................................................................ [ 42%]
+................................. [ 45%]
+............................s..... [ 48%]
+s....................................................................... [ 54%]
+........................................................................ [ 60%]
+........................................................................ [ 66%]
+................................................................ss...... [ 73%]
+....................................................s...s...........s... [ 79%]
+......................................s................................. [ 85%]
+..................................s......................... [ 90%]
+........................................................................ [ 96%]
+........................................                              [100%]
+============================== warnings summary ===============================
+tests/test_dashscope_provider.py::TestDashscopeBotDefaultModel::test_default_model_is_qwen37_plus
+  C:\B01-build\venv-b01r2-regression\Lib\site-packages\dashscope\__init__.py:63: DeprecationWarning: The Assistants API (dashscope.assistants) is deprecated and will be removed in a future release. Please migrate to the Responses API. See https://help.aliyun.com/zh/model-studio/synchronous-call-api-reference for migration details.
+    from dashscope.assistants import Assistant, AssistantList, Assistants
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+============================ slowest 10 durations =============================
+203.36s call     tests/test_release_evidence_manifest.py::test_release_manifest_verifier_rejects_every_hard_denial_mutation
+81.70s call     tests/test_release_evidence_manifest.py::test_release_manifest_verifier_rejects_every_git_binding_mutation
+61.28s call     tests/test_customer_acceptance.py::test_completed_customer_run_is_returned_without_reexecution
+57.68s call     tests/test_customer_acceptance.py::test_customer_cli_reuses_completed_ledger_report_without_executor_replay
+42.67s call     tests/test_customer_acceptance.py::test_commit_success_followed_by_caller_crash_never_reexecutes
+41.81s call     tests/test_customer_durable_execution_ledger.py::test_durable_ledger_fault_windows_preserve_at_most_once_execution[before_final_report_commit-completed-True-0]
+35.62s call     tests/test_customer_acceptance.py::test_controlled_candidate_arm_passes_and_does_not_mutate_skill_store
+35.48s call     tests/test_customer_durable_execution_ledger.py::test_durable_ledger_fault_windows_preserve_at_most_once_execution[after_receipt_before_chain-completed-True-59]
+33.95s call     tests/test_fde_case_evidence.py::test_release_manifest_recomputes_fde_case_and_keeps_customer_gate_closed
+32.32s call     tests/test_fde_case_evidence.py::test_fde_case_rejects_same_pr_paths_tampering_and_wrong_trust_pin
+1137 passed, 38 skipped, 1 warning, 92 subtests passed in 1349.45s (0:22:29)
