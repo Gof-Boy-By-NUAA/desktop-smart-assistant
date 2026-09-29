@@ -581,7 +581,39 @@ class DurableSSEJournalStore:
                     fence["runner_id"],
                 ),
             )
-        return len(rows)
+        # A missing local registry token is not proof that a peer worker died.
+        # Reconcile only durable ownership that is expired or actually absent.
+        orphan_clauses = [
+            "run.execution_state = 'running'",
+            """NOT EXISTS (
+                SELECT 1 FROM web_session_execution_fences AS fence
+                WHERE fence.request_id = run.request_id
+                  AND fence.owner_id = run.owner_id AND fence.session_id = run.session_id
+                  AND fence.execution_lease = run.execution_lease
+                  AND fence.runner_id = run.runner_id
+                  AND fence.fence_token = run.execution_fence_token
+            )""",
+        ]
+        orphan_params = []
+        if owner_id is not None:
+            orphan_clauses.append("run.owner_id = ?")
+            orphan_params.append(owner_id)
+        if session_id is not None:
+            orphan_clauses.append("run.session_id = ?")
+            orphan_params.append(session_id)
+        orphans = connection.execute(
+            "SELECT run.request_id FROM web_sse_runs AS run WHERE "
+            + " AND ".join(orphan_clauses), tuple(orphan_params),
+        ).fetchall()
+        for orphan in orphans:
+            connection.execute(
+                """UPDATE web_sse_runs
+                   SET execution_state = 'in_doubt', execution_detail = ?,
+                       updated_at = ?, execution_finished_at = ?
+                   WHERE request_id = ? AND execution_state = 'running'""",
+                ("worker unavailable during durable recovery", now, now, orphan["request_id"]),
+            )
+        return len(rows) + len(orphans)
 
     @staticmethod
     def _session_mutation_locked(
@@ -1869,6 +1901,12 @@ class DurableSSEJournalStore:
             if row is None or row["owner_id"] != owner_id:
                 connection.execute("COMMIT")
                 return None
+            self._expire_execution_fences_locked(
+                connection, now, owner_id=owner_id, session_id=str(row["session_id"])
+            )
+            row = connection.execute(
+                "SELECT * FROM web_sse_runs WHERE request_id = ?", (request_id,)
+            ).fetchone()
             execution_state = str(row["execution_state"])
             if execution_state == "queued":
                 cursor = connection.execute(
@@ -1953,6 +1991,9 @@ class DurableSSEJournalStore:
         queued request in between those two state changes.
         """
 
+        self._expire_execution_fences_locked(
+            connection, now, owner_id=owner_id, session_id=session_id
+        )
         rows = connection.execute(
             """
             SELECT * FROM web_sse_runs

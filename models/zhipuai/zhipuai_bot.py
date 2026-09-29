@@ -2,6 +2,7 @@
 
 import time
 import json
+import threading
 from typing import Optional
 
 from models.bot import Bot
@@ -17,6 +18,8 @@ from zai import ZhipuAiClient
 
 # ZhipuAI对话模型API
 class ZHIPUAIBot(Bot, ZhipuAIImage):
+    supports_stream_cancellation = True
+
     def __init__(self):
         super().__init__()
         self.sessions = SessionManager(ZhipuAISession, model=conf().get("model") or "ZHIPU_AI")
@@ -25,14 +28,54 @@ class ZHIPUAIBot(Bot, ZhipuAIImage):
             "temperature": conf().get("temperature", 0.9),  # 值在(0,1)之间(智谱AI 的温度不能取 0 或者 1)
             "top_p": conf().get("top_p", 0.7),  # 值在(0,1)之间(智谱AI 的 top_p 不能取 0 或者 1)
         }
-        # 初始化客户端，支持自定义 API base URL（例如智谱国际版 z.ai）
+        self.client = self._build_client()
+        # Streaming requests use a request-owned client so cancellation cannot
+        # close the shared client used by sync replies or image generation.
+        self._stream_client_factory = lambda: self._build_client(max_retries=0)
+
+    @staticmethod
+    def _build_client(max_retries=None):
+        """Create one SDK client from the current provider configuration."""
         api_key = conf().get("zhipu_ai_api_key")
         api_base = conf().get("zhipu_ai_api_base")
-        
+        client_options = {"api_key": api_key}
         if api_base:
-            self.client = ZhipuAiClient(api_key=api_key, base_url=api_base)
-        else:
-            self.client = ZhipuAiClient(api_key=api_key)
+            client_options["base_url"] = api_base
+        if max_retries is not None:
+            client_options["max_retries"] = max_retries
+        return ZhipuAiClient(**client_options)
+
+    @staticmethod
+    def _error_payload(error, *, retryable=False):
+        """Preserve safe SDK error metadata without logging the raw response."""
+        status_code = getattr(error, "status_code", None)
+        error_type = type(error).__name__
+        error_code = ""
+        message = str(error) or error_type
+        response = getattr(error, "response", None)
+        if response is not None:
+            try:
+                payload = response.json()
+            except (TypeError, ValueError):
+                payload = None
+            if isinstance(payload, dict):
+                details = payload.get("error")
+                if not isinstance(details, dict):
+                    details = payload
+                candidate_code = details.get("code")
+                candidate_message = details.get("message") or details.get("msg")
+                if candidate_code is not None:
+                    error_code = str(candidate_code)
+                if candidate_message:
+                    message = str(candidate_message)
+        return {
+            "error": True,
+            "message": message,
+            "status_code": status_code if status_code is not None else "N/A",
+            "error_code": error_code,
+            "error_type": error_type,
+            "retryable": bool(retryable),
+        }
 
     def reply(self, query, context=None):
         # acquire reply content
@@ -268,29 +311,26 @@ class ZHIPUAIBot(Bot, ZhipuAIImage):
             ):
                 request_params["reasoning_effort"] = reasoning_effort
             
+            cancel_event = kwargs.get("_cancel_event")
+
             # Make API call with ZhipuAI SDK
             if stream:
-                return self._handle_stream_response(request_params)
+                return self._handle_stream_response(request_params, cancel_event=cancel_event)
             else:
                 return self._handle_sync_response(request_params)
                 
         except Exception as e:
-            error_msg = str(e)
-            logger.error(f"[ZHIPU_AI] call_with_tools error: {error_msg}")
+            error = self._error_payload(e)
+            logger.error(
+                "[ZHIPU_AI] call_with_tools error: type=%s status=%s code=%s message=%s",
+                error["error_type"], error["status_code"], error["error_code"], error["message"],
+            )
             if stream:
                 def error_generator():
-                    yield {
-                        "error": True,
-                        "message": error_msg,
-                        "status_code": 500
-                    }
+                    yield error
                 return error_generator()
             else:
-                return {
-                    "error": True,
-                    "message": error_msg,
-                    "status_code": 500
-                }
+                return error
     
     def _handle_sync_response(self, request_params):
         """Handle synchronous ZhipuAI API response"""
@@ -322,17 +362,62 @@ class ZHIPUAIBot(Bot, ZhipuAIImage):
             }
             
         except Exception as e:
-            logger.error(f"[ZHIPU_AI] sync response error: {e}")
-            return {
-                "error": True,
-                "message": str(e),
-                "status_code": 500
-            }
+            error = self._error_payload(e)
+            logger.error(
+                "[ZHIPU_AI] sync response error: type=%s status=%s code=%s message=%s",
+                error["error_type"], error["status_code"], error["error_code"], error["message"],
+            )
+            return error
     
-    def _handle_stream_response(self, request_params):
+    def _handle_stream_response(self, request_params, cancel_event=None):
         """Handle streaming ZhipuAI API response"""
+        stream = None
+        stream_client_factory = getattr(self, "_stream_client_factory", None)
+        owns_stream_client = callable(stream_client_factory)
+        client = stream_client_factory() if owns_stream_client else self.client
+        watcher = None
+        watcher_stop = threading.Event()
+
+        def close_transport_for_cancel():
+            response = getattr(stream, "response", None)
+            if response is not None:
+                try:
+                    # Close the exact in-flight response first.  Closing only
+                    # the shared client lets the SDK's internal retry loop keep
+                    # sleeping before the blocked iterator unwinds.
+                    response.close()
+                    return
+                except Exception as close_error:
+                    logger.warning(
+                        "[ZHIPU_AI] failed to close active stream response: %s",
+                        close_error,
+                    )
+            try:
+                client.close()
+            except Exception as close_error:
+                logger.warning(
+                    "[ZHIPU_AI] failed to close cancelled stream transport: %s",
+                    close_error,
+                )
+
+        if cancel_event is not None:
+            if cancel_event.is_set():
+                close_transport_for_cancel()
+            else:
+                def watch_cancel():
+                    while not watcher_stop.wait(0.05):
+                        if cancel_event.is_set():
+                            close_transport_for_cancel()
+                            return
+
+                watcher = threading.Thread(
+                    target=watch_cancel,
+                    name="zhipu-stream-cancel",
+                    daemon=True,
+                )
+                watcher.start()
         try:
-            stream = self.client.chat.completions.create(**request_params)
+            stream = client.chat.completions.create(**request_params)
             
             # Stream chunks to caller, converting to OpenAI format
             for chunk in stream:
@@ -393,12 +478,31 @@ class ZHIPUAIBot(Bot, ZhipuAIImage):
                 yield openai_chunk
                 
         except Exception as e:
-            logger.error(f"[ZHIPU_AI] stream response error: {e}")
-            yield {
-                "error": True,
-                "message": str(e),
-                "status_code": 500
-            }
+            if cancel_event is not None and cancel_event.is_set():
+                logger.info("[ZHIPU_AI] stream transport closed after cancellation")
+                return
+            # The Agent owns retries. Keep provider status responses
+            # non-retryable here while tagging transport failures for that
+            # cancellation-aware loop.
+            retryable = type(e).__name__ in {"APITimeoutError", "APIConnectionError"}
+            error = self._error_payload(e, retryable=retryable)
+            logger.error(
+                "[ZHIPU_AI] stream response error: type=%s status=%s code=%s message=%s",
+                error["error_type"], error["status_code"], error["error_code"], error["message"],
+            )
+            yield error
+        finally:
+            watcher_stop.set()
+            if watcher is not None:
+                watcher.join(timeout=1)
+            try:
+                if stream is not None:
+                    # zai-sdk 0.2.3 exposes its HTTP response publicly. Close it
+                    # on the iterating thread when the generator is unwound.
+                    stream.response.close()
+            finally:
+                if owns_stream_client:
+                    client.close()
     
     def _convert_tools_to_zhipu_format(self, tools):
         """

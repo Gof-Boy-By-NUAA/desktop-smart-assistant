@@ -317,8 +317,10 @@ class AgentLLMModel(LLMModel):
         """
         Call the model with streaming using COW's bot infrastructure
         """
+        stream = None
         try:
-            if hasattr(self.bot, 'call_with_tools'):
+            bot = self.bot
+            if hasattr(bot, 'call_with_tools'):
                 # Use tool-enabled streaming call if available
                 # Extract system prompt if present
                 system_prompt = getattr(request, 'system', None)
@@ -364,7 +366,11 @@ class AgentLLMModel(LLMModel):
                     if effort in ("high", "max"):
                         kwargs['reasoning_effort'] = effort
 
-                stream = self.bot.call_with_tools(**kwargs)
+                cancel_event = getattr(request, "cancel_event", None)
+                if cancel_event is not None and getattr(bot, "supports_stream_cancellation", False):
+                    kwargs['_cancel_event'] = cancel_event
+
+                stream = bot.call_with_tools(**kwargs)
                 
                 # Convert stream format to our expected format
                 for chunk in stream:
@@ -376,6 +382,11 @@ class AgentLLMModel(LLMModel):
         except Exception as e:
             logger.error(f"AgentLLMModel call_stream error: {e}", exc_info=True)
             raise
+        finally:
+            if stream is not None:
+                close = getattr(stream, "close", None)
+                if callable(close):
+                    close()
     
     def _format_response(self, response):
         """Format Claude response to our expected format"""
@@ -904,8 +915,6 @@ class AgentBridge:
                 settle_web_execution(
                     "cancelled", "cancelled before Agent execution"
                 )
-                if token_key:
-                    registry.unregister(token_key)
                 return Reply(ReplyType.ERROR, "Request cancelled before execution")
 
             # Get an identity-bound agent for this session. The Web channel
@@ -976,8 +985,6 @@ class AgentBridge:
                 settle_web_execution(
                     "cancelled", "cancelled before Agent execution"
                 )
-                if token_key:
-                    registry.unregister(token_key)
                 return Reply(ReplyType.ERROR, "Request cancelled before execution")
 
             if web_execution_guard is not None:
@@ -1045,19 +1052,32 @@ class AgentBridge:
                         "Agent returned no final response after execution"
                     )
             except AgentCancelledError:
-                # AgentStream normally converts a user cancellation to a
-                # partial response. POST_PROCESS tools execute after that loop,
-                # however, so their request-scoped durable guard can surface a
-                # cancellation here. It is a known cancellation, not an
-                # unknown crash and must never become a completed result.
+                # Agent 已同步取消时的历史；先沿现有 owner/session 边界落盘再结算。
                 try:
+                    if agent_run_entered and session_id:
+                        channel_type = (context.get("channel_type") or "") if context else ""
+                        new_messages = list(getattr(agent, '_last_run_new_messages', []))
+                        if pre_persisted and new_messages and new_messages[0].get("role") == "user":
+                            new_messages = new_messages[1:]
+                        owner_id = (
+                            (context.get("session_owner_id") or None) if context else None
+                        )
+                        if new_messages:
+                            persisted = self._persist_messages(
+                                session_id, list(new_messages), channel_type, owner_id=owner_id
+                            )
+                            if owner_id is not None and not persisted:
+                                self.clear_session(session_id)
+                                raise RuntimeError(
+                                    "authenticated Web cancelled history was not durably persisted"
+                                )
                     settle_web_execution(
                         "cancelled",
-                        "Agent execution cancelled during guarded post-processing",
+                        "Agent execution cancelled after durable persistence",
                     )
                 except Exception as settle_exc:
                     logger.error(
-                        "[AgentBridge] failed to mark guarded post-process "
+                        "[AgentBridge] failed to persist or settle "
                         f"cancellation: {settle_exc}"
                     )
                     raise
@@ -1092,12 +1112,6 @@ class AgentBridge:
                 # Log execution summary
                 event_handler.log_summary()
 
-                # Release cancel token; keep registry bounded.
-                if token_key:
-                    try:
-                        registry.unregister(token_key)
-                    except Exception:
-                        pass
                 if session_id and steer_inbox is not None:
                     get_steer_registry().unregister(session_id, steer_inbox)
 
@@ -1221,12 +1235,6 @@ class AgentBridge:
             # The in-memory context may have been reset to recover from a format
             # error or overflow, but the stored history is deliberately left
             # intact: it is irreplaceable and is never reloaded with tool blocks.
-            # Release cancel token on error path too (idempotent).
-            if cancel_event is not None and token_key:
-                try:
-                    get_cancel_registry().unregister(token_key)
-                except Exception:
-                    pass
             if session_id and steer_inbox is not None:
                 try:
                     get_steer_registry().unregister(session_id, steer_inbox)
@@ -1234,13 +1242,25 @@ class AgentBridge:
                     pass
             return Reply(ReplyType.ERROR, f"Agent error: {str(e)}")
         finally:
-            if web_execution_guard is not None and web_execution_heartbeat_started:
+            try:
+                # SystemExit during initialization/teardown also needs a
+                # durable outcome before the live cancellation token vanishes.
+                if (web_execution_store is not None
+                        and not web_execution_settlement_attempted):
+                    if agent_run_entered:
+                        settle_web_execution("in_doubt", "Agent teardown interrupted before durable completion")
+                    else:
+                        reject_web_execution_before_agent("Web request stopped before Agent execution")
+            finally:
                 try:
-                    web_execution_guard.stop_heartbeat(verify=False)
-                except Exception:
-                    pass
-                web_execution_heartbeat_started = False
-            self._release_session_run_lock(session_id, session_run_lock)
+                    if web_execution_guard is not None and web_execution_heartbeat_started:
+                        web_execution_guard.stop_heartbeat(verify=False)
+                finally:
+                    try:
+                        if cancel_event is not None and token_key:
+                            get_cancel_registry().unregister(token_key)
+                    finally:
+                        self._release_session_run_lock(session_id, session_run_lock)
     
     def _schedule_mcp_hot_reload(self, agent):
         """

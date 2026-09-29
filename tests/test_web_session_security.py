@@ -1,4 +1,5 @@
 import json
+import os
 import sqlite3
 import threading
 from pathlib import Path
@@ -576,6 +577,71 @@ def test_uploads_are_scoped_to_authenticated_owner(monkeypatch, tmp_path):
         web_channel.web, "header"
     ):
         assert web_channel.UploadsHandler().GET("secret.txt") == b"owner-secret"
+
+
+_MINIMAL_PNG = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+    b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\rIDATx\x9cc\xfc\xcf"
+    b"\xc0\xf0\x1f\x00\x05\x05\x02\x00_\xc8\xf1\xd2\x00\x00\x00\x00IEND\xaeB`\x82"
+)
+
+
+def test_real_upload_flow_returns_absolute_tool_resolvable_path(
+    monkeypatch, tmp_path
+):
+    """Real upload -> file_path contract -> real Vision resolution.
+
+    Uses the real ``WebChannel().upload_file`` logic, the real config system
+    (``agent_workspace`` left at its relative ``./workspace`` default semantics)
+    and the real filesystem via ``monkeypatch.chdir``.
+
+    Allowed test doubles (disclosed): the monkeypatched config item, the
+    preview HMAC secret, and the ``_raw_web_input``/``web.header`` web.py
+    request shims only pin the harness environment. This test proves the
+    upload/vision logic and the filesystem contract; it does NOT prove real
+    HTTP serving, Electron, or LLM behavior.
+    """
+
+    import io
+
+    from agent.tools.vision.vision import Vision
+    from config import conf
+
+    from channel.web import web_channel
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setitem(conf(), "agent_workspace", "./workspace")
+    monkeypatch.setattr(web_channel, "_PREVIEW_SECRET", b"u" * 32)
+
+    owner = "web:" + "5" * 32
+    upload = SimpleNamespace(filename="photo.png", file=io.BytesIO(_MINIMAL_PNG))
+    with patch.object(
+        web_channel, "_raw_web_input", lambda: {"file": upload}
+    ), patch.object(web_channel.web, "header"):
+        raw = web_channel.WebChannel().upload_file(owner_id=owner)
+
+    result = json.loads(raw)
+    assert result["status"] == "success"
+    assert result["file_type"] == "image"
+    file_path = result["file_path"]
+
+    assert os.path.isabs(file_path)
+    assert os.path.isfile(file_path)
+    owner_dir = os.path.realpath(web_channel._owner_upload_dir(owner))
+    assert os.path.realpath(os.path.dirname(file_path)) == owner_dir
+    assert "workspace\\workspace" not in file_path
+    assert "workspace/workspace" not in file_path
+
+    capability = web_channel._authorized_file_capability(file_path, owner)
+    assert capability is not None
+    assert (
+        web_channel._authorized_file_capability(file_path, "web:" + "6" * 32)
+        is None
+    )
+
+    content = Vision({"cwd": "./workspace"})._build_image_content(file_path)
+    assert content["type"] == "image_url"
+    assert content["image_url"]["url"].startswith("data:image/png;base64,")
 
 
 def test_preview_mount_rejects_foreign_owner_upload_even_with_signed_token(

@@ -614,6 +614,13 @@ class Agent:
         # Execute
         try:
             response = executor.run_stream(user_message)
+        except AgentCancelledError:
+            # 取消仍发布已生成历史；随后重抛，跳过成功路径的后处理工具。
+            with self.messages_lock:
+                self.messages = list(executor.messages)
+                self._last_run_new_messages = list(executor.messages[executor._run_message_start:])
+            self.stream_executor = executor
+            raise
         except Exception:
             # If executor cleared its messages (context overflow / message format error),
             # sync that back to the Agent's own message list so the next request
