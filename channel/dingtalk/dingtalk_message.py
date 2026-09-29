@@ -165,7 +165,10 @@ def download_image_file(image_url, temp_dir):
                 access_token = token_data.get("accessToken")
                 
                 if not access_token:
-                    logger.error(f"[DingTalk] Failed to get access token: {token_data}")
+                    logger.error(
+                        "[DingTalk] Failed to get access token: status=%s, response_keys=%s",
+                        token_response.status_code, sorted(token_data.keys()),
+                    )
                     return None
                 
                 # 获取下载 URL（使用新版 API）

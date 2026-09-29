@@ -1829,7 +1829,10 @@ def test_web_and_desktop_cancel_contract_distinguishes_requested_from_cancelled(
     assert "cancellation_requested?: number" in desktop_client
     assert "const cancellationAccepted = Number(result.cancelled || 0) + Number(result.cancellation_requested || 0)" in desktop_store
     assert "cancelled label is rendered exclusively by the bound SSE event" in web_source
-    assert "`cancelled` and terminal `done` are observed" in desktop_store
+    cancelled_case = desktop_store.split("case 'cancelled':", 1)[1].split("case 'done':", 1)[0]
+    assert "isCancelPending: false" in cancelled_case
+    assert "finishStream()" in cancelled_case
+    assert "authoritative terminal `cancelled`, `done`, or `error` is observed" in desktop_store
 
 
 def test_second_webchannel_observes_live_peer_sse_without_claiming_or_replaying_worker(
@@ -2332,3 +2335,137 @@ def test_session_mutation_and_claim_race_has_no_post_closure_admission(tmp_path)
     if quiescence["pending_request_ids"]:
         assert quiescence["pending_request_ids"] == ["mutation-race-claim"]
         assert quiescence["pending_execution_states"] == ["running"]
+
+
+def test_rc2_cancel_during_settlement_keeps_live_token_and_releases_next_slot(monkeypatch, tmp_path):
+    """Cancellation during persistence must reach the live turn before teardown."""
+    store = DurableSSEJournalStore(str(tmp_path / "settlement.sqlite3"))
+    first = _claim(store, "rc2-settlement-first", key="rc2-settlement-key-0001")
+    second = _claim(store, "rc2-settlement-next", key="rc2-settlement-key-0002")
+    bridge = _bridge_for_execution_test(_CompletedAgent())
+    monkeypatch.setattr(bridge, "_get_durable_web_execution_store", lambda: store)
+    persistence_entered = threading.Event()
+    allow_persistence = threading.Event()
+    replies = []
+
+    def persist(*_args, **_kwargs):
+        persistence_entered.set()
+        assert allow_persistence.wait(5)
+        return True
+
+    bridge._persist_messages = persist
+    worker = threading.Thread(target=lambda: replies.append(
+        bridge.agent_reply("first", context=_web_execution_context(first))
+    ))
+    registry = get_cancel_registry()
+    worker.start()
+    try:
+        assert persistence_entered.wait(5)
+        assert registry.get_event(first["request_id"]) is not None
+        assert not registry.cancel_request_owned(first["request_id"], "web:" + "b" * 32)
+        assert not registry.get_event(first["request_id"]).is_set()
+        intent = store.request_execution_cancellation(first["request_id"], OWNER)
+        assert intent["cancellation_state"] == "requested"
+        assert registry.cancel_request_owned(first["request_id"], OWNER)
+        assert registry.cancel_request_owned(first["request_id"], OWNER)
+        assert registry.get_event(first["request_id"]).is_set()
+    finally:
+        allow_persistence.set()
+        worker.join(5)
+    assert not worker.is_alive()
+    assert store.replay(first["request_id"], OWNER)["execution_state"] == "cancelled"
+    assert registry.get_event(first["request_id"]) is None
+    assert bridge._session_run_locks == {}
+    promoted = store.claim_next_queued_execution(RUNNER)
+    assert promoted["request_id"] == second["request_id"]
+
+
+def test_rc2_expired_restart_cancel_is_fenced_instead_of_left_requested(monkeypatch, tmp_path):
+    path = str(tmp_path / "restart.sqlite3")
+    first = _claim(DurableSSEJournalStore(path), "rc2-restart-first", key="rc2-restart-key-0001")
+    restarted = DurableSSEJournalStore(path)
+    monkeypatch.setattr(time, "time", lambda: first["lease_expires_at"] + 1)
+    assert get_cancel_registry().get_event(first["request_id"]) is None
+    result = restarted.request_execution_cancellation(first["request_id"], OWNER)
+    assert result["execution_state"] == "in_doubt"
+    assert result["cancellation_accepted"] is False
+    next_claim = _claim(restarted, "rc2-restart-next", key="rc2-restart-key-0002")
+    assert next_claim["claim_status"] == "claimed"
+
+
+def test_rc2_cancel_orphan_without_fence_is_reconciled_and_owner_scoped(tmp_path):
+    store = DurableSSEJournalStore(str(tmp_path / "orphan.sqlite3"))
+    first = _claim(store, "rc2-orphan-first", key="rc2-orphan-key-0001")
+    connection = sqlite3.connect(store.path)
+    try:
+        connection.execute("DELETE FROM web_session_execution_fences WHERE request_id = ?", (first["request_id"],))
+        connection.commit()
+    finally:
+        connection.close()
+    assert store.request_execution_cancellation(first["request_id"], "web:" + "b" * 32) is None
+    assert store.replay(first["request_id"], OWNER)["execution_state"] == "running"
+    result = store.request_execution_cancellation(first["request_id"], OWNER)
+    assert result["execution_state"] == "in_doubt"
+    assert result["cancellation_accepted"] is False
+
+
+def test_rc2_live_cancel_api_signals_only_owned_token_and_is_idempotent(monkeypatch, tmp_path):
+    store = DurableSSEJournalStore(str(tmp_path / "live-cancel.sqlite3"))
+    claim = _claim(store, "rc2-live-api", key="rc2-live-api-key-0001")
+    instance = _web_instance()
+    instance.request_owners[claim["request_id"]] = OWNER
+    monkeypatch.setattr(web_channel, "_get_durable_sse_store", lambda: store)
+    monkeypatch.setattr(web_channel.web, "data", lambda: json.dumps({"request_id": claim["request_id"]}).encode())
+    registry = get_cancel_registry()
+    event = registry.register(claim["request_id"], SESSION, OWNER)
+    try:
+        wrong_owner = json.loads(WebChannel.cancel_request(instance, owner_id="web:" + "b" * 32))
+        assert wrong_owner["status"] == "error"
+        assert not event.is_set()
+        assert store.replay(claim["request_id"], OWNER)["cancel_requested"] is False
+        for _attempt in range(2):
+            result = json.loads(WebChannel.cancel_request(instance, owner_id=OWNER))
+            assert result["cancellation_requested"] == 1
+            assert event.is_set()
+        store.finish_execution(claim["request_id"], OWNER, SESSION, claim["lease_token"], RUNNER,
+                               outcome="completed", fence_token=claim["session_fence_token"])
+        registry.unregister(claim["request_id"])
+        terminal = json.loads(WebChannel.cancel_request(instance, owner_id=OWNER))
+        assert terminal["cancelled"] == 1
+        assert terminal["cancellation_requested"] == 0
+    finally:
+        registry.unregister(claim["request_id"])
+
+
+def test_rc2_systemexit_during_initialization_settles_before_token_cleanup(monkeypatch, tmp_path):
+    store = DurableSSEJournalStore(str(tmp_path / "initialization.sqlite3"))
+    claim = _claim(store, "rc2-init-exit", key="rc2-init-exit-key-0001")
+    bridge = _bridge_for_execution_test(_CompletedAgent())
+    monkeypatch.setattr(bridge, "_get_durable_web_execution_store", lambda: store)
+
+    def interrupted_init(**_kwargs):
+        assert get_cancel_registry().get_event(claim["request_id"]) is not None
+        raise SystemExit("interrupted initialization")
+
+    bridge.get_agent = interrupted_init
+    with pytest.raises(SystemExit, match="interrupted initialization"):
+        bridge.agent_reply("first", context=_web_execution_context(claim))
+    assert store.replay(claim["request_id"], OWNER)["execution_state"] == "failed_safe"
+    assert get_cancel_registry().get_event(claim["request_id"]) is None
+    assert bridge._session_run_locks == {}
+    assert _claim(store, "rc2-init-next", key="rc2-init-next-key-0002")["claim_status"] == "claimed"
+
+
+def test_rc2_dispatch_reconciles_missing_fence_without_stealing_live_peer(tmp_path):
+    store = DurableSSEJournalStore(str(tmp_path / "dispatch.sqlite3"))
+    first = _claim(store, "rc2-dispatch-first", key="rc2-dispatch-key-0001")
+    second = _claim(store, "rc2-dispatch-next", key="rc2-dispatch-key-0002")
+    assert get_cancel_registry().get_event(first["request_id"]) is None
+    # A process-local missing token cannot disprove another worker's live lease.
+    assert store.claim_next_queued_execution("other-live-peer") is None
+    assert store.replay(first["request_id"], OWNER)["execution_state"] == "running"
+    with sqlite3.connect(store.path) as connection:
+        connection.execute("DELETE FROM web_session_execution_fences WHERE request_id = ?", (first["request_id"],))
+    promoted = store.claim_next_queued_execution(RUNNER)
+    assert store.replay(first["request_id"], OWNER)["execution_state"] == "in_doubt"
+    assert promoted["request_id"] == second["request_id"]

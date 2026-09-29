@@ -357,10 +357,10 @@ config = Config()
 
 
 def _mask_value(val):
-    """Mask a sensitive string value, keeping first 3 and last 3 chars."""
-    if not isinstance(val, str) or len(val) <= 8:
+    """Fully redact non-empty sensitive strings before logging."""
+    if not isinstance(val, str) or not val:
         return val
-    return val[0:3] + "*" * 5 + val[-3:]
+    return "<redacted>"
 
 
 _SENSITIVE_CONFIG_KEY_PARTS = (

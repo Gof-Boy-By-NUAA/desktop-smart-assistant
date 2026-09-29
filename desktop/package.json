@@ -1,6 +1,6 @@
 {
   "name": "smart-assistant-desktop",
-  "version": "2.1.3",
+  "version": "2.1.3-rc.2",
   "description": "SmartAssistant Desktop Client - AI Agent on your desktop",
   "main": "dist/main/index.js",
   "author": "SmartAssistant",

@@ -454,7 +454,10 @@ class OAuthHandler:
     def _absorb_token_response(self, resp: dict) -> bool:
         access = resp.get("access_token")
         if not access:
-            logger.warning(f"[MCP-OAuth:{self.server_name}] token response missing access_token: {resp}")
+            logger.warning(
+                "[MCP-OAuth:%s] token response missing access_token; response_keys=%s",
+                self.server_name, sorted(resp.keys()),
+            )
             return False
         self.access_token = access
         if resp.get("refresh_token"):

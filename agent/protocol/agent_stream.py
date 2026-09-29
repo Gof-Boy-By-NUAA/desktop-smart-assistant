@@ -1075,6 +1075,8 @@ class AgentStreamExecutor:
         # tool_result was in a discarded turn).
         self._validate_and_fix_messages()
 
+        # 取消增量以裁剪后的本轮用户消息为起点，不能沿用裁剪前的历史长度。
+        self._run_message_start = len(self.messages) - 1
         self._start_skill_shadow(user_message)
 
         self._emit_event("agent_start")
@@ -1441,6 +1443,8 @@ class AgentStreamExecutor:
             self._handle_cancelled(final_response)
             if not final_response or not final_response.strip():
                 final_response = "_(Cancelled)_"
+            # 前端清理完成后，保留权威取消异常供 Agent/Bridge 同步和结算。
+            raise
 
         except Exception as e:
             shadow_status = "error"
@@ -1541,6 +1545,7 @@ class AgentStreamExecutor:
         Returns:
             (response_text, tool_calls)
         """
+        self._check_cancelled()
         # Validate and fix message history (e.g. orphaned tool_result blocks).
         # Context trimming is done once in run_stream() before the loop starts,
         # NOT here — trimming mid-execution would strip the current run's
@@ -1603,7 +1608,8 @@ class AgentStreamExecutor:
             temperature=0,
             stream=True,
             tools=tools_schema,
-            system=self.system_prompt  # Pass system prompt separately for Claude API
+            system=self.system_prompt,  # Pass system prompt separately for Claude API
+            cancel_event=self.cancel_event,
         )
 
         self._emit_event("message_start", {"role": "assistant"})
@@ -1615,34 +1621,40 @@ class AgentStreamExecutor:
         gemini_raw_parts = None  # Preserve Gemini thoughtSignature for round-trip
         stop_reason = None  # Track why the stream stopped
 
+        stream = None
+
+        def close_stream():
+            nonlocal stream
+            current, stream = stream, None
+            close = getattr(current, "close", None)
+            if callable(close):
+                close()
+
+        def finalize_cancelled_stream():
+            # All post-content checkpoints preserve text only: tool arguments
+            # may be truncated even when the next read ends or fails.
+            logger.info("[Agent] cancel detected mid-stream, aborting LLM call")
+            if full_content:
+                self.messages.append({
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": full_content}],
+                })
+            self._emit_event("message_end", {
+                "content": full_content,
+                "tool_calls": [],
+                "cancelled": True,
+            })
+
+        def check_stream_cancelled():
+            if self.cancel_event is None or not self.cancel_event.is_set():
+                return
+            finalize_cancelled_stream()
+            raise AgentCancelledError("cancelled during LLM streaming")
+
         try:
             stream = self.model.call_stream(request)
-
-            # Probe cancel every N chunks to bound reaction time without
-            # checking on every token.
-            _cancel_probe_counter = 0
-            _CANCEL_PROBE_EVERY = 8
-
             for chunk in stream:
-                _cancel_probe_counter += 1
-                if _cancel_probe_counter >= _CANCEL_PROBE_EVERY:
-                    _cancel_probe_counter = 0
-                    if self.cancel_event is not None and self.cancel_event.is_set():
-                        # Persist partial text only; tool_use args may be
-                        # truncated mid-stream and would fail validation.
-                        logger.info("[Agent] cancel detected mid-stream, aborting LLM call")
-                        if full_content:
-                            partial_msg = {
-                                "role": "assistant",
-                                "content": [{"type": "text", "text": full_content}],
-                            }
-                            self.messages.append(partial_msg)
-                        self._emit_event("message_end", {
-                            "content": full_content,
-                            "tool_calls": [],
-                            "cancelled": True,
-                        })
-                        raise AgentCancelledError("cancelled during LLM streaming")
+                check_stream_cancelled()
 
                 # Check for errors
                 if isinstance(chunk, dict) and chunk.get("error"):
@@ -1654,8 +1666,8 @@ class AgentStreamExecutor:
                         error_type = error_data.get("type", "")
                     else:
                         error_msg = chunk.get("message", str(error_data))
-                        error_code = ""
-                        error_type = ""
+                        error_code = chunk.get("error_code", "")
+                        error_type = chunk.get("error_type", "")
                     
                     status_code = chunk.get("status_code", "N/A")
                     
@@ -1665,7 +1677,6 @@ class AgentStreamExecutor:
                     logger.error(f"   Status Code: {status_code}")
                     logger.error(f"   Error Code: {error_code}")
                     logger.error(f"   Error Type: {error_type}")
-                    logger.error(f"   Full chunk: {chunk}")
                     
                     # Check if this is a context overflow error (keyword-based, works for all models)
                     # Don't rely on specific status codes as different providers use different codes
@@ -1681,7 +1692,11 @@ class AgentStreamExecutor:
                         raise Exception(f"[CONTEXT_OVERFLOW] {error_msg} (Status: {status_code})")
                     else:
                         # Raise exception with full error message for retry logic
-                        raise Exception(f"{error_msg} (Status: {status_code}, Code: {error_code}, Type: {error_type})")
+                        provider_error = RuntimeError(
+                            f"{error_msg} (Status: {status_code}, Code: {error_code}, Type: {error_type})"
+                        )
+                        provider_error.retryable = chunk.get("retryable")
+                        raise provider_error
 
                 # Parse chunk
                 if isinstance(chunk, dict) and chunk.get("choices"):
@@ -1742,6 +1757,8 @@ class AgentStreamExecutor:
             raise
 
         except Exception as e:
+            close_stream()
+            check_stream_cancelled()
             error_str = str(e)
             error_str_lower = error_str.lower()
             
@@ -1798,11 +1815,16 @@ class AgentStreamExecutor:
             is_rate_limit = '429' in error_str_lower or 'rate limit' in error_str_lower
             
             # Check if error is retryable (timeout, connection, server busy, etc.)
-            is_retryable = any(keyword in error_str_lower for keyword in [
-                'timeout', 'timed out', 'connection', 'network', 
-                'rate limit', 'overloaded', 'unavailable', 'busy', 'retry',
-                '429', '500', '502', '503', '504', '512'
-            ])
+            retryable_hint = getattr(e, "retryable", None)
+            is_retryable = (
+                retryable_hint
+                if isinstance(retryable_hint, bool)
+                else any(keyword in error_str_lower for keyword in [
+                    'timeout', 'timed out', 'connection', 'network',
+                    'rate limit', 'overloaded', 'unavailable', 'busy', 'retry',
+                    '429', '500', '502', '503', '504', '512'
+                ])
+            )
             
             if is_retryable and retry_count < max_retries:
                 # Rate limit needs longer wait time
@@ -1813,12 +1835,21 @@ class AgentStreamExecutor:
                 
                 logger.warning(f"⚠️ LLM API error (attempt {retry_count + 1}/{max_retries}): {e}")
                 logger.info(f"Retrying in {wait_time}s...")
-                time.sleep(wait_time)
-                return self._call_llm_stream(
-                    retry_on_empty=retry_on_empty, 
-                    retry_count=retry_count + 1,
-                    max_retries=max_retries
-                )
+                if self.cancel_event is not None:
+                    self.cancel_event.wait(wait_time)
+                    check_stream_cancelled()
+                else:
+                    time.sleep(wait_time)
+                try:
+                    return self._call_llm_stream(
+                        retry_on_empty=retry_on_empty,
+                        retry_count=retry_count + 1,
+                        max_retries=max_retries
+                    )
+                except AgentCancelledError:
+                    # 递归入场取消须回到持有本帧文本和 message_start 的所有者收尾。
+                    finalize_cancelled_stream()
+                    raise
             else:
                 if retry_count >= max_retries:
                     logger.error(f"❌ LLM API error after {max_retries} retries: {e}", exc_info=True)
@@ -1826,6 +1857,10 @@ class AgentStreamExecutor:
                     logger.error(f"❌ LLM call error (non-retryable): {e}", exc_info=True)
                 raise
 
+        finally:
+            close_stream()
+
+        check_stream_cancelled()
         # Parse tool calls
         tool_calls = []
         for idx in sorted(tool_calls_buffer.keys()):
@@ -2282,6 +2317,11 @@ class AgentStreamExecutor:
                 new_messages.extend(turn["messages"])
             removed = len(turns) - 5
             self.messages[:] = new_messages
+            if hasattr(self, "_run_message_start"):
+                # 删除历史前缀后，本轮保留下来的增量边界也必须重定位。
+                self._run_message_start = max(
+                    0, self._run_message_start - (original_count - len(self.messages))
+                )
             logger.info(
                 f"🔧 Aggressive trim: removed {removed} old turns, "
                 f"truncated {truncated} large blocks, "

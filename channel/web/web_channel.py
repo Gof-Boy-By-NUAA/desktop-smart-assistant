@@ -1220,7 +1220,11 @@ def _steer_reply_text(status, lang: str) -> str:
 
 def _get_upload_dir() -> str:
     from common.utils import expand_path
-    ws_root = expand_path(conf().get("agent_workspace", "./workspace"))
+    ws_root = os.path.realpath(
+        os.path.abspath(
+            expand_path(conf().get("agent_workspace", "./workspace"))
+        )
+    )
     tmp_dir = os.path.join(ws_root, "tmp")
     os.makedirs(tmp_dir, exist_ok=True)
     return tmp_dir
