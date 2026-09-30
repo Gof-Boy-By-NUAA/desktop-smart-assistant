@@ -135,6 +135,18 @@ jobs:
       - name: Verify logout session reset behavior
         run: node --test tests/session-store-reset.test.cjs
 
+      - name: Verify structured tool result rendering in Chromium
+        env:
+          PLAYWRIGHT_MODULE: ${{ github.workspace }}/tmp/ci-tool-step/node_modules/playwright
+          PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/tmp/ci-tool-step/browsers
+          TMPDIR: ${{ github.workspace }}/tmp/ci-tool-step/runtime
+          npm_config_cache: ${{ github.workspace }}/tmp/ci-tool-step/npm-cache
+        run: |
+          mkdir -p "$TMPDIR"
+          npm install --prefix ../tmp/ci-tool-step --no-save --package-lock=false --ignore-scripts playwright@1.58.2
+          node ../tmp/ci-tool-step/node_modules/playwright/cli.js install --with-deps chromium
+          node --test tests/tool-step-rendering.test.cjs
+
       - name: Build desktop renderer and main process
         run: npm run build
 
