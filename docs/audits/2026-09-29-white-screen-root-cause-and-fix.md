@@ -30,4 +30,4 @@
 - Electron 主进程的 `render-process-gone` 兜底（自动 reload / crashReporter 落盘）仍缺失，属于独立防御层后续项，未在本轮实现。
 - 浏览器回归使用合成的 JSON wire 结果，不验证真实模型调用，也不验证安装制品内的 Electron。
 
-证据：`docs/audits/evidence/white-screen-20260929/fix-verification.txt` 是重建前的 RED/GREEN/TYPECHECK 开发验证快照，保留其当时的 `INSTALLER_REBUILT=NO`，不将它当作后续交付状态。后续构建与安装记录位于宿主机既有 `archive/rc2-evidence-2026-09/white-screen-install-20260929-152216/`；2026-09-28 白屏现场证据同样保留在该既有归档树。
+证据：`docs/audits/evidence/white-screen-20260929/fix-verification.txt` 保留原始 RED/GREEN/TYPECHECK 开发验证记录。其中 `INSTALLER_REBUILT=NO` 与当前已确认的制品状态不符，保留原文以供追溯，不将其当作当前交付状态，也不单凭该字段推定记录时间。真实构建与安装记录位于宿主机既有 `archive/rc2-evidence-2026-09/white-screen-install-20260929-152216/`；2026-09-28 白屏现场证据同样保留在该既有归档树。
