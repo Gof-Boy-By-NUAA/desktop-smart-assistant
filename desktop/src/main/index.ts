@@ -10,6 +10,7 @@ import { createTray, destroyTray } from './tray'
 import { initUpdater, checkForUpdates, startDownload, quitAndInstall, setUpdateLanguage } from './updater'
 import { setupThemeIPC, loadAppConfig } from './themes'
 import { setupHttpRelayIPC } from './http-relay'
+import { setupWebContentsGuards } from './renderer-guards'
 
 // Force the product name so the Dock/menu shows the app name even in dev mode,
 // where the default Electron binary would otherwise report "Electron". The name
@@ -55,7 +56,7 @@ interface DesktopStream {
 }
 
 type SafeStorageAdapter = Pick<typeof safeStorage, 'isEncryptionAvailable' | 'encryptString' | 'decryptString'>
-type SubjectTokenFilesystem = Pick<typeof fs.promises, 'mkdir' | 'readFile' | 'rename' | 'unlink' | 'writeFile'>
+type SubjectTokenFilesystem = Pick<typeof fs.promises, 'mkdir' | 'readFile' | 'rename' | 'unlink' | 'writeFile' | 'realpath' | 'lstat'>
 
 const SUBJECT_TOKEN_FILENAME = 'desktop-subject-token.bin'
 
@@ -70,8 +71,31 @@ export function createDesktopSubjectTokenStore(
   reportFailure: (message: string) => void,
   fileSystem: SubjectTokenFilesystem = fs.promises,
 ) {
-  const tokenPath = path.join(userDataPath, SUBJECT_TOKEN_FILENAME)
+  if (typeof userDataPath !== 'string' || !path.isAbsolute(userDataPath) || /[\0\r\n]/.test(userDataPath)) {
+    throw new Error('Invalid device identity storage root')
+  }
+  const root = path.resolve(userDataPath)
+  if (root === path.parse(root).root) throw new Error('Invalid device identity storage root')
+  const tokenPath = path.resolve(root, SUBJECT_TOKEN_FILENAME)
+  if (!tokenPath.startsWith(root + path.sep)) throw new Error('Invalid device identity storage path')
+  let canonicalRoot: string | null = null
   const unavailable = 'Secure storage is unavailable; this device identity cannot be used.'
+
+  const validateTokenPath = async () => {
+    const currentRoot = await fileSystem.realpath(root)
+    if (canonicalRoot !== null && currentRoot !== canonicalRoot) throw new Error('Device identity storage root changed')
+    canonicalRoot = currentRoot
+    try {
+      const entry = await fileSystem.lstat(tokenPath)
+      if (entry.isSymbolicLink() || !entry.isFile()) throw new Error('Invalid device identity storage file')
+      const actualPath = await fileSystem.realpath(tokenPath)
+      if (!actualPath.startsWith(currentRoot + path.sep) || path.dirname(actualPath) !== currentRoot) {
+        throw new Error('Device identity storage file is outside its root')
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+  }
 
   const secureStorageAvailable = () => {
     if (storage.isEncryptionAvailable()) return true
@@ -84,6 +108,7 @@ export function createDesktopSubjectTokenStore(
       if (!secureStorageAvailable()) return null
       let encrypted: Buffer
       try {
+        await validateTokenPath()
         encrypted = await fileSystem.readFile(tokenPath)
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
@@ -108,13 +133,18 @@ export function createDesktopSubjectTokenStore(
         throw new Error(unavailable)
       }
       const temporaryPath = `${tokenPath}.${process.pid}.${Date.now()}.tmp`
+      let temporaryCreated = false
       try {
         const encrypted = storage.encryptString(token)
-        await fileSystem.mkdir(userDataPath, { recursive: true })
-        await fileSystem.writeFile(temporaryPath, encrypted, { mode: 0o600 })
+        await fileSystem.mkdir(root, { recursive: true })
+        await validateTokenPath()
+        await fileSystem.writeFile(temporaryPath, encrypted, { mode: 0o600, flag: 'wx' })
+        temporaryCreated = true
         await fileSystem.rename(temporaryPath, tokenPath)
       } catch {
-        try { await fileSystem.unlink(temporaryPath) } catch { /* no temporary file to remove */ }
+        if (temporaryCreated) {
+          try { await fileSystem.unlink(temporaryPath) } catch { /* no temporary file to remove */ }
+        }
         reportFailure('Unable to save the encrypted device identity.')
         throw new Error('Unable to save the encrypted device identity.')
       }
@@ -122,6 +152,7 @@ export function createDesktopSubjectTokenStore(
 
     async forget(): Promise<void> {
       try {
+        await validateTokenPath()
         await fileSystem.unlink(tokenPath)
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
@@ -362,15 +393,85 @@ function sanitizedResponseHeaders(headers: Record<string, string>): Record<strin
   return safe
 }
 
+function resolveAllowedBackendPath(rawPath: string): string {
+  if (
+    !rawPath.startsWith('/') || rawPath.startsWith('//') ||
+    /[\\#]|[^\x21-\x7e]/.test(rawPath) || rawPath.endsWith('?')
+  ) throw new Error('Invalid backend request path')
+  // This origin only parses the path. PythonBackend selects the dynamically
+  // authenticated listener port and pins its certificate on 127.0.0.1.
+  const parsed = new URL(rawPath, 'https://127.0.0.1')
+  if (
+    parsed.protocol !== 'https:' || parsed.hostname !== '127.0.0.1' || parsed.port ||
+    parsed.origin !== 'https://127.0.0.1' ||
+    parsed.username || parsed.password || parsed.hash
+  ) throw new Error('Invalid backend request path')
+  const route = parsed.pathname
+  if (/%(?:2f|5c)/i.test(route)) throw new Error('Invalid backend request path encoding')
+  try {
+    if (/[\0-\x1f\x7f\\]/.test(decodeURIComponent(route))) throw new Error('Invalid backend request path encoding')
+    decodeURIComponent(parsed.search)
+  } catch { throw new Error('Invalid backend request path encoding') }
+  // Static targets are selected from internal literal values, never forwarded
+  // from the supplied pathname. Keep this list bound to registered API routes.
+  const allowedPaths: Readonly<Record<string, string>> = Object.freeze({
+    '/auth/check': '/auth/check', '/auth/login': '/auth/login', '/auth/logout': '/auth/logout',
+    '/message': '/message', '/poll': '/poll', '/cancel': '/cancel',
+    '/config': '/config', '/upload': '/upload', '/stream/ticket': '/stream/ticket',
+    '/api/messages/delete': '/api/messages/delete',
+    '/api/workspace/tree': '/api/workspace/tree', '/api/workspace/search': '/api/workspace/search',
+    '/api/workspace/resolve': '/api/workspace/resolve', '/api/workspace/meta': '/api/workspace/meta',
+    '/api/sessions': '/api/sessions', '/api/history': '/api/history',
+    '/api/models': '/api/models', '/api/channels': '/api/channels',
+    '/api/weixin/qrlogin': '/api/weixin/qrlogin', '/api/feishu/register': '/api/feishu/register',
+    '/api/tools': '/api/tools', '/api/skills': '/api/skills',
+    '/api/memory': '/api/memory', '/api/memory/content': '/api/memory/content',
+    '/api/knowledge/list': '/api/knowledge/list', '/api/knowledge/read': '/api/knowledge/read',
+    '/api/knowledge/citation/resolve': '/api/knowledge/citation/resolve',
+    '/api/knowledge/graph': '/api/knowledge/graph', '/api/knowledge/action': '/api/knowledge/action',
+    '/api/knowledge/import': '/api/knowledge/import',
+    '/api/scheduler': '/api/scheduler', '/api/scheduler/run': '/api/scheduler/run',
+    '/api/scheduler/toggle': '/api/scheduler/toggle', '/api/scheduler/update': '/api/scheduler/update',
+    '/api/scheduler/delete': '/api/scheduler/delete',
+    '/api/voice/asr': '/api/voice/asr', '/api/voice/tts': '/api/voice/tts',
+    '/api/release/evidence': '/api/release/evidence', '/api/logs/ticket': '/api/logs/ticket',
+    '/api/version': '/api/version', '/api/health': '/api/health', '/api/readiness': '/api/readiness',
+    '/api/file': '/api/file', '/api/prompt/optimize': '/api/prompt/optimize', '/api/logs': '/api/logs',
+  })
+  let safePath = Object.prototype.hasOwnProperty.call(allowedPaths, route) ? allowedPaths[route] : undefined
+  if (!safePath) {
+    const encodeSegment = (segment: string): string => {
+      if (!/^[A-Za-z0-9._~!$&'()*+,;=:@%-]+$/.test(segment)) throw new Error('Invalid backend request path segment')
+      let value: string
+      try { value = decodeURIComponent(segment) } catch { throw new Error('Invalid backend request path encoding') }
+      if (!value || value === '.' || value === '..' || /[\/\\\0-\x1f\x7f]/.test(value)) {
+        throw new Error('Invalid backend request path segment')
+      }
+      return encodeURIComponent(value)
+    }
+    const session = route.match(/^\/api\/sessions\/([^/]+)(?:\/(generate_title|clear_context))?$/)
+    if (session) {
+      const suffixes: Readonly<Record<string, string>> = { generate_title: '/generate_title', clear_context: '/clear_context' }
+      safePath = '/api/sessions/' + encodeSegment(session[1]) + (session[2] ? suffixes[session[2]] : '')
+    } else {
+      const resource = route.match(/^\/(file|preview)\/([^/]+(?:\/[^/]+)*)$/)
+      if (!resource) throw new Error('Invalid backend request route')
+      const prefixes: Readonly<Record<string, string>> = { file: '/file/', preview: '/preview/' }
+      safePath = prefixes[resource[1]] + resource[2].split('/').map(encodeSegment).join('/')
+    }
+  }
+  // Queries contain names, capability tickets and encoded file paths. They do
+  // not select the authority; preserve URL-parsed encoding and ordering.
+  return safePath + parsed.search
+}
+
 async function proxyDesktopRequest(raw: unknown) {
   const request = parseRendererRequest(raw)
   if (!pythonBackend || pythonBackend.getStatus() !== 'ready') {
     throw new Error('Trusted backend is unavailable')
   }
-
-  const parsed = new URL(request.path, 'https://smart_assistant.invalid')
-  if (parsed.origin !== 'https://smart_assistant.invalid') throw new Error('Invalid backend request path')
-  const route = parsed.pathname
+  const requestPath = resolveAllowedBackendPath(request.path)
+  const route = requestPath.split('?')[0]
   let body = request.body
   if (route === '/auth/login') {
     if (typeof body !== 'string') throw new Error('Invalid login request')
@@ -388,7 +489,7 @@ async function proxyDesktopRequest(raw: unknown) {
   const headers = { ...request.headers }
   if (desktopAuthToken && route !== '/auth/login') headers.Authorization = `Bearer ${desktopAuthToken}`
   try {
-    const response = await pythonBackend.request({ ...request, headers, body })
+    const response = await pythonBackend.invoke({ path: requestPath, method: request.method, headers, body })
     let responseBody = response.body
     if (route === '/auth/login') {
       let payload: Record<string, unknown> | null = null
@@ -457,7 +558,7 @@ function setupBackendProtocol() {
       return new Response('Not found', { status: 404 })
     }
     try {
-      const response = await pythonBackend.request({ path: resourcePath, method: request.method })
+      const response = await pythonBackend.invoke({ path: resourcePath, method: request.method })
       return new Response(response.body, {
         status: response.status,
         statusText: response.statusText,
@@ -571,6 +672,8 @@ function createWindow() {
       nodeIntegration: false,
     },
   })
+
+  setupWebContentsGuards(mainWindow, () => isQuitting)
 
   const persist = () => saveWindowState()
   mainWindow.on('resize', persist)

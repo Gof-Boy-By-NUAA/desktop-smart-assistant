@@ -145,10 +145,13 @@ jobs:
           mkdir -p "$TMPDIR"
           npm install --prefix ../tmp/ci-tool-step --no-save --package-lock=false --ignore-scripts playwright@1.58.2
           node ../tmp/ci-tool-step/node_modules/playwright/cli.js install --with-deps chromium
-          node --test tests/tool-step-rendering.test.cjs
+          node --test tests/tool-step-rendering.test.cjs tests/error-boundary-rendering.test.cjs
 
       - name: Build desktop renderer and main process
         run: npm run build
+
+      - name: Verify renderer recovery lifecycle
+        run: node --test tests/renderer-guards.test.cjs tests/main-input-boundaries.test.cjs tests/backend-launch-security.test.cjs
 
       - name: Verify attribution resources are configured
         run: >-

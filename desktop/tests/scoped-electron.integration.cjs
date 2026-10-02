@@ -36,7 +36,7 @@ app.whenReady().then(async () => {
     assert.equal(backend.getStatus(), 'ready', backendErrors.join('\n'))
     const context = compiledMain([
       'isTrustedRendererUrl', 'isTrustedRenderer', 'isRecord', 'parseRendererRequest',
-      'sanitizedResponseHeaders', 'proxyDesktopRequest', 'setupIPC',
+      'sanitizedResponseHeaders', 'resolveAllowedBackendPath', 'proxyDesktopRequest', 'setupIPC',
     ], {
       electron_1: electron, isDev: !app.isPackaged, pythonBackend: backend,
       desktopAuthToken: null, desktopSubjectToken: null,
@@ -78,7 +78,7 @@ app.whenReady().then(async () => {
     server = http.createServer(async (request, reply) => {
       try {
         if (request.method !== 'GET') { reply.writeHead(405).end(); return }
-        const result = await backend.request({ path: request.url, method: 'GET' })
+        const result = await backend.invoke({ path: request.url, method: 'GET' })
         const headers = Object.fromEntries(Object.entries(result.headers).filter(([name]) =>
           !['transfer-encoding', 'content-length', 'connection'].includes(name.toLowerCase())))
         reply.writeHead(result.status, headers)

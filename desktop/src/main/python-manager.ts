@@ -384,6 +384,14 @@ export class PythonBackend extends EventEmitter {
     })
   }
 
+  private selectLoginShell(): string {
+    const shells: Readonly<Record<string, string>> = Object.freeze({
+      '/bin/bash': '/bin/bash', '/bin/zsh': '/bin/zsh', '/bin/sh': '/bin/sh',
+    })
+    const requested = process.env.SHELL || ''
+    return Object.prototype.hasOwnProperty.call(shells, requested) ? shells[requested] : '/bin/sh'
+  }
+
   /** Build the PATH the backend should run with. */
   private resolveEnvPath(): string {
     if (this.resolvedPath !== null) return this.resolvedPath
@@ -395,10 +403,16 @@ export class PythonBackend extends EventEmitter {
     if (fs.existsSync(path.join(rgDir, rgExe))) parts.unshift(rgDir)
     if (process.platform !== 'win32') {
       try {
-        const shell = process.env.SHELL || '/bin/zsh'
-        const out = execFileSync(shell, ['-ilc', 'echo -n "__PATH__$PATH"'], {
-          encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'],
-        })
+        const shell = this.selectLoginShell()
+        const probeOptions = {
+          shell: false, encoding: 'utf8' as const, timeout: 5000,
+          stdio: ['ignore', 'pipe', 'ignore'] as ['ignore', 'pipe', 'ignore'],
+        }
+        const out = shell === '/bin/bash'
+          ? execFileSync('/bin/bash', ['-ilc', 'echo -n "__PATH__$PATH"'], probeOptions)
+          : shell === '/bin/zsh'
+            ? execFileSync('/bin/zsh', ['-ilc', 'echo -n "__PATH__$PATH"'], probeOptions)
+            : execFileSync('/bin/sh', ['-ilc', 'echo -n "__PATH__$PATH"'], probeOptions)
         const marker = out.lastIndexOf('__PATH__')
         if (marker !== -1) {
           const shellPath = out.slice(marker + '__PATH__'.length).trim()
@@ -436,9 +450,52 @@ export class PythonBackend extends EventEmitter {
       path.join(this.backendPath, 'venv', 'bin', 'python'),
       path.join(this.backendPath, 'venv', 'Scripts', 'python.exe'),
     ]) {
-      if (fs.existsSync(candidate)) return candidate
+      if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) return path.resolve(candidate)
     }
-    return process.platform === 'win32' ? 'python' : 'python3'
+    const filename = process.platform === 'win32' ? 'python.exe' : 'python3'
+    for (const item of this.resolveEnvPath().split(path.delimiter)) {
+      const directory = item.trim().replace(/^"(.*)"$/, '$1')
+      if (!path.isAbsolute(directory) || /[\0\r\n]/.test(directory)) continue
+      const candidate = path.join(directory, filename)
+      if (!fs.existsSync(candidate) || !fs.statSync(candidate).isFile()) continue
+      if (process.platform !== 'win32') {
+        try {
+          fs.accessSync(candidate, fs.constants.X_OK)
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'EACCES') continue
+          throw error
+        }
+      }
+      return candidate
+    }
+    return ''
+  }
+
+  private validateLaunchCommand(command: string, bundled: boolean): string {
+    if (!path.isAbsolute(command) || /[\0\r\n]/.test(command)) {
+      throw new Error('Invalid backend executable path')
+    }
+    const absolute = path.normalize(command)
+    if (bundled) {
+      const filename = process.platform === 'win32' ? 'smart-assistant-backend.exe' : 'smart-assistant-backend'
+      const allowed = [
+        path.resolve(this.backendPath, 'smart-assistant-backend', filename),
+        path.resolve(this.backendPath, filename),
+      ]
+      if (!allowed.includes(absolute)) throw new Error('Invalid bundled backend executable path')
+      const root = fs.realpathSync(this.backendPath)
+      const relative = path.relative(root, fs.realpathSync(absolute))
+      if (!relative || relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative)) {
+        throw new Error('Bundled backend executable escaped its root')
+      }
+    } else if (!['python', 'python.exe', 'python3', 'python3.exe'].includes(path.basename(absolute).toLowerCase())) {
+      throw new Error('Invalid Python executable name')
+    }
+    if (!fs.statSync(absolute).isFile()) throw new Error('Backend executable is not a regular file')
+    if (process.platform !== 'win32') fs.accessSync(absolute, fs.constants.X_OK)
+    // Keep the venv entry point: resolving a Python symlink for execution can
+    // select the base interpreter instead of the configured virtual environment.
+    return absolute
   }
 
   async start(): Promise<void> {
@@ -462,7 +519,16 @@ export class PythonBackend extends EventEmitter {
     this.clearEndpoint()
     this.emit('starting', { generation })
 
-    const bundled = this.findBundledBackend()
+    let bundled: string | null
+    let pythonCommand = ''
+    try {
+      bundled = this.findBundledBackend()
+      if (!bundled) pythonCommand = this.findPython()
+    } catch (error) {
+      this.status = 'error'
+      this.reportError(`Failed to locate backend executable: ${error instanceof Error ? error.message : String(error)}`)
+      return
+    }
     const dataDir = bundled ? COW_DATA_DIR : this.backendPath
     let command: string
     let args: string[]
@@ -474,7 +540,12 @@ export class PythonBackend extends EventEmitter {
       cwd = COW_DATA_DIR
       this.emit('log', `Starting bundled backend: ${bundled} (cwd=${cwd})`)
     } else {
-      command = this.findPython()
+      command = pythonCommand
+      if (!command) {
+        this.status = 'error'
+        this.reportError('No supported absolute Python executable found in the backend environment PATH')
+        return
+      }
       const appPath = path.join(this.backendPath, 'app.py')
       if (!fs.existsSync(appPath)) {
         this.status = 'error'
@@ -490,7 +561,12 @@ export class PythonBackend extends EventEmitter {
     const secret = crypto.randomBytes(32)
     let childProcess: ChildProcess
     try {
-      childProcess = spawn(command, args, {
+      const executable = this.validateLaunchCommand(command, Boolean(bundled))
+      if (args.some((argument) => typeof argument !== 'string' || argument.includes('\0'))) {
+        throw new Error('Invalid backend arguments')
+      }
+      childProcess = spawn(executable, args, {
+        shell: false,
         cwd,
         env: {
           ...process.env,
@@ -774,7 +850,8 @@ export class PythonBackend extends EventEmitter {
     })
   }
 
-  async request(input: TrustedBackendRequest): Promise<TrustedBackendResponse> {
+  /** Invoke the authenticated loopback backend over pinned HTTPS, never a caller-supplied authority. */
+  async invoke(input: TrustedBackendRequest): Promise<TrustedBackendResponse> {
     return this.sendRequest(input)
   }
 
