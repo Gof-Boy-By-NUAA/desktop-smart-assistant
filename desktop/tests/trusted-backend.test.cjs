@@ -139,12 +139,12 @@ test('trusted Python backend rejects direct callers and does not reuse a stopped
     })
     assert.equal(unauthenticated, 401)
 
-    const trusted = await backend.request({ path: '/api/health', method: 'GET' })
+    const trusted = await backend.invoke({ path: '/api/health', method: 'GET' })
     assert.equal(trusted.status, 200)
     assert.deepEqual(JSON.parse(trusted.body.toString('utf8')), { status: 'ok' })
 
     const rawTarget = '/preview/%E4%B8%AD%E6%96%87%20file.txt?name=%E4%B8%AD%E6%96%87%20file.txt'
-    const encodedPreview = await backend.request({ path: rawTarget, method: 'GET' })
+    const encodedPreview = await backend.invoke({ path: rawTarget, method: 'GET' })
     assert.equal(encodedPreview.status, 200)
     assert.equal(JSON.parse(encodedPreview.body.toString('utf8')).request_uri, rawTarget)
 
@@ -172,7 +172,7 @@ test('trusted Python backend rejects direct callers and does not reuse a stopped
     })
     await listen(attacker, port)
     try {
-      await assert.rejects(() => backend.request({ path: '/api/health', method: 'GET' }), /unavailable/)
+      await assert.rejects(() => backend.invoke({ path: '/api/health', method: 'GET' }), /unavailable/)
       assert.equal(attackerRequests, 0)
     } finally {
       await close(attacker)
@@ -236,10 +236,10 @@ test('restart waits for the exact old child exit and old generation cannot clear
     assert.ok(Date.now() - startedAt >= 650, 'replacement started before old child actually exited')
     assert.equal(backend.getGeneration(), 2)
     assert.equal(backend.getStatus(), 'ready')
-    assert.equal((await backend.request({ path: '/api/health', method: 'GET' })).status, 200)
+    assert.equal((await backend.invoke({ path: '/api/health', method: 'GET' })).status, 200)
     await new Promise((resolve) => setTimeout(resolve, 100))
     assert.equal(backend.getStatus(), 'ready')
-    assert.equal((await backend.request({ path: '/api/health', method: 'GET' })).status, 200)
+    assert.equal((await backend.invoke({ path: '/api/health', method: 'GET' })).status, 200)
   } finally {
     await backend.stop().catch(() => {})
     await removeTemp(temp)
@@ -262,7 +262,7 @@ test('forced termination is observable and does not treat proc.killed as exit pr
 
   assert.equal(backend.getStatus(), 'stopped')
   assert.ok(logs.some((line) => line.includes('force killing')), 'force-kill fallback was not observable')
-  await assert.rejects(() => backend.request({ path: '/api/health', method: 'GET' }), /unavailable/)
+  await assert.rejects(() => backend.invoke({ path: '/api/health', method: 'GET' }), /unavailable/)
 })
 
 test('trusted startup refuses a control-pipe certificate that does not own the TLS listener', async () => {
@@ -316,7 +316,7 @@ test('the real SmartAssistant WebChannel starts only through the authenticated d
   try {
     await backend.start()
     assert.equal(backend.getStatus(), 'ready', errors.join('\n'))
-    const health = await backend.request({ path: '/api/health', method: 'GET' })
+    const health = await backend.invoke({ path: '/api/health', method: 'GET' })
     assert.equal(health.status, 200)
     assert.deepEqual(JSON.parse(health.body.toString('utf8')), { status: 'ok' })
   } finally {

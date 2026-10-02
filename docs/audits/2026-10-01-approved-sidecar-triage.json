@@ -1,0 +1,60 @@
+{
+  "schema": "smartassistant-approved-static-finding-ledger/v1",
+  "is_mimosa_exemption_configuration": false,
+  "recorded_at": "2026-10-01T10:36:21Z",
+  "baseline_commit": "d748b204923834e993d5e0b665c25b3a5cd9fae6",
+  "finding": {
+    "file": "desktop/src/main/python-manager.ts",
+    "line": 568,
+    "file_sha256": "499dd549b1e7bdc3fc0ab08ea69a832b8985ab2a78c7a8d16f0f25c9e910d699",
+    "rule_id": "shell-exec",
+    "cwe": "CWE-78",
+    "risk_level": "high",
+    "operation": "process.exec",
+    "api_id": "node.child-process.direct",
+    "finding_hash": "9a208642a6c4fbce789fb76c70daa6c0550c835cc92309bcebb14fc1e74b65f3",
+    "finding_hash_algorithm": "SHA-256 of UTF-8 file|file_sha256|rule_id|cwe|line|operation|api_id, without trailing newline",
+    "finding_hash_is_native_mimosa_id": false
+  },
+  "decision": {
+    "classification": "COMPENSATING_CONTROL_VERIFIED",
+    "approval_status": "APPROVED_BY_ARCHITECT",
+    "approver": "Human user acting as architect, explicit instruction in this task",
+    "approved_at": null,
+    "expiry_date": null,
+    "expiry_policy": "Approval is scoped to the exact file hash and controls below; any change requires renewed review. No calendar expiry was specified by the approver.",
+    "rationale": "Desktop sidecar requires runtime dynamic absolute path; direct literal is architecturally impossible and introduces PATH hijacking risk; compensated by absolute path assertion, strict validation, and explicit shell:false.",
+    "scope": "Only the identified native shell-exec finding at the validated dynamic spawn call; no directory, rule-wide, historical baseline, or release waiver."
+  },
+  "compensating_controls": [
+    "validateLaunchCommand rejects non-absolute paths and NUL/CR/LF; it normalizes the absolute executable path before spawn.",
+    "Bundled executable is restricted to the two existing backend layouts; realpath must remain inside the real backend root.",
+    "Development Python uses validated fixed executable names and absolute candidate paths; ordinary-file checks and POSIX execution permission checks are applied.",
+    "spawn explicitly uses shell:false. args is string[] built internally and rejects non-string/NUL arguments. No shell command string is constructed.",
+    "The existing fd 3 bootstrap, generation, loopback HTTPS and certificate/signature boundary remains in place."
+  ],
+  "verification": {
+    "evidence_directory": "tmp/delivery-defense/whitebox-spawn-20261001-165139/fresh-verification-20261001-172546-410da700",
+    "tsc_exit_code": 0,
+    "focused": { "passed": 38, "failed": 0, "skipped": 2, "exit_code": 0 },
+    "native_electron": { "passed": 5, "failed": 0, "child_exit_codes": [0, 0, 0, 0, 0], "exit_code": 0 },
+    "limitations": "Existing focused harnesses disclose Electron/safeStorage/transport doubles; real filesystem, TLS and WebChannel boundaries are covered where recorded. Native lifecycle uses real Electron. POSIX skips, manual recovery UI, genuine hang recovery, formal installer and clean VM acceptance are not claimed passed."
+  },
+  "native_gate_enforcement": {
+    "mimosa_version": "1.0.3",
+    "approved_waiver_supported": false,
+    "reason": "Official lZe git-gate scans the index with glm:null, triage:false, honorIgnoreComments:false and does not read a waiver or finding ledger. VM performs no persistent approval filtering; backlog triage and ledger record are tracking mechanisms, not deny exemptions.",
+    "official_loaded_source_sha256": "7f185706bdbf83b3d8bcf102d979ed240f482bbca471569b2a79dba56a6e3136",
+    "normal_scan_exit_code": 2,
+    "normal_scan_blocking": true,
+    "normal_scan_report": "tmp/delivery-defense/approved-sidecar-triage-20261001-182747/normal-scan-python-manager.stdout.json",
+    "normal_scan_report_sha256": "ecb78d4c76fa728fc1ebbd1ce9e26e253994c8fbdc10c5de69ad9fa6f2db23b0",
+    "commit": "NOT_CREATED",
+    "git_commit_exit_code": 1,
+    "git_commit_blocking_findings": 1,
+    "git_commit_stderr": "tmp/delivery-defense/approved-sidecar-triage-20261001-182747/git-commit.stderr.txt",
+    "git_commit_message": "feat(defense): implement two-tier white-screen guards, harden IPC/process security, and record approved sidecar triage",
+    "push": "NOT_RUN",
+    "pr": "NOT_CREATED"
+  }
+}
