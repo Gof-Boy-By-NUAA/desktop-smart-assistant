@@ -105,16 +105,14 @@ test('development launch rejects relative paths, command text, suffixes, missing
 })
 
 test('bundled launch accepts the two supported layouts and retains the absolute path', () => {
-  withFixture((directory) => {
-    const root = backendRoot(directory)
-    const backend = new PythonBackend(root)
-    for (const command of [
-      file(path.join(root, BUNDLED_NAME)),
-      file(path.join(root, 'smart-assistant-backend', BUNDLED_NAME)),
-    ]) {
+  for (const layout of [BUNDLED_NAME, path.join('smart-assistant-backend', BUNDLED_NAME)]) {
+    withFixture((directory) => {
+      const root = backendRoot(directory)
+      const backend = new PythonBackend(root)
+      const command = file(path.join(root, layout))
       assert.equal(backend.validateLaunchCommand(command, true), path.normalize(command))
-    }
-  })
+    })
+  }
 })
 
 test('bundled launch rejects an outside file, unsupported layout, script suffix and directory', () => {
