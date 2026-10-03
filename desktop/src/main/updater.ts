@@ -271,12 +271,8 @@ export function quitAndInstall(): void {
   // process alive and stop the installer from replacing files / relaunching
   // (a documented electron-updater gotcha, esp. on Windows NSIS).
   app.removeAllListeners('window-all-closed')
-  // isSilent=TRUE on Windows. Our installer is now ASSISTED (nsis.oneClick=false
-  // + allowToChangeInstallationDirectory) so the FIRST install shows the
-  // directory/mode wizard. But an UPDATE must NOT re-show that wizard — isSilent
-  // skips it and updates in place. isForceRunAfter=true relaunches after the
-  // silent update. (The old assisted+silent force-run bug, #2179, was fixed
-  // upstream in PR #2278; we're on electron-updater 6.8.9, well past it.)
+  // isSilent=true keeps the per-user one-click NSIS update unattended, while
+  // isForceRunAfter=true relaunches the application after replacement.
   // setImmediate + removeAllListeners are the documented prerequisites for the
   // relaunch to fire reliably. macOS ignores isSilent entirely.
   setImmediate(() => autoUpdater.quitAndInstall(true, true))
