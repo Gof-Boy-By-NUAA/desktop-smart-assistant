@@ -202,7 +202,9 @@ class GovernedSkillRepository:
         )
         for table in _APPEND_ONLY_TABLES:
             self._create_append_only_triggers(table)
-        self._conn.execute("PRAGMA user_version=%d" % SCHEMA_VERSION)
+        # 版本号字面量与 SCHEMA_VERSION 保持一致（SCHEMA_VERSION = 1）
+        assert SCHEMA_VERSION == 1
+        self._conn.execute("PRAGMA user_version=1")
         self._conn.commit()
 
     def _create_append_only_triggers(self, table: str) -> None:

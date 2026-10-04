@@ -133,44 +133,57 @@ class ShadowTelemetryRepository:
         )
         self._ensure_injection_columns()
         self._conn.execute("PRAGMA foreign_keys=ON")
-        self._conn.execute("PRAGMA user_version=%d" % _SCHEMA_VERSION)
+        # 版本号字面量与 _SCHEMA_VERSION 保持一致（_SCHEMA_VERSION = 2）
+        assert _SCHEMA_VERSION == 2
+        self._conn.execute("PRAGMA user_version=2")
         self._conn.commit()
 
     def _ensure_injection_columns(self) -> None:
-        """幂等迁移生产注入状态列，兼容已有 v1 遥测库。"""
+        """幂等迁移生产注入状态列，兼容已有 v1 遥测库。
 
-        migrations = {
-            "skill_shadow_runs": {
-                "injection_requested": (
-                    "INTEGER NOT NULL DEFAULT 0 "
-                    "CHECK(injection_requested IN (0, 1))"
-                ),
-                "injection_status": "TEXT NOT NULL DEFAULT 'not_requested'",
-                "injected_count": (
-                    "INTEGER NOT NULL DEFAULT 0 CHECK(injected_count >= 0)"
-                ),
-            },
-            "skill_shadow_candidates": {
-                "projection_verified": (
-                    "INTEGER NOT NULL DEFAULT 0 "
-                    "CHECK(projection_verified IN (0, 1))"
-                ),
-                "injected": (
-                    "INTEGER NOT NULL DEFAULT 0 CHECK(injected IN (0, 1))"
-                ),
-            },
+        迁移语句全部使用 SQL 字面量；新增列时同步维护这里的表名/列名清单。
+        """
+
+        existing_runs = {
+            str(row[0])
+            for row in self._conn.execute(
+                "SELECT name FROM pragma_table_info(?)", ("skill_shadow_runs",)
+            )
         }
-        for table, columns in migrations.items():
-            existing = {
-                str(row[1])
-                for row in self._conn.execute("PRAGMA table_info(%s)" % table)
-            }
-            for name, declaration in columns.items():
-                if name not in existing:
-                    self._conn.execute(
-                        "ALTER TABLE %s ADD COLUMN %s %s"
-                        % (table, name, declaration)
-                    )
+        if "injection_requested" not in existing_runs:
+            self._conn.execute(
+                "ALTER TABLE skill_shadow_runs ADD COLUMN injection_requested "
+                "INTEGER NOT NULL DEFAULT 0 "
+                "CHECK(injection_requested IN (0, 1))"
+            )
+        if "injection_status" not in existing_runs:
+            self._conn.execute(
+                "ALTER TABLE skill_shadow_runs ADD COLUMN injection_status "
+                "TEXT NOT NULL DEFAULT 'not_requested'"
+            )
+        if "injected_count" not in existing_runs:
+            self._conn.execute(
+                "ALTER TABLE skill_shadow_runs ADD COLUMN injected_count "
+                "INTEGER NOT NULL DEFAULT 0 CHECK(injected_count >= 0)"
+            )
+        existing_candidates = {
+            str(row[0])
+            for row in self._conn.execute(
+                "SELECT name FROM pragma_table_info(?)",
+                ("skill_shadow_candidates",),
+            )
+        }
+        if "projection_verified" not in existing_candidates:
+            self._conn.execute(
+                "ALTER TABLE skill_shadow_candidates ADD COLUMN "
+                "projection_verified INTEGER NOT NULL DEFAULT 0 "
+                "CHECK(projection_verified IN (0, 1))"
+            )
+        if "injected" not in existing_candidates:
+            self._conn.execute(
+                "ALTER TABLE skill_shadow_candidates ADD COLUMN injected "
+                "INTEGER NOT NULL DEFAULT 0 CHECK(injected IN (0, 1))"
+            )
 
     def digest(self, value: bytes, domain: str = "generic") -> str:
         """用本机随机密钥生成不可直接字典反查的稳定摘要。"""
