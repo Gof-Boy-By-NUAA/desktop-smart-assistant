@@ -276,8 +276,10 @@ class TenantAwareLexicalIndex:
 
         self._conn.execute("BEGIN IMMEDIATE")
         try:
-            for name in _RETRIEVAL_TRIGGER_SQL:
-                self._conn.execute("DROP TRIGGER IF EXISTS %s" % name)
+            # 触发器名与 _RETRIEVAL_TRIGGER_SQL 键一一对应；SQL 一律用字面量
+            self._conn.execute("DROP TRIGGER IF EXISTS retrieval_documents_ai")
+            self._conn.execute("DROP TRIGGER IF EXISTS retrieval_documents_ad")
+            self._conn.execute("DROP TRIGGER IF EXISTS retrieval_documents_au")
             for sql in _RETRIEVAL_TRIGGER_SQL.values():
                 self._conn.execute(sql)
             self._conn.execute(
@@ -436,8 +438,10 @@ class TenantAwareLexicalIndex:
     def _replace_only_tenant(self, rows: Sequence[Tuple[object, ...]]) -> None:
         """在检索库只有一个租户时原子重建完整 FTS，减少碎片和触发器往返。"""
 
-        for name in _RETRIEVAL_TRIGGER_SQL:
-            self._conn.execute("DROP TRIGGER IF EXISTS %s" % name)
+        # 触发器名与 _RETRIEVAL_TRIGGER_SQL 键一一对应；SQL 一律用字面量
+        self._conn.execute("DROP TRIGGER IF EXISTS retrieval_documents_ai")
+        self._conn.execute("DROP TRIGGER IF EXISTS retrieval_documents_ad")
+        self._conn.execute("DROP TRIGGER IF EXISTS retrieval_documents_au")
         self._conn.execute("DELETE FROM retrieval_documents")
         self._conn.executemany(_INSERT_DOCUMENT_SQL, rows)
         self._conn.execute(

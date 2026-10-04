@@ -499,7 +499,9 @@ class KnowledgeRepository:
                 return False
             actual_columns = [
                 str(row["name"])
-                for row in conn.execute("PRAGMA index_info(%s)" % name)
+                for row in conn.execute(
+                    "SELECT name FROM pragma_index_info(?)", (name,)
+                )
             ]
             if (
                 actual_columns != columns

@@ -1472,7 +1472,10 @@ class ConversationStore:
         ddl: str,
     ) -> bool:
         cols = {
-            row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM pragma_table_info(?)", (table,)
+            ).fetchall()
         }
         if column in cols:
             return False
@@ -1485,8 +1488,10 @@ class ConversationStore:
             # our PRAGMA and ALTER. Re-check authoritative schema before failing.
             conn.rollback()
             cols = {
-                row[1]
-                for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM pragma_table_info(?)", (table,)
+                ).fetchall()
             }
             if column in cols:
                 return False
