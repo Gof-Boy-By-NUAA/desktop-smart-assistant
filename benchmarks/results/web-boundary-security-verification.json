@@ -75,8 +75,8 @@
       "passed": true
     },
     {
-      "actual": "4f8b735b14090fa21cee62de4fb1c9e1371b6e29977a3e80bdf8b59bbb4fb079",
-      "expected": "4f8b735b14090fa21cee62de4fb1c9e1371b6e29977a3e80bdf8b59bbb4fb079",
+      "actual": "38fb0629a47fb96d823a7f70bebad35ea986d6e9e78b8816a86af215616a3ebd",
+      "expected": "38fb0629a47fb96d823a7f70bebad35ea986d6e9e78b8816a86af215616a3ebd",
       "name": "source_fingerprint",
       "passed": true
     },
@@ -362,8 +362,8 @@
     }
   ],
   "report_path": "benchmarks\\results\\web-boundary-security.json",
-  "report_sha256": "0c76ac1897c0fc5533fb194669a22b1b7f6d0706fdf5e93040fd22c32bd1eb8f",
+  "report_sha256": "97cbf1ce9242b56e8b264fbe8668706b6e136625569b3dc0802386e5642d2cab",
   "schema_version": 1,
-  "source_fingerprint_sha256": "4f8b735b14090fa21cee62de4fb1c9e1371b6e29977a3e80bdf8b59bbb4fb079",
+  "source_fingerprint_sha256": "38fb0629a47fb96d823a7f70bebad35ea986d6e9e78b8816a86af215616a3ebd",
   "status": "completed"
 }

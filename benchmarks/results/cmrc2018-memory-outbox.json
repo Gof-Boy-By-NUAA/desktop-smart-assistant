@@ -79,43 +79,43 @@
       "passed": true
     },
     {
-      "actual": 3.0072149999999986,
+      "actual": 1.35831,
       "expected": 100.0,
       "name": "performance.fact_write_p95_ms",
       "passed": true
     },
     {
-      "actual": 694.2911013577402,
+      "actual": 361.7222449199139,
       "expected": 20.0,
       "name": "performance.initial_recovery_throughput",
       "passed": true
     },
     {
-      "actual": 87.81106851493745,
+      "actual": 180.15901555348813,
       "expected": 20.0,
       "name": "performance.revoke_recovery_throughput",
       "passed": true
     }
   ],
-  "generated_at": "2026-10-05T04:09:51.343158+00:00",
+  "generated_at": "2026-10-06T10:46:50.844384+00:00",
   "implementation_sha256": "0a95ad79599f8e8ea049a0f2246122aa43f67d0669b29835932b2620c73a995e",
   "metrics": {
-    "fact_write_latency_ms_mean": 1.8957384433962263,
-    "fact_write_latency_ms_p50": 1.57485,
-    "fact_write_latency_ms_p95": 3.0072149999999986,
+    "fact_write_latency_ms_mean": 1.1224317216981132,
+    "fact_write_latency_ms_p50": 1.0454500000000002,
+    "fact_write_latency_ms_p95": 1.35831,
     "final_active_count": 798,
     "final_index_matches": true,
     "initial_active_count": 848,
     "initial_index_matches": true,
     "initial_pending_job_count": 848,
     "initial_projection_match_count": 848,
-    "initial_recovery_documents_per_second": 694.2911013577402,
-    "initial_recovery_ms": 1221.3897,
+    "initial_recovery_documents_per_second": 361.7222449199139,
+    "initial_recovery_ms": 2344.3402,
     "pending_after_recovery": 0,
     "pending_before_revoke_recovery": 50,
     "revoke_count": 50,
-    "revoke_recovery_documents_per_second": 87.81106851493745,
-    "revoke_recovery_ms": 569.4043,
+    "revoke_recovery_documents_per_second": 180.15901555348813,
+    "revoke_recovery_ms": 277.5326,
     "revoked_index_count": 0,
     "revoked_projection_count": 0
   },
