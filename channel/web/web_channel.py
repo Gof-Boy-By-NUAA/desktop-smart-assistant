@@ -34,7 +34,7 @@ from common import const
 from common import i18n
 from common.log import logger
 from common.singleton import singleton
-from config import conf, get_data_root, get_weixin_credentials_path
+from config import conf, get_data_root, get_weixin_credentials_path, hash_web_password, verify_web_password
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg"}
 VIDEO_EXTENSIONS = {".mp4", ".webm", ".avi", ".mov", ".mkv"}
@@ -675,16 +675,100 @@ def _prepare_sse_tool_result(value: Any) -> Tuple[Any, dict]:
     })
     return summary, metadata
 
-def _get_web_password() -> str:
-    # Coerce to str so non-string values in config.json (e.g. numeric password) won't break comparisons
-    pwd = conf().get("web_password", "")
-    if pwd is None:
+# --- Web password hashing (RC3 F2) -------------------------------------
+# Passwords are stored only as salted PBKDF2 hashes under config key
+# `web_password_hash` with the format
+#   pbkdf2_sha256$<iterations>$<salt-hex>$<digest-hex>
+# The legacy plaintext `web_password` key is migrated to the hash at
+# startup (config.load_config) and is never written back to disk. For
+# in-memory configs that still carry the legacy key (tests, older
+# embeddings), verification falls back to a constant-time plaintext
+# comparison and signing secrets are deterministically derived, so
+# auth-policy fingerprints stay stable without persisting plaintext.
+# Hash encoding/verification live in config.py (hash_web_password /
+# verify_web_password) and are re-exported below.
+# Minimum policy enforced on the config write interface (Task F2): at
+# least 8 chars plus a small deny-list of trivially guessable values.
+_PASSWORD_MIN_LENGTH = 8
+_PASSWORD_DENY_LIST = frozenset({
+    "12345678", "123456789", "1234567890", "password", "password1",
+    "qwerty123", "qwertyuiop", "11111111", "88888888", "abc12345",
+    "iloveyou1", "admin123", "letmein1", "1qaz2wsx",
+})
+
+
+def _hash_web_password(plaintext: str) -> str:
+    """Encode a plaintext password as a salted PBKDF2 hash string."""
+    return hash_web_password(plaintext)
+
+
+def _verify_password_hash(plaintext: str, encoded: str) -> bool:
+    """Constant-time verification of a plaintext against a stored hash."""
+    return verify_web_password(plaintext, encoded)
+
+
+def _stored_password_hash() -> str:
+    value = conf().get("web_password_hash", "")
+    if value is None:
         return ""
-    return str(pwd)
+    return str(value)
+
+
+def _legacy_password() -> str:
+    value = conf().get("web_password", "")
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _password_matches(candidate: str) -> bool:
+    """Verify a login candidate against the stored hash (or legacy value)."""
+    stored = _stored_password_hash()
+    if stored:
+        return _verify_password_hash(candidate, stored)
+    legacy = _legacy_password()
+    if not legacy:
+        return False
+    try:
+        return hmac.compare_digest(
+            candidate.encode("utf-8"), legacy.encode("utf-8")
+        )
+    except UnicodeEncodeError:
+        return False
+
+
+def _get_web_password() -> str:
+    """Return the stable secret used for signing and policy fingerprints.
+
+    This is the stored hash when present. For in-memory legacy configs it is
+    a deterministic derivation of the plaintext, which keeps epoch/HMAC
+    fingerprints stable without exposing or persisting the plaintext. An
+    empty string means password auth is disabled.
+    """
+    stored = _stored_password_hash()
+    if stored:
+        return stored
+    legacy = _legacy_password()
+    if not legacy:
+        return ""
+    return "legacy$" + hashlib.sha256(legacy.encode("utf-8")).hexdigest()
 
 
 def _is_password_enabled():
-    return bool(_get_web_password())
+    return bool(_stored_password_hash() or _legacy_password())
+
+
+def _check_password_strength(candidate: str):
+    """Enforce the minimum write-interface password policy (Task F2).
+
+    Returns (ok, reason). Reasons are stable identifiers, not user copy.
+    """
+    if len(candidate) < _PASSWORD_MIN_LENGTH:
+        return False, "password_too_short"
+    if candidate.lower() in _PASSWORD_DENY_LIST:
+        return False, "password_too_common"
+    return True, ""
+
 
 
 def _session_expire_seconds():
@@ -4432,11 +4516,8 @@ class AuthLoginHandler:
         except Exception:
             return json.dumps({"status": "error", "message": "Invalid request"})
         password = str(data.get("password", "") or "")
-        expected = _get_web_password()
         try:
-            password_matches = hmac.compare_digest(
-                password.encode("utf-8"), expected.encode("utf-8")
-            )
+            password_matches = _password_matches(password)
         except UnicodeEncodeError:
             password_matches = False
         if not password_matches:
@@ -5073,8 +5154,12 @@ class ConfigHandler:
             except Exception as cp_err:
                 logger.warning(f"[ConfigHandler] failed to expand custom providers: {cp_err}")
 
-            raw_pwd = str(local_config.get("web_password", "") or "")
-            masked_pwd = ("*" * len(raw_pwd)) if raw_pwd else ""
+            # RC3 F2: never return the password (plaintext or hash) to any
+            # client. The UI only learns whether a password is set.
+            password_is_set = bool(
+                local_config.get("web_password_hash")
+                or local_config.get("web_password")
+            )
 
             result = {
                 "status": "success",
@@ -5092,13 +5177,8 @@ class ConfigHandler:
                 "api_bases": api_bases,
                 "api_keys": api_keys_masked,
                 "providers": providers,
-                "web_password_masked": masked_pwd,
+                "web_password_set": password_is_set,
             }
-            # The desktop app runs on the local trusted machine, so it can edit
-            # the real password in place (cursor at the end, delete to clear).
-            # Browser access only ever sees the masked value.
-            if os.environ.get("COW_DESKTOP") == "1":
-                result["web_password"] = raw_pwd
             return json.dumps(result, ensure_ascii=False)
         except Exception as e:
             logger.error(f"Error getting config: {e}")
@@ -5128,16 +5208,47 @@ class ConfigHandler:
             if not applied:
                 return json.dumps({"status": "error", "message": "no valid keys to update"})
 
+            # RC3 F2: the write interface accepts `web_password` only as the
+            # user's *new* password candidate. It enforces the strength policy,
+            # stores only the salted hash and never persists plaintext.
+            password_clear_requested = False
+            if "web_password" in applied:
+                new_password = str(applied.pop("web_password") or "")
+                if new_password:
+                    ok, reason = _check_password_strength(new_password)
+                    if not ok:
+                        logger.warning(
+                            "[WebChannel] Password change rejected by strength policy: %s",
+                            reason,
+                        )
+                        return json.dumps({
+                            "status": "error",
+                            "message": "weak_password",
+                            "reason": reason,
+                        })
+                    applied["web_password_hash"] = _hash_web_password(new_password)
+                    local_config["web_password_hash"] = applied["web_password_hash"]
+                else:
+                    # Empty string explicitly clears the password.
+                    applied["web_password_hash"] = ""
+                    local_config["web_password_hash"] = ""
+                    password_clear_requested = True
+                # The in-memory legacy key, if any, must not survive a change.
+                local_config.pop("web_password", None)
+
             config_path = os.path.join(get_data_root(), "config.json")
-            old_password = ""  # Store old password before update
+            old_password_present = False  # Whether a password was set before this update
             if os.path.exists(config_path):
                 with open(config_path, "r", encoding="utf-8") as f:
                     file_cfg = json.load(f)
-                    # Capture old password before updating
-                    if "web_password" in applied:
-                        old_password = file_cfg.get("web_password", "")
+                    old_password_present = bool(
+                        file_cfg.get("web_password_hash") or file_cfg.get("web_password")
+                    )
             else:
                 file_cfg = {}
+            # Legacy plaintext must never be re-persisted once this handler
+            # runs, even if it is still present in the on-disk file.
+            file_cfg.pop("web_password", None)
             file_cfg.update(applied)
             with open(config_path, "w", encoding="utf-8") as f:
                 json.dump(file_cfg, f, indent=4, ensure_ascii=False)
@@ -5154,7 +5265,7 @@ class ConfigHandler:
                     logger.warning(f"[WebChannel] Failed to apply language: {lang_err}")
 
             password_warning = None
-            if "web_password" in applied and not applied["web_password"] and old_password:
+            if password_clear_requested and old_password_present:
                 password_warning = "password_cleared"
                 logger.warning(
                     "[WebChannel] Web password cleared. The listener remains "

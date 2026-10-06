@@ -45,6 +45,7 @@ const BasicSettings: React.FC<BasicSettingsProps> = ({ baseUrl, onLangChange, on
   const [pwDirty, setPwDirty] = useState(false)
   const [pwVisible, setPwVisible] = useState(false)
   const [pwStatus, setPwStatus] = useState('')
+  const [pwSet, setPwSet] = useState(false)
 
   useEffect(() => {
     apiClient.setBaseUrl(baseUrl)
@@ -65,9 +66,10 @@ const BasicSettings: React.FC<BasicSettingsProps> = ({ baseUrl, onLangChange, on
       setMaxSteps(data.agent_max_steps ?? 20)
       setThinking(!!data.enable_thinking)
       setEvolution(!!data.self_evolution_enabled)
-      // Prefer the real password (desktop only) so it can be edited in place;
-      // fall back to the masked value for browser access.
-      setPassword(data.web_password ?? data.web_password_masked ?? '')
+      // RC3: the backend never returns the password; only whether one is set.
+      // The input always starts empty — type a new password to change it.
+      setPwSet(!!data.web_password_set)
+      setPassword('')
       setPwDirty(false)
 
       const ids = data.providers ? Object.keys(data.providers) : []
@@ -169,18 +171,21 @@ const BasicSettings: React.FC<BasicSettingsProps> = ({ baseUrl, onLangChange, on
     setTimeout(() => setAgentStatus(''), 2000)
   }
 
-  // Desktop returns the real password, so the field holds plaintext and can be
-  // saved (including cleared) directly. Browser access only has the masked
-  // value, where a masked string must never be saved as the real password.
-  const hasRealPassword = config?.web_password !== undefined
-
+  // RC3: saving submits the new password candidate; the backend stores only
+  // a salted hash, enforces a minimum strength policy and never echoes the
+  // password back. An empty save clears the password (restores the local
+  // no-auth default).
   const savePassword = async () => {
     if (!pwDirty) return
-    if (!hasRealPassword && MASK_RE.test(password)) return
     try {
-      await apiClient.updateConfig({ web_password: password })
-      setPwStatus(password ? t('config_password_saved') : t('config_password_cleared'))
-      setPwDirty(false)
+      const res = await apiClient.updateConfig({ web_password: password })
+      if (res.status === 'error' || res.message === 'weak_password') {
+        setPwStatus(t('config_password_weak'))
+      } else {
+        setPwSet(!!password)
+        setPwStatus(password ? t('config_password_saved') : t('config_password_cleared'))
+        setPwDirty(false)
+      }
     } catch {
       setPwStatus(t('config_save_error'))
     }
@@ -374,22 +379,13 @@ const BasicSettings: React.FC<BasicSettingsProps> = ({ baseUrl, onLangChange, on
       {/* Security */}
       <Card icon={<ShieldCheck size={16} />} title={t('config_security')}>
         <div className="space-y-4">
-          <Field label={t('config_password')} hint={t('config_password_hint')}>
+          <Field label={t('config_password')} hint={pwSet ? t('config_password_set') : t('config_password_hint')}>
             <div className="relative">
               <TextInput
                 type={pwVisible ? 'text' : 'password'}
                 className="pr-10"
                 value={password}
                 placeholder={t('config_password_placeholder')}
-                onFocus={() => {
-                  // Browser access shows a mask; clear it on focus so the user
-                  // types a fresh password. Desktop holds the real password and
-                  // must stay editable in place (cursor at the end).
-                  if (!hasRealPassword && !pwDirty && MASK_RE.test(password)) setPassword('')
-                }}
-                onBlur={() => {
-                  if (!hasRealPassword && !pwDirty) setPassword(config?.web_password_masked || '')
-                }}
                 onChange={(e) => {
                   setPassword(e.target.value)
                   setPwDirty(true)

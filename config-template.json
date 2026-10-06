@@ -34,6 +34,7 @@
   "wecom_bot_secret": "",
   "web_host": "",
   "web_password": "",
+  "web_password_hash": "",
   "agent": true,
   "agent_workspace": "./workspace",
   "agent_max_context_tokens": 64000,

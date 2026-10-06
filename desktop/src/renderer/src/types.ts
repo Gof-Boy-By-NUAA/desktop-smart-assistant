@@ -359,10 +359,9 @@ export interface ConfigData {
   api_bases: Record<string, string>
   api_keys: Record<string, string>
   providers: Record<string, ProviderMeta>
-  web_password_masked?: string
-  // Real password, only returned to the desktop app (trusted local machine) so
-  // it can be edited in place. Undefined for browser access.
-  web_password?: string
+  // RC3: the config API never returns the password (or its hash); the UI
+  // only learns whether a password is currently set.
+  web_password_set?: boolean
 }
 
 // ============================================================

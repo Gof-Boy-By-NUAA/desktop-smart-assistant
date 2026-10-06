@@ -2,14 +2,54 @@
 
 import ast
 import copy
+import hashlib
+import hmac
 import json
 import logging
 import os
 import pickle
+import secrets
 import sys
 
 from common.log import logger
 from common import i18n
+
+# --- Web password hashing (RC3 F2) -------------------------------------
+# Shared implementation used by both the startup migration (below) and the
+# web channel auth path. Stored format: pbkdf2_sha256$<iterations>$<salt>$<digest>
+WEB_PASSWORD_SCHEME = "pbkdf2_sha256"
+WEB_PASSWORD_ITERATIONS = 200_000
+WEB_PASSWORD_SALT_BYTES = 16
+
+
+def hash_web_password(plaintext: str) -> str:
+    """Encode a plaintext password as a salted PBKDF2 hash string."""
+    salt = secrets.token_hex(WEB_PASSWORD_SALT_BYTES)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256", plaintext.encode("utf-8"), salt.encode("ascii"), WEB_PASSWORD_ITERATIONS
+    ).hex()
+    return f"{WEB_PASSWORD_SCHEME}${WEB_PASSWORD_ITERATIONS}${salt}${digest}"
+
+
+def verify_web_password(plaintext: str, encoded: str) -> bool:
+    """Constant-time verification of a plaintext against a stored hash."""
+    parts = str(encoded).split("$")
+    if len(parts) != 4 or parts[0] != WEB_PASSWORD_SCHEME:
+        return False
+    try:
+        iterations = int(parts[1])
+    except ValueError:
+        return False
+    if iterations < 1 or iterations > 10_000_000:
+        return False
+    try:
+        digest = hashlib.pbkdf2_hmac(
+            "sha256", plaintext.encode("utf-8"), parts[2].encode("ascii"), iterations
+        ).hex()
+    except (UnicodeEncodeError, ValueError):
+        return False
+    return hmac.compare_digest(digest, parts[3])
+
 
 # All available config keys are listed in this dict (use lowercase keys).
 # The values here are placeholders only; the program does NOT read them.
@@ -251,7 +291,8 @@ available_setting = {
     "mimo_api_base": "https://api.xiaomimimo.com/v1",
     "web_host": "",  # Web console bind address; empty means auto
     "web_port": 9899,
-    "web_password": "",  # Web console password; empty means no authentication required
+    "web_password": "",  # LEGACY plaintext web console password; migrated to web_password_hash at startup and never persisted again
+    "web_password_hash": "",  # Salted hash (pbkdf2_sha256$iter$salt$digest) of the web console password; empty means no authentication required
     "web_session_expire_days": 30,  # Auth session expiry in days
     "web_file_serve_root": "~",  # Root dir the /api/file endpoint may serve; "/" allows the whole filesystem
     "mcp_oauth_redirect_base": "",  # Base URL for MCP OAuth callback (e.g. http://your-ip:9899); empty uses local web console
@@ -419,8 +460,10 @@ def load_config():
     # User config lives in the data root: source deployments use CWD (./), while
     # the desktop build points COW_DATA_DIR at ~/.cow so config survives updates.
     config_path = os.path.join(get_data_root(), "config.json")
+    config_from_template = False
     if not os.path.exists(config_path):
         logger.info("config file not found, falling back to config-template.json")
+        config_from_template = True
         # Resolve the template via get_resource_root() so it works both from
         # source and from a frozen (PyInstaller) bundle, where the template
         # ships inside the bundle (sys._MEIPASS) and CWD may differ.
@@ -471,6 +514,30 @@ def load_config():
                     config[name] = True
                 else:
                     config[name] = value
+
+    # RC3 F2: migrate any legacy plaintext web_password to the salted
+    # web_password_hash and strip the plaintext from the on-disk config.
+    # Runs before the (masked) config debug log so the legacy key never
+    # appears in startup output either. An empty/absent plaintext means the
+    # factory default (auth disabled) and is left untouched. Writes only
+    # target the user-owned config.json (never the bundled template).
+    if str(config.get("web_password") or ""):
+        if not config.get("web_password_hash"):
+            config["web_password_hash"] = hash_web_password(str(config["web_password"]))
+        config.pop("web_password", None)
+        if not config_from_template and os.path.exists(config_path):
+            from pathlib import Path
+            target = Path(config_path)
+            on_disk = json.loads(target.read_text(encoding="utf-8"))
+            on_disk.pop("web_password", None)
+            on_disk["web_password_hash"] = config.get("web_password_hash")
+            target.write_text(
+                json.dumps(on_disk, indent=4, ensure_ascii=False), encoding="utf-8"
+            )
+        logger.info(
+            "[INIT][SECURITY] legacy web_password migrated to salted "
+            "web_password_hash; plaintext removed from config"
+        )
 
     if config.get("debug", False):
         logger.setLevel(logging.DEBUG)
