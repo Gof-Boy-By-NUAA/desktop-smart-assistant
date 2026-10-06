@@ -452,7 +452,7 @@ class ApiClient {
     return this.request<{ status: string } & ConfigData>('/config')
   }
 
-  async updateConfig(updates: Record<string, unknown>): Promise<{ status: string; applied: Record<string, unknown> }> {
+  async updateConfig(updates: Record<string, unknown>): Promise<{ status: string; applied: Record<string, unknown>; message?: string; reason?: string }> {
     return this.request('/config', {
       method: 'POST',
       body: JSON.stringify({ updates }),
