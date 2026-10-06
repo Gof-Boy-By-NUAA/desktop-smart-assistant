@@ -1,4 +1,4 @@
-﻿import { app, BrowserWindow, shell, ipcMain, dialog, nativeImage, protocol, safeStorage } from 'electron'
+﻿import { app, BrowserWindow, shell, ipcMain, dialog, nativeImage, Notification, protocol, safeStorage } from 'electron'
 import { openExternalSafely } from './external-url'
 import path from 'path'
 import fs from 'fs'
@@ -21,6 +21,51 @@ let mainWindow: BrowserWindow | null = null
 let pythonBackend: PythonBackend | null = null
 // True once the user explicitly quits (menu/tray), so close-to-tray is bypassed.
 let isQuitting = false
+
+// RC3 F1: user-facing close behaviour + tray-notice state, persisted in the
+// per-user Electron data dir (app-settings.json). `closeToTray` defaults to
+// true (close button hides to tray); setting it to false makes the window
+// close button quit the whole app (backend included).
+interface AppSettings {
+  closeToTray?: boolean
+  trayNoticeShown?: boolean
+}
+const appSettingsFile = () => path.join(app.getPath('userData'), 'app-settings.json')
+function loadAppSettings(): AppSettings {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(appSettingsFile(), 'utf-8')) as AppSettings
+    if (parsed && typeof parsed === 'object') return parsed
+  } catch {
+    /* first run or unreadable */
+  }
+  return {}
+}
+function persistAppSettings(settings: AppSettings): void {
+  try {
+    fs.writeFileSync(appSettingsFile(), JSON.stringify(settings, null, 2))
+  } catch {
+    /* best effort — close behaviour falls back to the default */
+  }
+}
+const closeToTrayEnabled = () => loadAppSettings().closeToTray !== false
+
+function showTrayNoticeOnce(): void {
+  // First time the window hides to the tray, tell the user where the app
+  // went and how to really quit it. Shown exactly once per installation.
+  const settings = loadAppSettings()
+  if (settings.trayNoticeShown) return
+  settings.trayNoticeShown = true
+  persistAppSettings(settings)
+  if (!Notification.isSupported()) return
+  const zh = (app.getLocale() || '').toLowerCase().startsWith('zh')
+  const notification = new Notification({
+    title: zh ? 'SmartAssistant 仍在运行' : 'SmartAssistant is still running',
+    body: zh
+      ? '已最小化到系统托盘；右键托盘图标选择退出才能彻底关闭应用'
+      : 'Minimized to the system tray; right-click the tray icon and choose Quit to exit completely',
+  })
+  notification.show()
+}
 
 const isDev = !app.isPackaged
 const VITE_DEV_PORTS = [5173, 5174, 5175, 5176]
@@ -732,10 +777,17 @@ function createWindow() {
 
   // Close-to-tray: hide the window instead of destroying it, so the tray's
   // "Show" can bring it back. Only a real Quit (menu/tray/Cmd+Q) destroys it.
+  // RC3 F1: honour the user's closeToTray setting — when explicitly disabled,
+  // closing the window quits the whole app instead of hiding to the tray.
   mainWindow.on('close', (e) => {
     if (!isQuitting) {
-      e.preventDefault()
-      mainWindow?.hide()
+      if (closeToTrayEnabled()) {
+        e.preventDefault()
+        mainWindow?.hide()
+        showTrayNoticeOnce()
+      } else {
+        isQuitting = true
+      }
     }
   })
 
@@ -1025,9 +1077,24 @@ app.on('window-all-closed', () => {
   }
 })
 
-app.on('before-quit', () => {
+// RC3 F1: quit must not outrun the Python sidecar. before-quit is synchronous,
+// so the first pass prevents the default quit, awaits the backend stop chain
+// (SIGTERM -> grace -> SIGKILL -> confirmed exit, python-manager.stop()) and
+// only then re-enters quit. The flag keeps the second pass from looping.
+let backendQuitHandled = false
+app.on('before-quit', (e) => {
   isQuitting = true
   saveWindowState()
   destroyTray()
-  pythonBackend?.stop()
+  if (backendQuitHandled) return
+  backendQuitHandled = true
+  e.preventDefault()
+  void (async () => {
+    try {
+      await pythonBackend?.stop()
+    } catch (error) {
+      console.warn('[Electron] backend stop reported an error during quit:', error)
+    }
+    app.quit()
+  })()
 })
