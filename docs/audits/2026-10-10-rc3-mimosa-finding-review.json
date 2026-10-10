@@ -1,0 +1,279 @@
+{
+  "schema": "smartassistant-mimosa-finding-review/v1",
+  "is_mimosa_exemption_configuration": false,
+  "baseline_commit": "7506302cf1f9ab3a65c97306e073417843337c56",
+  "original_high_findings": 13,
+  "existing_business_findings": 9,
+  "new_test_findings": 4,
+  "current_high_findings": 12,
+  "summary_omitted_finding": "tests/test_rc3_installer_cleanup_native.py:52 subprocess.run([str(setup), '/S'], cwd=tmp_path, timeout=30)",
+  "findings": [
+    {
+      "review_id": "RC3-MIMOSA-01",
+      "file": "channel/web/web_channel.py",
+      "original_line": 2916,
+      "public_rule_class": "path-traversal",
+      "cwe": [
+        "CWE-22"
+      ],
+      "scanner_severity": "high",
+      "already_reported_at_head": true,
+      "baseline_line": 2916,
+      "control_evidence": "Directory upload calls _resolve_upload_path; rejects '..', resolves links and checks commonpath under the upload root.",
+      "disposition": "FALSE_POSITIVE_FOR_REVIEWED_INPUT_AND_TRUST_CONTEXT",
+      "approval_status": "CONDITIONAL_USER_EXCEPTION_APPLIES_AFTER_REVIEW_AND_REAL_VERIFICATION",
+      "runtime_verification_limit": "This review does not establish absence of every local symlink race, malicious toolchain replacement or arbitrary filesystem attack.",
+      "review_hash": "718f4c0a67c4d41bea3bed695a1d1fc4e79d539f27b5d869e4de13f67dc0bf06"
+    },
+    {
+      "review_id": "RC3-MIMOSA-02",
+      "file": "channel/web/web_channel.py",
+      "original_line": 2950,
+      "public_rule_class": "path-traversal",
+      "cwe": [
+        "CWE-22"
+      ],
+      "scanner_severity": "high",
+      "already_reported_at_head": true,
+      "baseline_line": 2950,
+      "control_evidence": "Single uploads use an HMAC owner directory and a generated UUID filename; original filename supplies the extension.",
+      "disposition": "FALSE_POSITIVE_FOR_REVIEWED_INPUT_AND_TRUST_CONTEXT",
+      "approval_status": "CONDITIONAL_USER_EXCEPTION_APPLIES_AFTER_REVIEW_AND_REAL_VERIFICATION",
+      "runtime_verification_limit": "This review does not establish absence of every local symlink race, malicious toolchain replacement or arbitrary filesystem attack.",
+      "review_hash": "efbcde0eab5ccb739f120666ecf3f37cc1283a78330b6811d7fd1c061144c567"
+    },
+    {
+      "review_id": "RC3-MIMOSA-03",
+      "file": "channel/web/web_channel.py",
+      "original_line": 4608,
+      "public_rule_class": "path-traversal",
+      "cwe": [
+        "CWE-22"
+      ],
+      "scanner_severity": "high",
+      "already_reported_at_head": true,
+      "baseline_line": 4608,
+      "control_evidence": "Audio uploads use an HMAC owner directory, internal timestamp/random filename and an allowlisted extension.",
+      "disposition": "FALSE_POSITIVE_FOR_REVIEWED_INPUT_AND_TRUST_CONTEXT",
+      "approval_status": "CONDITIONAL_USER_EXCEPTION_APPLIES_AFTER_REVIEW_AND_REAL_VERIFICATION",
+      "runtime_verification_limit": "This review does not establish absence of every local symlink race, malicious toolchain replacement or arbitrary filesystem attack.",
+      "review_hash": "805215fb259d40887d2da49c00d89152bc7d0c57570ded3fd6f378c2fd89cec2"
+    },
+    {
+      "review_id": "RC3-MIMOSA-04",
+      "file": "channel/web/web_channel.py",
+      "original_line": 4767,
+      "public_rule_class": "path-traversal",
+      "cwe": [
+        "CWE-22"
+      ],
+      "scanner_severity": "high",
+      "already_reported_at_head": true,
+      "baseline_line": 4767,
+      "control_evidence": "FileServeHandler authenticates, requires an absolute path, resolves it, checks allowed roots and rejects another owner's upload directory.",
+      "disposition": "FALSE_POSITIVE_FOR_REVIEWED_INPUT_AND_TRUST_CONTEXT",
+      "approval_status": "CONDITIONAL_USER_EXCEPTION_APPLIES_AFTER_REVIEW_AND_REAL_VERIFICATION",
+      "runtime_verification_limit": "This review does not establish absence of every local symlink race, malicious toolchain replacement or arbitrary filesystem attack.",
+      "review_hash": "5434e33599c00d91cb45328d91b45a388fdad2fe15a0e97bf6ddcaa67e9f99eb"
+    },
+    {
+      "review_id": "RC3-MIMOSA-05",
+      "file": "channel/web/web_channel.py",
+      "original_line": 5250,
+      "public_rule_class": "path-traversal",
+      "cwe": [
+        "CWE-22"
+      ],
+      "scanner_severity": "high",
+      "already_reported_at_head": true,
+      "baseline_line": 5253,
+      "control_evidence": "Config update destination is process-controlled get_data_root()/config.json; request payload selects editable values, not the output path.",
+      "disposition": "FALSE_POSITIVE_FOR_REVIEWED_INPUT_AND_TRUST_CONTEXT",
+      "approval_status": "CONDITIONAL_USER_EXCEPTION_APPLIES_AFTER_REVIEW_AND_REAL_VERIFICATION",
+      "runtime_verification_limit": "This review does not establish absence of every local symlink race, malicious toolchain replacement or arbitrary filesystem attack.",
+      "review_hash": "77bd48667bba4655867ebc8087f56087d58688248a0ec413009275145aeb4dee"
+    },
+    {
+      "review_id": "RC3-MIMOSA-06",
+      "file": "channel/web/web_channel.py",
+      "original_line": 5708,
+      "public_rule_class": "path-traversal",
+      "cwe": [
+        "CWE-22"
+      ],
+      "scanner_severity": "high",
+      "already_reported_at_head": true,
+      "baseline_line": 5706,
+      "control_evidence": "The class _config_path() returns process-controlled get_data_root()/config.json.",
+      "disposition": "FALSE_POSITIVE_FOR_REVIEWED_INPUT_AND_TRUST_CONTEXT",
+      "approval_status": "CONDITIONAL_USER_EXCEPTION_APPLIES_AFTER_REVIEW_AND_REAL_VERIFICATION",
+      "runtime_verification_limit": "This review does not establish absence of every local symlink race, malicious toolchain replacement or arbitrary filesystem attack.",
+      "review_hash": "a47097fd7b62d23cabb96682f2f5055295111204383ba07cb0a4ae101066ea80"
+    },
+    {
+      "review_id": "RC3-MIMOSA-07",
+      "file": "channel/web/web_channel.py",
+      "original_line": 7200,
+      "public_rule_class": "path-traversal",
+      "cwe": [
+        "CWE-22"
+      ],
+      "scanner_severity": "high",
+      "already_reported_at_head": true,
+      "baseline_line": 7198,
+      "control_evidence": "Channel configuration writes process-controlled get_data_root()/config.json.",
+      "disposition": "FALSE_POSITIVE_FOR_REVIEWED_INPUT_AND_TRUST_CONTEXT",
+      "approval_status": "CONDITIONAL_USER_EXCEPTION_APPLIES_AFTER_REVIEW_AND_REAL_VERIFICATION",
+      "runtime_verification_limit": "This review does not establish absence of every local symlink race, malicious toolchain replacement or arbitrary filesystem attack.",
+      "review_hash": "d5a4f548de08df6cef6de69b83cd2064686e481c20919bda50dcaa25e634c19b"
+    },
+    {
+      "review_id": "RC3-MIMOSA-08",
+      "file": "channel/web/web_channel.py",
+      "original_line": 7271,
+      "public_rule_class": "path-traversal",
+      "cwe": [
+        "CWE-22"
+      ],
+      "scanner_severity": "high",
+      "already_reported_at_head": true,
+      "baseline_line": 7269,
+      "control_evidence": "Channel connection writes process-controlled get_data_root()/config.json.",
+      "disposition": "FALSE_POSITIVE_FOR_REVIEWED_INPUT_AND_TRUST_CONTEXT",
+      "approval_status": "CONDITIONAL_USER_EXCEPTION_APPLIES_AFTER_REVIEW_AND_REAL_VERIFICATION",
+      "runtime_verification_limit": "This review does not establish absence of every local symlink race, malicious toolchain replacement or arbitrary filesystem attack.",
+      "review_hash": "7ed017001f1bd67793e8ca4b72f7709a283bb0bd34c6f7f5a67c60bf81a06afd"
+    },
+    {
+      "review_id": "RC3-MIMOSA-09",
+      "file": "channel/web/web_channel.py",
+      "original_line": 7336,
+      "public_rule_class": "path-traversal",
+      "cwe": [
+        "CWE-22"
+      ],
+      "scanner_severity": "high",
+      "already_reported_at_head": true,
+      "baseline_line": 7334,
+      "control_evidence": "Channel disconnection writes process-controlled get_data_root()/config.json.",
+      "disposition": "FALSE_POSITIVE_FOR_REVIEWED_INPUT_AND_TRUST_CONTEXT",
+      "approval_status": "CONDITIONAL_USER_EXCEPTION_APPLIES_AFTER_REVIEW_AND_REAL_VERIFICATION",
+      "runtime_verification_limit": "This review does not establish absence of every local symlink race, malicious toolchain replacement or arbitrary filesystem attack.",
+      "review_hash": "b7b403d22533a0d5ec04020bb32d620d6b7428ab235c04e5aa7ebe275e6334ef"
+    },
+    {
+      "review_id": "RC3-MIMOSA-10",
+      "file": "tests/test_rc3_config_update_transaction.py",
+      "original_line": 80,
+      "public_rule_class": "hardcoded-credential",
+      "cwe": [
+        "CWE-798"
+      ],
+      "scanner_severity": "high",
+      "already_reported_at_head": false,
+      "baseline_line": null,
+      "control_evidence": "Original credential was synthetic test data. The changed test generates a random per-run credential; rescan no longer reports it.",
+      "disposition": "STATIC_RESCAN_CLEARED",
+      "approval_status": "CONDITIONAL_USER_EXCEPTION_APPLIES_AFTER_REVIEW_AND_REAL_VERIFICATION",
+      "runtime_verification_limit": "This review does not establish absence of every local symlink race, malicious toolchain replacement or arbitrary filesystem attack.",
+      "review_hash": "edc689ae1fe2d4330ccbf86e4dbd7435834b8d1ab700c02dbf7360ff3c4a6ae7"
+    },
+    {
+      "review_id": "RC3-MIMOSA-11",
+      "file": "tests/test_rc3_installer_cleanup_native.py",
+      "original_line": 31,
+      "public_rule_class": "path-traversal",
+      "cwe": [
+        "CWE-22"
+      ],
+      "scanner_severity": "high",
+      "already_reported_at_head": false,
+      "baseline_line": null,
+      "control_evidence": "Test source include now resolves strictly inside the repository; destination resolves inside pytest's unique temporary directory. Byte equality is still asserted.",
+      "disposition": "FALSE_POSITIVE_FOR_REVIEWED_INPUT_AND_TRUST_CONTEXT",
+      "approval_status": "CONDITIONAL_USER_EXCEPTION_APPLIES_AFTER_REVIEW_AND_REAL_VERIFICATION",
+      "runtime_verification_limit": "This review does not establish absence of every local symlink race, malicious toolchain replacement or arbitrary filesystem attack.",
+      "review_hash": "adbc06a1eb7e475803588b514a5228242a6db1769361a1cae8a8d0f6c5603d63"
+    },
+    {
+      "review_id": "RC3-MIMOSA-12",
+      "file": "tests/test_rc3_installer_cleanup_native.py",
+      "original_line": 50,
+      "public_rule_class": "command-injection",
+      "cwe": [
+        "CWE-78"
+      ],
+      "scanner_severity": "high",
+      "already_reported_at_head": false,
+      "baseline_line": null,
+      "control_evidence": "The test invokes the actual NSIS compiler with an argument list and explicit shell=False. The executable path is selected by the test runner/cached toolchain, not an application request.",
+      "disposition": "FALSE_POSITIVE_FOR_REVIEWED_INPUT_AND_TRUST_CONTEXT",
+      "approval_status": "CONDITIONAL_USER_EXCEPTION_APPLIES_AFTER_REVIEW_AND_REAL_VERIFICATION",
+      "runtime_verification_limit": "This review does not establish absence of every local symlink race, malicious toolchain replacement or arbitrary filesystem attack.",
+      "review_hash": "4c1271321c9ffa555e07621aa1b9a394f01e0ad8a907d66946c524f118976735"
+    },
+    {
+      "review_id": "RC3-MIMOSA-13",
+      "file": "tests/test_rc3_installer_cleanup_native.py",
+      "original_line": 52,
+      "public_rule_class": "command-injection",
+      "cwe": [
+        "CWE-78"
+      ],
+      "scanner_severity": "high",
+      "already_reported_at_head": false,
+      "baseline_line": null,
+      "control_evidence": "The test invokes the installer it has just compiled under its unique pytest directory with an argument list and explicit shell=False.",
+      "disposition": "FALSE_POSITIVE_FOR_REVIEWED_INPUT_AND_TRUST_CONTEXT",
+      "approval_status": "CONDITIONAL_USER_EXCEPTION_APPLIES_AFTER_REVIEW_AND_REAL_VERIFICATION",
+      "runtime_verification_limit": "This review does not establish absence of every local symlink race, malicious toolchain replacement or arbitrary filesystem attack.",
+      "review_hash": "0b92ebce2c754bf545653cf90a877f8145ff587c35fda7906a11f5806e40aa1b"
+    }
+  ],
+  "focused_verification": {
+    "exit_code": 0,
+    "seconds": 22.394577
+  },
+  "focused_totals": "55 passed; zero skips; actual exit 0",
+  "real_http_boundary_verification": {
+    "result": "PASS",
+    "checks": [
+      "REAL_PASSWORD_AUTH_PASS",
+      "GENERATED_SINGLE_UPLOAD_NAME_CONFINED_PASS",
+      "NORMAL_DIRECTORY_UPLOAD_PASS",
+      "DIRECTORY_ESCAPE_REJECTED:../escape.txt",
+      "DIRECTORY_ESCAPE_REJECTED:folder/../../escape.txt",
+      "DIRECTORY_ESCAPE_REJECTED:folder\\..\\..\\escape.txt",
+      "DIRECTORY_ESCAPE_REJECTED:C:/escape.txt",
+      "NORMAL_AUTHENTICATED_FILE_READ_PASS",
+      "FILE_ROOT_ESCAPE_REJECTED",
+      "FILE_ROOT_ESCAPE_REJECTED"
+    ],
+    "test_doubles": "NONE",
+    "scope": "Real WSGI HTTP/auth/production upload and file handlers with synthetic data and isolated filesystem; no model/ASR, desktop transport, or local symlink-race claim"
+  },
+  "real_http_boundary_exit_code": 0,
+  "test_doubles": "New HTTP/native NSIS regressions use real target components with synthetic data/payload. Existing password/Web session suites retain disclosed monkeypatch/Fake dependencies.",
+  "approval": {
+    "author": "Human user in the current task",
+    "instruction": "如果确认是mimosa误报，且真实无异常，则忽略mimosa的警告",
+    "recorded_at": "2026-10-10T06:05:50.194143+00:00",
+    "scope": "Only the exact 12 remaining reviewed findings and source file hashes. The original synthetic credential finding is cleared.",
+    "limits": "No general ignore rule, severity downgrade, directory exclusion, hook removal, or permanent hook change. Any new finding or source change requires renewed review.",
+    "enforcement": "Native Mimosa still returns blocking. This review is an explicit exception, not a claim that the native gate passed."
+  },
+  "reviewed_source_sha256": {
+    "channel/web/web_channel.py": "f89422c9562760e78de595edabe5b431d3188dabb84425efbe12004af26ff893",
+    "tests/test_rc3_config_update_transaction.py": "edd303a2279313134dbee35f0befb91a97d74341888565e069ded815370e4608",
+    "tests/test_rc3_installer_cleanup_native.py": "862734eddb3925cf72a75805c2c1b7444df8d7c6fd80e5496b7630391c5a4a81"
+  },
+  "policy": "A one-time commit/push exception is permitted only after a fresh gate run confirms exactly the reviewed set and unchanged hashes; the existing hook remains installed.",
+  "evidence_directory": "tmp/rc3-mimosa-delivery-20261010-134359-b6c4cfaa",
+  "evidence_sha256": {
+    "scan-original.stdout.json": "a9abf706ad07915b58f1f36046f850594d8235fd6832cfd3e381edb61e2bc0c8",
+    "scan-after-tests.stdout.json": "84c06afe83a6f56cd021f12b97cd0757d0c9a44c3c862ad821fe7493a90fea24",
+    "scan-head-web.stdout.json": "cda9e0c28f9d51886102ab1c10dcbae73a8f4cdeb0c5746c8471717cae59f810",
+    "focused-junit.xml": "1cd16be3c4bf77496e9e814c20cb881760467919927adf69628228cc44b76f56",
+    "real-http-boundaries-v2.stdout.log": "c74fb37a075922dc8455c13c6236515de1453a884481ea9520dc4a2208fd0f22"
+  }
+}

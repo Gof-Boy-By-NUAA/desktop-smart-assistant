@@ -29,8 +29,9 @@
 !macroend
 
 !macro customUnInstall
-  ; F3: the running uninstaller copy lives inside $INSTDIR and NSIS cannot
-  ; delete the directory that hosts it. Schedule a detached, delayed removal
-  ; so the empty root directory does not survive the uninstall.
-  Exec 'cmd.exe /c timeout /t 2 /nobreak >nul & rmdir /s /q "$INSTDIR"'
+  ; Release the working-directory handle before removing the empty root.
+  ; Cleanup is synchronous and non-recursive: remaining files and a new
+  ; installation must never be removed by a detached cleanup process.
+  SetOutPath "$TEMP"
+  RMDir "$INSTDIR"
 !macroend

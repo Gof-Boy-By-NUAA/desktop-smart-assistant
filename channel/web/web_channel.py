@@ -5194,6 +5194,8 @@ class ConfigHandler:
                 return json.dumps({"status": "error", "message": "no updates provided"})
 
             local_config = conf()
+            # Stage every candidate first. A rejected password or conversion
+            # must not partially change the live configuration.
             applied = {}
             for key, value in updates.items():
                 if key not in self.EDITABLE_KEYS:
@@ -5202,7 +5204,6 @@ class ConfigHandler:
                     value = int(value)
                 if key in ("use_linkai", "enable_thinking", "self_evolution_enabled"):
                     value = bool(value)
-                local_config[key] = value
                 applied[key] = value
 
             if not applied:
@@ -5227,14 +5228,10 @@ class ConfigHandler:
                             "reason": reason,
                         })
                     applied["web_password_hash"] = _hash_web_password(new_password)
-                    local_config["web_password_hash"] = applied["web_password_hash"]
                 else:
                     # Empty string explicitly clears the password.
                     applied["web_password_hash"] = ""
-                    local_config["web_password_hash"] = ""
                     password_clear_requested = True
-                # The in-memory legacy key, if any, must not survive a change.
-                local_config.pop("web_password", None)
 
             config_path = os.path.join(get_data_root(), "config.json")
             old_password_present = False  # Whether a password was set before this update
@@ -5252,6 +5249,11 @@ class ConfigHandler:
             file_cfg.update(applied)
             with open(config_path, "w", encoding="utf-8") as f:
                 json.dump(file_cfg, f, indent=4, ensure_ascii=False)
+
+            # Commit live state only after validation and persistence succeed.
+            local_config.update(applied)
+            if "web_password_hash" in applied:
+                local_config.pop("web_password", None)
 
             logger.info(f"[WebChannel] Config updated: {list(applied.keys())}")
 
